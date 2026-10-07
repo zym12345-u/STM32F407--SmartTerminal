@@ -1,0 +1,33 @@
+# ===== Keil MDK 编译产物（可再生成，不入库） =====
+MDK-ARM/Listings/
+MDK-ARM/Objects/
+MDK-ARM/RTE/
+MDK-ARM/DebugConfig/
+MDK-ARM/EventRecorderStub.scvd
+*.uvguix.*
+JLinkLog.txt
+
+# ===== 编译中间文件 =====
+*.o
+*.d
+*.crf
+*.lst
+*.dep
+*.axf
+*.htm
+*.lnp
+*.iex
+*.hex
+*.bin
+*.map
+*.elf
+*.scvd
+*.bak
+
+# ===== 本工作区非工程内容（体积大/非代码） =====
+【STM32F407VET6 网盘v5】/
+开发环境/
+案例/*.zip
+.trae/
+debug.log
+*.log
