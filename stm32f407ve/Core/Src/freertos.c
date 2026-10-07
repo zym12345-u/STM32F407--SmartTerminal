@@ -33,6 +33,7 @@
 extern void GuiTask_Create(void);
 extern void SensorTask_Create(void);
 extern void WifiTask_Create(void);
+extern void ModbusTask_Create(void);   /* Modbus RTU 从站任务(App/Tasks/ModbusTask.c) */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -153,6 +154,8 @@ void MX_FREERTOS_Init(void) {
   SensorTask_Create();
   /* WiFi 对时任务:实现在 Core/App/Tasks/WifiTask.c,ESP8266(USART3) SNTP 取网络时间 */
   WifiTask_Create();
+  /* Modbus RTU 从站任务:实现在 Core/App/Tasks/ModbusTask.c,RS485(USART2) */
+  ModbusTask_Create();
   /* 系统统计任务:5s 周期打印任务栈水位 + 各任务 CPU 占比(DWT 计数) */
   {
     static const osThreadAttr_t statsTaskAttr = {

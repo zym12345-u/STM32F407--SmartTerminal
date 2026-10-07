@@ -399,12 +399,14 @@ void UART_Printf(const char *fmt, ...)
 }
 
 /* 单字节中断接收(参考 P3_QueueDemo/usart.c):
- * 每收到 1 字节,在接收完成回调里把字节非阻塞投递到 CommandQueue,
- * 然后立即重新挂起下一次接收。整个链路不使用阻塞读,不拖死中断。
- * USART1 = 板载 USB-TTL(PA9/PA10);USART2 = PA2/PA3(需外接模块)。
- * 两个口收到的字节进同一个 CommandQueue,当前命令任务只启动 USART1。 */
+ * 每收到 1 字节, 在接收完成回调里分发, 然后立即重新挂起下一次接收。
+ * USART1 = 板载 USB-TTL(PA9/PA10): 字节投递 CommandQueue(命令任务消费);
+ * USART2 = PA2/PA3: 已改作 RS485 物理层, 字节交给 RS485 环形缓冲
+ *          (bsp_RS485.c), 不再进 CommandQueue; 命令任务只启动 USART1。 */
 static uint8_t rxData1;
 static uint8_t rxData2;
+
+extern void RS485_RxByteISR(uint8_t byte);   /* bsp_RS485.c: RS485 接收环形缓冲 */
 
 void UART1_Receive_Start(void)
 {
@@ -425,8 +427,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   }
   else if(huart->Instance == USART2)
   {
-    (void)osMessageQueuePut(CommandQueueHandle, &rxData2, 0U, 0U);
-    HAL_UART_Receive_IT(&huart2, &rxData2, 1);
+    /* USART2 = RS485 物理层: 字节进 RS485 环形缓冲(重新挂接收在 ISR 内完成) */
+    RS485_RxByteISR(rxData2);
   }
 }
 /* USER CODE END 1 */

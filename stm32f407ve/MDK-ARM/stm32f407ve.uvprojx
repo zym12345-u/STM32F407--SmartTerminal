@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F407xx,MY_DISP_HOR_RES=320,MY_DISP_VER_RES=240</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/Flash</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/Flash;../Core/App/Bsp/RS485</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -641,6 +641,11 @@
               <FileName>WifiTask.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Tasks\WifiTask.c</FilePath>
+            </File>
+            <File>
+              <FileName>ModbusTask.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Tasks\ModbusTask.c</FilePath>
             </File>
             <File>
               <FileName>PowerMgr.c</FileName>
@@ -2513,6 +2518,11 @@
               <FileName>bsp_WifiStore.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Bsp\Flash\bsp_WifiStore.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_RS485.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\RS485\bsp_RS485.c</FilePath>
             </File>
           </Files>
         </Group>
