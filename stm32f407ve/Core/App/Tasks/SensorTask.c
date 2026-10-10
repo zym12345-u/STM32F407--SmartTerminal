@@ -44,6 +44,7 @@ void StartSensorTask(void *argument)
   BH1750_Status_t stLight;
   DHT11_Status_t  stEnv;
   int tInt, tDec, hInt, hDec;   /* printf 整数/小数拆分(避免 %f) */
+  TickType_t lastWakeTime;      /* vTaskDelayUntil 的周期基准点 */
 
   /* 1. 初始化两个传感器 */
   if (BH1750_Init() == BH1750_OK)
@@ -54,7 +55,11 @@ void StartSensorTask(void *argument)
   DHT11_Init();
   UART_Printf("[SENSOR] DHT11 init ok\r\n");
 
-  /* 2. 周期采集 */
+  /* 2. 周期采集。
+   * 用 vTaskDelayUntil 而非 vTaskDelay/osDelay:后者的延时从"任务被唤醒"
+   * 开始计时,本任务每次采集+打印的执行时间会累加进周期,造成周期漂移;
+   * vTaskDelayUntil 以固定的绝对唤醒时刻为基准,周期恒为 2000ms */
+  lastWakeTime = xTaskGetTickCount();
   for (;;)
   {
     /* ---- 光照 BH1750 ---- */
@@ -101,7 +106,9 @@ void StartSensorTask(void *argument)
            g_sensorData.temp_valid  ? "ok" : "err",
            g_sensorData.light_valid ? "ok" : "err");
 
-    osDelay(2000);   /* DHT11 最小间隔 1s,留余量取 2s */
+    /* 阻塞到下一个绝对唤醒时刻:实际采样间隔严格 2000ms,
+     * DHT11 最小间隔 1s 也因此得到保证 */
+    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(2000U));
   }
 }
 

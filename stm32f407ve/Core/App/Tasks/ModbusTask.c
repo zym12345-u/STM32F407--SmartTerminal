@@ -24,6 +24,7 @@
   ******************************************************************************
   */
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "FreeRTOS.h"
@@ -251,6 +252,7 @@ static void MB_ProcessFrame(const uint8_t *frame, uint16_t len)
     /* 从站地址过滤: 非本机且非广播, 直接丢弃 */
     if (!isBroadcast && frame[0] != MB_SLAVE_ADDR)
     {
+        UART_Printf("[MB] addr=%u not mine, drop\r\n", (unsigned)frame[0]);
         return;
     }
 
@@ -319,10 +321,22 @@ void StartModbusTask(void *argument)
             else
             {
                 uint16_t i;
+                static char dbg[48];                        /* 诊断用 static, 不占栈 */
+                int dbgLen = 0;
+
                 for (i = 0U; i < cnt; i++)
                 {
                     (void)RS485_ReadByte(&frame[i]);
                 }
+
+                /* 诊断打印(临时): 从站听到的原始帧(hex, 最多 12 字节) */
+                for (i = 0U; i < cnt && i < 12U; i++)
+                {
+                    dbgLen += snprintf(&dbg[dbgLen], sizeof(dbg) - (size_t)dbgLen,
+                                       "%02X ", frame[i]);
+                }
+                UART_Printf("[MB] rx %uB: %s%s\r\n",
+                            (unsigned)cnt, dbg, (cnt > 12U) ? "..." : "");
 
                 /* 最短合法帧 = 地址+功能码+CRC(2) = 4 字节; CRC 错整帧丢弃 */
                 if (cnt >= 4U)
@@ -333,6 +347,15 @@ void StartModbusTask(void *argument)
                     {
                         MB_ProcessFrame(frame, cnt);
                     }
+                    else
+                    {
+                        UART_Printf("[MB] CRC bad calc=%04X recv=%04X\r\n",
+                                    (unsigned)crcCalc, (unsigned)crcRecv);
+                    }
+                }
+                else
+                {
+                    UART_Printf("[MB] frame too short: %uB\r\n", (unsigned)cnt);
                 }
                 lastCnt = 0U;
             }
