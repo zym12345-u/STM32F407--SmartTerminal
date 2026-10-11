@@ -10,6 +10,7 @@
 #include "cmsis_os2.h"
 #include "main.h"
 #include "FreeRTOS.h"
+#include "bsp_IWDG.h"
 #include "LEDType.h"
 
 /* LEDQueue 句柄由 freertos.c 中 CubeMX 生成的代码定义/创建,此处外部引用 */
@@ -28,8 +29,11 @@ void StartLEDTask(void *argument)
   {
     LEDMessage *msg = NULL;
 
-    /* 队列空时永久阻塞,不占用 CPU;收到消息后立即点亮/熄灭对应小灯 */
-    if(osMessageQueueGet(LEDQueueHandle, &msg, NULL, osWaitForever) == osOK)
+    Watchdog_Heartbeat(WDT_TASK_LED);
+
+    /* 队列空时阻塞 1s(而非永久),确保心跳定期上报;
+     * 收到消息后立即点亮/熄灭对应小灯 */
+    if(osMessageQueueGet(LEDQueueHandle, &msg, NULL, 1000U) == osOK)
     {
       /* 低电平点亮:On 输出 RESET,Off 输出 SET */
       GPIO_PinState pinLevel = (msg->state == LEDState_On) ? GPIO_PIN_RESET : GPIO_PIN_SET;

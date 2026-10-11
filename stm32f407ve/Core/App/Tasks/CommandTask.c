@@ -19,6 +19,7 @@
 #include "main.h"
 #include "usart.h"
 #include "FreeRTOS.h"
+#include "bsp_IWDG.h"
 #include "LEDType.h"
 #include "PowerMgr.h"
 
@@ -72,8 +73,10 @@ void StartCommandTask(void *argument)
 
   for(;;)
   {
-    /* 没有命令字节时永久阻塞,不占用 CPU */
-    if(osMessageQueueGet(CommandQueueHandle, &receive, NULL, osWaitForever) != osOK)
+    Watchdog_Heartbeat(WDT_TASK_COMMAND);
+
+    /* 没有命令字节时阻塞 1s(而非永久),确保心跳定期上报 */
+    if(osMessageQueueGet(CommandQueueHandle, &receive, NULL, 1000U) != osOK)
     {
       continue;
     }

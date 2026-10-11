@@ -27,6 +27,8 @@
 #define __BSP_RS485_H
 
 #include "stm32f4xx_hal.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 /* 手动方向控制开关: 本板 RS485 为硬件自动方向, 默认关闭。
  * 若实测发现发送后总线被拉死(收不到主站下一帧), 说明该批次收发器
@@ -80,6 +82,20 @@ void RS485_RxByteISR(uint8_t byte);
 /* HAL_UART_Receive_IT 的接收缓冲(在 bsp_RS485.c 定义)。
  * usart.c 的回调必须读这个变量才能拿到实际收到的字节 */
 extern uint8_t s_rxByte;
+
+/* ====================== 空闲中断 + 任务通知 ======================
+ * ModbusTask 阻塞在 xTaskNotifyWait 上, USART3 IDLE 中断(一帧结束)
+ * 时通过 vTaskNotifyFromISR 唤醒, 替代原来的 10ms 轮询 */
+
+/** 注册 ModbusTask 句柄, IDLE 中断里向它发通知 */
+void RS485_SetNotifyTask(TaskHandle_t task);
+
+/** 使能 USART3 IDLE 中断(在 RS485_Init 之后、任务通知注册之后调用) */
+void RS485_EnableIdleIT(void);
+
+/** USART3 IDLE 中断服务(在 stm32f4xx_it.c 的 USART3_IRQHandler 里调用)。
+ *  清 IDLE 标志并向 ModbusTask 发通知; ISR 上下文 */
+void RS485_IdleISR(void);
 
 
 #endif /* __BSP_RS485_H */

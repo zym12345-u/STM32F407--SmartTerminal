@@ -34,6 +34,7 @@
 #include "lv_port_indev.h"
 #include "bsp_LCD_ILI9341.h"
 #include "bsp_XPT2046.h"
+#include "bsp_IWDG.h"
 #include "LEDType.h"
 #include "SensorData.h"
 #include "ClockData.h"
@@ -856,6 +857,8 @@ void StartGuiTask(void *argument)
 
   for(;;)
   {
+    Watchdog_Heartbeat(WDT_TASK_GUI);
+
     if (PowerMgr_IsSleeping() != 0U)
     {
       if (XPT2046_IsPressed() != 0U)

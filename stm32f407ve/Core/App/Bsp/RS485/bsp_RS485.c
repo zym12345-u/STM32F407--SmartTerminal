@@ -30,6 +30,9 @@ static volatile uint16_t s_rxTail = 0U;
  * 不能像 USART1 那样各自用各自的 static 变量(否则回调读到的永远是初值 0) */
 uint8_t s_rxByte;
 
+/* IDLE 中断唤醒的任务句柄(ModbusTask); NULL 时不发通知 */
+static TaskHandle_t s_notifyTask = NULL;
+
 void RS485_RxByteISR(uint8_t byte)
 {
     uint16_t next = (uint16_t)((s_rxHead + 1U) % RS485_RX_BUF_SIZE);
@@ -108,4 +111,37 @@ void RS485_Send(const uint8_t *data, uint16_t len)
     /* 半双工自发自收: 发送期间本板 RX 收到自己发出的字节, 全部丢弃,
      * 避免被误当成主站的下一帧请求 */
     RS485_RxFlush();
+}
+
+/* ====================== 空闲中断 + 任务通知 ====================== */
+
+void RS485_SetNotifyTask(TaskHandle_t task)
+{
+    s_notifyTask = task;
+}
+
+void RS485_EnableIdleIT(void)
+{
+    /* 使能 USART3 IDLE 中断: 一帧结束(总线空闲超过 1 字节时间)时触发。
+     * IDLE 标志在 SR 寄存器, 需先读 SR 再读 DR 清除 */
+    __HAL_UART_ENABLE_IT(&huart3, UART_IT_IDLE);
+}
+
+void RS485_IdleISR(void)
+{
+    BaseType_t higherPriorityTaskWoken = pdFALSE;
+
+    /* 清 IDLE 标志: 读 SR 再读 DR(HAL 提供的宏) */
+    if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_IDLE) != RESET)
+    {
+        __HAL_UART_CLEAR_IDLEFLAG(&huart3);
+    }
+
+    /* 向 ModbusTask 发通知(若已注册)。eNoAction 不丢通知, 多次中断合并 */
+    if (s_notifyTask != NULL)
+    {
+        (void)xTaskNotifyFromISR(s_notifyTask, 0U, eNoAction,
+                                 &higherPriorityTaskWoken);
+        portYIELD_FROM_ISR(higherPriorityTaskWoken);
+    }
 }

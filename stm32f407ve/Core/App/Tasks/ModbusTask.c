@@ -4,9 +4,12 @@
   * @brief   Modbus RTU 从站任务(功能码 03/06/16, 异常响应, CRC16 校验)
   *
   *          架构说明:
-  *            bsp_RS485(USART3 中断收) -> 环形缓冲
-  *            -> 本任务每 10ms 轮询: 字节数稳定(帧间隔 >= 3.5T)即取出一帧
+  *            bsp_RS485(USART3 字节中断收) -> 环形缓冲
+  *            -> USART3 IDLE 中断(一帧结束) -> xTaskNotifyFromISR 唤醒本任务
   *            -> 校验从站地址/CRC -> 按功能码分发 -> 组响应帧 -> RS485_Send
+  *
+  *          帧间隔检测: 由 USART3 硬件 IDLE 中断完成(总线空闲超 1 字节时间),
+  *          比原来的 10ms 软件轮询更精确、更省 CPU(无请求时任务挂起)
   *
   *          保持寄存器映射(从站地址 1, 9600-8-N-1):
   *            0x0000  温度 x10    (RO, 传感器无效时读到 0xFFFF)
@@ -33,6 +36,7 @@
 #include "usart.h"
 
 #include "bsp_RS485.h"
+#include "bsp_IWDG.h"
 #include "SensorData.h"
 #include "LEDType.h"
 
@@ -42,8 +46,6 @@ extern osMessageQueueId_t LEDQueueHandle;
 /* ====================== 参数定义 ====================== */
 #define MB_SLAVE_ADDR           1U      /* 本从站地址 */
 #define MB_FRAME_MAX            256U    /* Modbus RTU 一帧最长 256 字节 */
-#define MB_POLL_INTERVAL_MS     10U     /* 轮询周期; 帧内字节间隔 3.5T@9600≈4ms,
-                                           连续两次轮询计数不变即认为整帧到达 */
 #define MB_REG_MAP_END          0x0012U /* 有效寄存器区间 [0, 0x0012) */
 #define MB_REG_GREEN            0x0010U
 #define MB_REG_BLUE             0x0011U
@@ -294,78 +296,75 @@ static void MB_ProcessFrame(const uint8_t *frame, uint16_t len)
 void StartModbusTask(void *argument)
 {
     (void)argument;
-    uint16_t lastCnt = 0U;
     uint8_t  frame[MB_FRAME_MAX];
 
     RS485_Init();
+
+    /* 注册本任务句柄 + 使能 USART3 IDLE 中断:
+     * 一帧结束(总线空闲)时 ISR 发任务通知唤醒本任务, 替代原 10ms 轮询 */
+    RS485_SetNotifyTask(xTaskGetCurrentTaskHandle());
+    RS485_EnableIdleIT();
+
     UART_Printf("[MODBUS] RS485 slave ok (USART3 PB10/PB11, %u-8-N-1, addr=%u)\r\n",
                 (unsigned)RS485_BAUDRATE, (unsigned)MB_SLAVE_ADDR);
 
     for (;;)
     {
-        uint16_t cnt = RS485_RxCount();
+        uint16_t cnt;
+        uint16_t i;
+        static char dbg[48];                        /* 诊断用 static, 不占栈 */
+        int dbgLen = 0;
 
+        /* 阻塞等待 IDLE 中断通知(一帧结束)。portMAX_DELAY = 死等,
+         * 无请求时本任务挂起, 不占 CPU */
+        (void)xTaskNotifyWait(0U, 0U, NULL, portMAX_DELAY);
+
+        /* 通知到达 => 一帧结束, 取出环形缓冲中所有字节 */
+        Watchdog_Heartbeat(WDT_TASK_MODBUS);
+        cnt = RS485_RxCount();
         if (cnt == 0U)
         {
-            lastCnt = 0U;
+            continue;                               /* 噪声或自发自收已被清空 */
         }
-        else if (cnt == lastCnt)
+        if (cnt > MB_FRAME_MAX)                     /* 超长帧视为噪声, 丢弃 */
         {
-            /* 连续两次轮询(>=10ms)字节数不变 => 帧间隔已过(3.5T@9600=4ms),
-             * 整帧到达; 超过单帧上限视为噪声直接冲掉 */
-            if (cnt > MB_FRAME_MAX)
+            RS485_RxFlush();
+            continue;
+        }
+
+        for (i = 0U; i < cnt; i++)
+        {
+            (void)RS485_ReadByte(&frame[i]);
+        }
+
+        /* 诊断打印: 从站听到的原始帧(hex, 最多 12 字节) */
+        for (i = 0U; i < cnt && i < 12U; i++)
+        {
+            dbgLen += snprintf(&dbg[dbgLen], sizeof(dbg) - (size_t)dbgLen,
+                               "%02X ", frame[i]);
+        }
+        UART_Printf("[MB] rx %uB: %s%s\r\n",
+                    (unsigned)cnt, dbg, (cnt > 12U) ? "..." : "");
+
+        /* 最短合法帧 = 地址+功能码+CRC(2) = 4 字节; CRC 错整帧丢弃 */
+        if (cnt >= 4U)
+        {
+            uint16_t crcCalc = MB_Crc16(frame, (uint16_t)(cnt - 2U));
+            uint16_t crcRecv = (uint16_t)((uint16_t)frame[cnt - 1U] << 8 | frame[cnt - 2U]);
+            if (crcCalc == crcRecv)
             {
-                RS485_RxFlush();
-                lastCnt = 0U;
+                MB_ProcessFrame(frame, cnt);
             }
             else
             {
-                uint16_t i;
-                static char dbg[48];                        /* 诊断用 static, 不占栈 */
-                int dbgLen = 0;
-
-                for (i = 0U; i < cnt; i++)
-                {
-                    (void)RS485_ReadByte(&frame[i]);
-                }
-
-                /* 诊断打印(临时): 从站听到的原始帧(hex, 最多 12 字节) */
-                for (i = 0U; i < cnt && i < 12U; i++)
-                {
-                    dbgLen += snprintf(&dbg[dbgLen], sizeof(dbg) - (size_t)dbgLen,
-                                       "%02X ", frame[i]);
-                }
-                UART_Printf("[MB] rx %uB: %s%s\r\n",
-                            (unsigned)cnt, dbg, (cnt > 12U) ? "..." : "");
-
-                /* 最短合法帧 = 地址+功能码+CRC(2) = 4 字节; CRC 错整帧丢弃 */
-                if (cnt >= 4U)
-                {
-                    uint16_t crcCalc = MB_Crc16(frame, (uint16_t)(cnt - 2U));
-                    uint16_t crcRecv = (uint16_t)((uint16_t)frame[cnt - 1U] << 8 | frame[cnt - 2U]);
-                    if (crcCalc == crcRecv)
-                    {
-                        MB_ProcessFrame(frame, cnt);
-                    }
-                    else
-                    {
-                        UART_Printf("[MB] CRC bad calc=%04X recv=%04X\r\n",
-                                    (unsigned)crcCalc, (unsigned)crcRecv);
-                    }
-                }
-                else
-                {
-                    UART_Printf("[MB] frame too short: %uB\r\n", (unsigned)cnt);
-                }
-                lastCnt = 0U;
+                UART_Printf("[MB] CRC bad calc=%04X recv=%04X\r\n",
+                            (unsigned)crcCalc, (unsigned)crcRecv);
             }
         }
         else
         {
-            lastCnt = cnt;                              /* 还在收, 继续等帧间隔 */
+            UART_Printf("[MB] frame too short: %uB\r\n", (unsigned)cnt);
         }
-
-        (void)osDelay(MB_POLL_INTERVAL_MS);
     }
 }
 

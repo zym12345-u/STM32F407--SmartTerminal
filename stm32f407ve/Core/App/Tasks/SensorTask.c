@@ -18,6 +18,7 @@
 #include "task.h"
 #include "bsp_BH1750.h"
 #include "bsp_DHT11.h"
+#include "bsp_IWDG.h"
 #include "SensorData.h"
 #include "usart.h"
 
@@ -62,6 +63,7 @@ void StartSensorTask(void *argument)
   lastWakeTime = xTaskGetTickCount();
   for (;;)
   {
+    Watchdog_Heartbeat(WDT_TASK_SENSOR);
     /* ---- 光照 BH1750 ---- */
     stLight = BH1750_Read(&light);
     if (stLight == BH1750_OK)

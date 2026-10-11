@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "usart.h"   /* huart1 / hdma_usart1_tx */
+#include "bsp_RS485.h"  /* RS485_IdleISR, USART3 IDLE 中断处理 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -211,7 +212,12 @@ void TIM4_IRQHandler(void)
 void USART3_IRQHandler(void)
 {
   /* USER CODE BEGIN USART3_IRQn 0 */
-
+  /* IDLE 中断(一帧结束)需在 HAL_UART_IRQHandler 之前处理:
+   * HAL 只处理 RXNE/TXE/TC 等, 不处理 IDLE, 这里手动清标志并发任务通知 */
+  if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_IDLE) != RESET)
+  {
+    RS485_IdleISR();
+  }
   /* USER CODE END USART3_IRQn 0 */
   HAL_UART_IRQHandler(&huart3);
   /* USER CODE BEGIN USART3_IRQn 1 */

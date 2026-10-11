@@ -16,6 +16,7 @@
 #include "cmsis_os2.h"
 #include "main.h"
 #include "FreeRTOS.h"
+#include "bsp_IWDG.h"
 #include "LEDType.h"
 #include "PowerMgr.h"
 
@@ -76,6 +77,8 @@ void StartKeyTask(void *argument)
   for(;;)
   {
     GPIO_PinState raw;
+
+    Watchdog_Heartbeat(WDT_TASK_KEY);
 
     /* KEY_1 = PA0,板载下拉,按下为高:稳定到高电平(上升沿)翻转绿灯 */
     raw = HAL_GPIO_ReadPin(KEY_1_GPIO_Port, KEY_1_Pin);

@@ -22,6 +22,7 @@
 
 #include "bsp_ESP8266.h"
 #include "bsp_WifiStore.h"
+#include "bsp_IWDG.h"
 #include "ClockData.h"
 #include "WifiNet.h"
 #include "usart.h"
@@ -517,6 +518,8 @@ void StartWifiTask(void *argument)
     {
         WifiCmd_t   cmd;
         osStatus_t  st;
+
+        Watchdog_Heartbeat(WDT_TASK_WIFI);
 
         /* 已连接时每秒醒一次走秒;未连接时 200ms 醒一次好快速响应配网/重连 */
         st = osMessageQueueGet(s_cmdQ, &cmd, NULL, s_connected ? 1000U : 200U);
