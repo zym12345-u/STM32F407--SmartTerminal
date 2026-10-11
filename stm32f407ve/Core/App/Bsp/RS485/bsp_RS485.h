@@ -1,20 +1,22 @@
 /**
   ******************************************************************************
   * @file    bsp_RS485.h
-  * @brief   板载 RS485 收发器驱动(USART2 接口, 硬件自动收发方向)
+  * @brief   板载 RS485 收发器驱动(USART3 接口, 硬件自动收发方向)
   *
-  *          硬件连接(重要, 见厂商例程 14-2 main.c 说明):
-  *            板载 RS485 电路出厂默认用跳线帽接到 USART3(PB10/PB11),
-  *            但本工程 USART3 已被 ESP8266 占用, 因此:
-  *              - 用杜邦线把 RS485 电路的 TX/RX 跳接到 USART2: PA2(TX)/PA3(RX)
-  *              - RS485 收发器为硬件自动方向控制(厂商例程发送时未操作任何
-  *                方向引脚), 无需 DE/RE 引脚; 若某些批次需要手动方向控制,
-  *                打开 RS485_MANUAL_DE 宏并在 RS485_DE_Set 中补上引脚
+  *          硬件连接(2026-10 调整):
+  *            板载 RS485 电路出厂默认跳线到 USART3(PB10/PB11),
+  *            本工程直接使用出厂默认接线(无需杜邦线跳接):
+  *              PB10 = USART3_TX -> RS485 电路 RX
+  *              PB11 = USART3_RX <- RS485 电路 TX
+  *            ESP8266 已改到 USART2(PA2/PA3),两者互不冲突。
+  *            RS485 收发器为硬件自动方向控制(厂商例程发送时未操作任何
+  *            方向引脚), 无需 DE/RE 引脚; 若某些批次需要手动方向控制,
+  *            打开 RS485_MANUAL_DE 宏并在 RS485_DE_Set 中补上引脚
   *
   *          说明:
-  *            1. 复用 CubeMX 生成的 huart2(usart.c), 本驱动内重新配置波特率
+  *            1. 复用 CubeMX 生成的 huart3(usart.c), 本驱动内重新配置波特率
   *            2. RX: 单字节中断 -> usart.c 的 HAL_UART_RxCpltCallback 中
-  *               USART2 分支调用 RS485_RxByteISR() -> 单生产者/单消费者环形缓冲
+  *               USART3 分支调用 RS485_RxByteISR() -> 单生产者/单消费者环形缓冲
   *            3. TX: 任务上下文轮询发送(响应帧最长 256B @9600 ≈ 267ms,
   *               只阻塞本任务, 不影响其它任务); 发送完毕后清空自发自收的回环字节
   *            4. 半双工特性: 发送时本板 RX 会收到自己发出的字节(自发自收),
@@ -41,8 +43,8 @@
 /* ====================== 对外接口 ====================== */
 
 /**
-  * @brief  初始化 RS485(重配 huart2 波特率, 清空环形缓冲, 启动接收中断)
-  * @note   依赖 usart.c 中 MX_USART2_UART_Init 已完成首次初始化
+  * @brief  初始化 RS485(重配 huart3 波特率, 清空环形缓冲, 启动接收中断)
+  * @note   依赖 usart.c 中 MX_USART3_UART_Init 已完成首次初始化
   */
 void RS485_Init(void);
 
@@ -71,9 +73,13 @@ void RS485_RxFlush(void);
   */
 void RS485_Send(const uint8_t *data, uint16_t len);
 
-/* 仅供 usart.c 的 HAL_UART_RxCpltCallback(USART2 分支)调用: 把 ISR 收到的
+/* 仅供 usart.c 的 HAL_UART_RxCpltCallback(USART3 分支)调用: 把 ISR 收到的
  * 字节推入环形缓冲。ISR 上下文, 内部不调用任何 RTOS API */
 void RS485_RxByteISR(uint8_t byte);
+
+/* HAL_UART_Receive_IT 的接收缓冲(在 bsp_RS485.c 定义)。
+ * usart.c 的回调必须读这个变量才能拿到实际收到的字节 */
+extern uint8_t s_rxByte;
 
 
 #endif /* __BSP_RS485_H */

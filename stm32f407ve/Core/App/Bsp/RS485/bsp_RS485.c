@@ -1,13 +1,13 @@
 /**
   ******************************************************************************
   * @file    bsp_RS485.c
-  * @brief   板载 RS485 收发器驱动实现(USART2, 详见 bsp_RS485.h 头部说明)
+  * @brief   板载 RS485 收发器驱动实现(USART3, 详见 bsp_RS485.h 头部说明)
   ******************************************************************************
   */
 #include "bsp_RS485.h"
 
-/* huart2 由 CubeMX 生成的 usart.c 定义 */
-extern UART_HandleTypeDef huart2;
+/* huart3 由 CubeMX 生成的 usart.c 定义 */
+extern UART_HandleTypeDef huart3;
 
 #if RS485_MANUAL_DE
 /* 若该批次板子需要手动方向控制, 在此填写实际 DE 引脚(按原理图确认) */
@@ -18,15 +18,17 @@ extern UART_HandleTypeDef huart2;
 #endif
 
 /* ====================== 接收环形缓冲(SPSC) ======================
- * 生产者: USART2 接收中断(usart.c 回调 -> RS485_RxByteISR), 只写 head
+ * 生产者: USART3 接收中断(usart.c 回调 -> RS485_RxByteISR), 只写 head
  * 消费者: ModbusTask, 只写 tail
  * head/tail 均 volatile 单写者, 无需关中断或加锁 */
 static uint8_t  s_rxBuf[RS485_RX_BUF_SIZE];
 static volatile uint16_t s_rxHead = 0U;
 static volatile uint16_t s_rxTail = 0U;
 
-/* ISR 接收字节暂存(HAL_UART_Receive_IT 要求的缓冲) */
-static uint8_t s_rxByte;
+/* ISR 接收字节暂存(HAL_UART_Receive_IT 要求的缓冲)。
+ * 非 static: usart.c 的 HAL_UART_RxCpltCallback 需要读它来获取实际收到的字节,
+ * 不能像 USART1 那样各自用各自的 static 变量(否则回调读到的永远是初值 0) */
+uint8_t s_rxByte;
 
 void RS485_RxByteISR(uint8_t byte)
 {
@@ -37,15 +39,15 @@ void RS485_RxByteISR(uint8_t byte)
         s_rxHead = next;
     }
     /* 重新挂起下一字节接收 */
-    (void)HAL_UART_Receive_IT(&huart2, &s_rxByte, 1U);
+    (void)HAL_UART_Receive_IT(&huart3, &s_rxByte, 1U);
 }
 
 void RS485_Init(void)
 {
-    /* 复用 CubeMX 的 huart2, 改为 Modbus 常用波特率后重新初始化。
+    /* 复用 CubeMX 的 huart3, 改为 Modbus 常用波特率后重新初始化。
      * HAL_UART_Init 会再次调用 MspInit(重复配置 GPIO/NVIC, 幂等无害) */
-    huart2.Init.BaudRate = RS485_BAUDRATE;
-    if (HAL_UART_Init(&huart2) != HAL_OK)
+    huart3.Init.BaudRate = RS485_BAUDRATE;
+    if (HAL_UART_Init(&huart3) != HAL_OK)
     {
         return;
     }
@@ -57,7 +59,7 @@ void RS485_Init(void)
     RS485_RxFlush();
 
     /* 启动首字节接收(后续在 RxCpltCallback -> RS485_RxByteISR 中自续) */
-    (void)HAL_UART_Receive_IT(&huart2, &s_rxByte, 1U);
+    (void)HAL_UART_Receive_IT(&huart3, &s_rxByte, 1U);
 }
 
 uint16_t RS485_RxCount(void)
@@ -96,7 +98,7 @@ void RS485_Send(const uint8_t *data, uint16_t len)
 
     /* 轮询发送: 9600 波特下 256 字节最长约 267ms, 仅阻塞 Modbus 任务自身。
      * HAL_UART_Transmit 返回时已等待 TC, 字节完整移出移位寄存器 */
-    (void)HAL_UART_Transmit(&huart2, (uint8_t *)data, len, (uint32_t)len * 4U + 50U);
+    (void)HAL_UART_Transmit(&huart3, (uint8_t *)data, len, (uint32_t)len * 4U + 50U);
 
 #if RS485_MANUAL_DE
     /* TC 已保证最后字节移位完成, 此刻拉低不会截断帧尾 */

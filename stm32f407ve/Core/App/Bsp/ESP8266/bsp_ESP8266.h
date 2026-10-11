@@ -4,17 +4,18 @@
   * @brief   板载 ESP8266 WiFi 模块 AT 指令驱动(FreeRTOS 原生实现)
   *
   *          硬件:魔女 STM32F407VET6 开发板,ESP8266 板载在板子右上角,
-  *                用跳线帽把模块 TX/RX 接到排针第 2、3 行的 USART3:
-  *                  PB10 = USART3_TX  -> ESP8266 RXD
-  *                  PB11 = USART3_RX  <- ESP8266 TXD
+  *                用杜邦线把模块 TX/RX 跳到排针的 USART2(PA2/PA3):
+  *                  PA2 = USART2_TX  -> ESP8266 RXD
+  *                  PA3 = USART2_RX  <- ESP8266 TXD
   *                波特率 115200,8N1,出厂 AT 固件(需支持 AT+CIPSNTPCFG,
   *                网盘 17-3 例程目录附 AT v1.7.1 固件与烧录工具)。
+  *                注:USART3(PB10/PB11)出厂默认给 RS485,已让给 Modbus 从站。
   *
   *          设计:
   *            - TX:任务上下文阻塞发送(AT 命令很短,115200 下最长命令约 7ms)
-  *            - RX:USART3 中断逐字节进环形缓冲,ISR 不调任何 RTOS API;
+  *            - RX:USART2 中断逐字节进环形缓冲,ISR 不调任何 RTOS API;
   *            - 等待应答用 osDelay 让出 CPU(不同于官方裸机例程的 delay_ms 忙等);
-  *            - USART3_IRQHandler 直接读寄存器,自带独立中断入口,
+  *            - USART2_IRQHandler 直接读寄存器,自带独立中断入口,
   *              不依赖 usart.c 中单一的 HAL_UART_RxCpltCallback。
   ******************************************************************************
   */
@@ -37,7 +38,7 @@ typedef struct
 } ESP8266_Time_t;
 
 
-/* 初始化 USART3(PB10/PB11)、GPIO、NVIC,清空接收环形缓冲并使能 RX 中断 */
+/* 初始化 USART2(PA2/PA3)、GPIO、NVIC,清空接收环形缓冲并使能 RX 中断 */
 void ESP8266_Init(void);
 
 /**

@@ -67,7 +67,7 @@ void StartCommandTask(void *argument)
 
   /* 任务一启动就挂起命令串口中断接收(队列已由 MX_FREERTOS_Init 先行创建)。
    * 当前命令口 = USART1(板载 USB-TTL,一根 USB 线直连即可测试);
-   * 若以后改用外接模块的 USART2,把下面一行换成 UART2_Receive_Start() 即可。 */
+   * USART2 已分配给 ESP8266,USART3 已分配给 RS485,不再作命令口。 */
   UART1_Receive_Start();
 
   for(;;)

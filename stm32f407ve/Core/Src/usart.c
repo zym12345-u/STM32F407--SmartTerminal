@@ -23,6 +23,7 @@
 /* USER CODE BEGIN 0 */
 #include "FreeRTOS.h"
 #include "cmsis_os.h"
+#include "bsp_RS485.h"   /* s_rxByte + RS485_RxByteISR, USART3 回调需要 */
 
 /* CommandQueue 由 freertos.c 中 CubeMX 生成的代码定义/创建(ISR 生产者向其投递字节) */
 extern osMessageQueueId_t CommandQueueHandle;
@@ -48,6 +49,7 @@ static void UART1_DMA_Init(void);
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart3;
 
 /* USART1 init function */
 
@@ -105,6 +107,35 @@ void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
+
+}
+/* USART3 init function */
+
+void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
 
 }
 
@@ -166,6 +197,33 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
 
   /* USER CODE END USART2_MspInit 1 */
   }
+  else if(uartHandle->Instance==USART3)
+  {
+  /* USER CODE BEGIN USART3_MspInit 0 */
+
+  /* USER CODE END USART3_MspInit 0 */
+    /* USART3 clock enable */
+    __HAL_RCC_USART3_CLK_ENABLE();
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    /**USART3 GPIO Configuration
+    PB10     ------> USART3_TX
+    PB11     ------> USART3_RX
+    */
+    GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_11;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    /* USART3 interrupt Init */
+    HAL_NVIC_SetPriority(USART3_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(USART3_IRQn);
+  /* USER CODE BEGIN USART3_MspInit 1 */
+
+  /* USER CODE END USART3_MspInit 1 */
+  }
 }
 
 void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
@@ -208,6 +266,26 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
   /* USER CODE BEGIN USART2_MspDeInit 1 */
 
   /* USER CODE END USART2_MspDeInit 1 */
+  }
+  else if(uartHandle->Instance==USART3)
+  {
+  /* USER CODE BEGIN USART3_MspDeInit 0 */
+
+  /* USER CODE END USART3_MspDeInit 0 */
+    /* Peripheral clock disable */
+    __HAL_RCC_USART3_CLK_DISABLE();
+
+    /**USART3 GPIO Configuration
+    PB10     ------> USART3_TX
+    PB11     ------> USART3_RX
+    */
+    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_10|GPIO_PIN_11);
+
+    /* USART3 interrupt Deinit */
+    HAL_NVIC_DisableIRQ(USART3_IRQn);
+  /* USER CODE BEGIN USART3_MspDeInit 1 */
+
+  /* USER CODE END USART3_MspDeInit 1 */
   }
 }
 
@@ -401,10 +479,13 @@ void UART_Printf(const char *fmt, ...)
 /* 单字节中断接收(参考 P3_QueueDemo/usart.c):
  * 每收到 1 字节, 在接收完成回调里分发, 然后立即重新挂起下一次接收。
  * USART1 = 板载 USB-TTL(PA9/PA10): 字节投递 CommandQueue(命令任务消费);
- * USART2 = PA2/PA3: 已改作 RS485 物理层, 字节交给 RS485 环形缓冲
- *          (bsp_RS485.c), 不再进 CommandQueue; 命令任务只启动 USART1。 */
+ * USART3 = PB10/PB11: RS485 物理层, 字节交给 RS485 环形缓冲
+ *          (bsp_RS485.c), 不再进 CommandQueue; 命令任务只启动 USART1。
+ * USART2 = PA2/PA3: ESP8266 WiFi, 由 bsp_ESP8266.c 直接接管中断(读寄存器),
+ *          不走本文件的 HAL 回调。 */
 static uint8_t rxData1;
-static uint8_t rxData2;
+/* USART3 的接收缓冲 s_rxByte 定义在 bsp_RS485.c, 此处不重复定义,
+ * 回调里直接读它(否则两个变量不一致会导致收到的全是 0) */
 
 extern void RS485_RxByteISR(uint8_t byte);   /* bsp_RS485.c: RS485 接收环形缓冲 */
 
@@ -413,9 +494,9 @@ void UART1_Receive_Start(void)
   HAL_UART_Receive_IT(&huart1, &rxData1, 1);
 }
 
-void UART2_Receive_Start(void)
+void UART3_Receive_Start(void)
 {
-  HAL_UART_Receive_IT(&huart2, &rxData2, 1);
+  HAL_UART_Receive_IT(&huart3, &s_rxByte, 1);
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -425,10 +506,11 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     (void)osMessageQueuePut(CommandQueueHandle, &rxData1, 0U, 0U);
     HAL_UART_Receive_IT(&huart1, &rxData1, 1);
   }
-  else if(huart->Instance == USART2)
+  else if(huart->Instance == USART3)
   {
-    /* USART2 = RS485 物理层: 字节进 RS485 环形缓冲(重新挂接收在 ISR 内完成) */
-    RS485_RxByteISR(rxData2);
+    /* USART3 = RS485 物理层: 字节进 RS485 环形缓冲(重新挂接收在 ISR 内完成)。
+     * 必须读 s_rxByte(bsp_RS485.c), 那才是 HAL 实际写入的接收缓冲 */
+    RS485_RxByteISR(s_rxByte);
   }
 }
 /* USER CODE END 1 */

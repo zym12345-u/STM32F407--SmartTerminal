@@ -239,7 +239,7 @@ static uint8_t WiFi_FullConnect(const char *ssid, const char *pwd, ClockData_t *
 {
     if (WiFi_Ready() == 0U)
     {
-        UART_Printf("[WIFI] no AT response (check jumper/USART3 rows 2-3)\r\n");
+        UART_Printf("[WIFI] no AT response (check jumper/USART2 PA2-PA3)\r\n");
         return 0U;
     }
     if (WiFi_JoinAp(ssid, pwd) == 0U)
@@ -356,7 +356,7 @@ static void DoScan(void)
     if (ESP8266_Cmd("AT\r\n", "OK", 1000U) == 0U)
     {
         n = ESP8266_CopyResponse(s_resp, (uint16_t)sizeof(s_resp));
-        UART_Printf("[WIFI] AT probe FAIL (%d bytes; check jumper rows 2-3 / module power)\r\n", (int)n);
+        UART_Printf("[WIFI] AT probe FAIL (%d bytes; check jumper PA2/PA3 / module power)\r\n", (int)n);
         if (n > 0U)
         {
             DumpRespHead("AT raw", n);
@@ -483,7 +483,7 @@ void StartWifiTask(void *argument)
 
     memset(&now, 0, sizeof(now));
     ESP8266_Init();
-    UART_Printf("[WIFI] ESP8266 USART3(PB10/PB11) init ok\r\n");
+    UART_Printf("[WIFI] ESP8266 USART2(PA2/PA3) init ok\r\n");
 
     osDelay(2000U);    /* 等模块上电稳定 + 避开开机 LVGL 首屏渲染 */
 

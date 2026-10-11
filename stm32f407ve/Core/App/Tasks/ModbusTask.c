@@ -4,7 +4,7 @@
   * @brief   Modbus RTU 从站任务(功能码 03/06/16, 异常响应, CRC16 校验)
   *
   *          架构说明:
-  *            bsp_RS485(USART2 中断收) -> 环形缓冲
+  *            bsp_RS485(USART3 中断收) -> 环形缓冲
   *            -> 本任务每 10ms 轮询: 字节数稳定(帧间隔 >= 3.5T)即取出一帧
   *            -> 校验从站地址/CRC -> 按功能码分发 -> 组响应帧 -> RS485_Send
   *
@@ -298,7 +298,7 @@ void StartModbusTask(void *argument)
     uint8_t  frame[MB_FRAME_MAX];
 
     RS485_Init();
-    UART_Printf("[MODBUS] RS485 slave ok (USART2 PA2/PA3, %u-8-N-1, addr=%u)\r\n",
+    UART_Printf("[MODBUS] RS485 slave ok (USART3 PB10/PB11, %u-8-N-1, addr=%u)\r\n",
                 (unsigned)RS485_BAUDRATE, (unsigned)MB_SLAVE_ADDR);
 
     for (;;)

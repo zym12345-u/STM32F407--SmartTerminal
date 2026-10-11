@@ -17,18 +17,24 @@
 #include <string.h>
 
 
-/* ================================ 串口硬件 ================================ */
-#define ESP_UART            USART3
-#define ESP_UART_IRQN       USART3_IRQn
+/* ================================ 串口硬件 ================================
+ * 串口分配(2026-10 调整):
+ *   USART1(PA9/PA10) = 调试口(板载 USB-TTL)
+ *   USART2(PA2/PA3)  = ESP8266 WiFi(杜邦线跳接,见 bsp_ESP8266.h)
+ *   USART3(PB10/PB11)= RS485(出厂默认接线,见 bsp_RS485.h)
+ * ESP8266 改用 USART2 后,句柄命名 huart_esp 避免与 usart.c 的全局 huart2 混淆。
+ */
+#define ESP_UART            USART2
+#define ESP_UART_IRQN       USART2_IRQn
 #define ESP_UART_PRIO       6U    /* ISR 只操作环形缓冲,不调 RTOS API,优先级 6 即可 */
 
 /* AT+CWLAP 扫描会返回十几个热点、每条约 70~90 字节,2KB 可容纳 20 条左右;
  * 超出部分丢弃,UI 只取信号最强的前 WIFI_AP_MAX 个,截断可接受 */
 #define ESP_RX_BUF_SIZE     2048U
 
-static UART_HandleTypeDef huart3;
+static UART_HandleTypeDef huart_esp;
 
-/* 单生产者(USART3 ISR)/单消费者(WifiTask)环形缓冲 */
+/* 单生产者(USART2 ISR)/单消费者(WifiTask)环形缓冲 */
 static volatile uint16_t s_rxHead = 0U;   /* ISR 写位置 */
 static volatile uint16_t s_rxTail = 0U;   /* 任务读位置 */
 static uint8_t           s_rx[ESP_RX_BUF_SIZE];
@@ -41,11 +47,11 @@ static uint16_t ESP_RingCopy(uint8_t *out, uint16_t max);
 
 
 /**
-  * @brief  USART3 中断入口(全局函数,启动文件向量表直接指向这里;
-  *         stm32f4xx_it.c 未定义 USART3_IRQHandler,无重复定义冲突)。
+  * @brief  USART2 中断入口(全局函数,启动文件向量表直接指向这里;
+  *         stm32f4xx_it.c 不再定义 USART2_IRQHandler,无重复定义冲突)。
   *         先读 SR 再读 DR 可同时清除 RXNE 与 ORE(过载)标志。
   */
-void USART3_IRQHandler(void)
+void USART2_IRQHandler(void)
 {
     uint32_t isr = ESP_UART->SR;
 
@@ -67,37 +73,37 @@ void USART3_IRQHandler(void)
 }
 
 /**
-  * @brief  USART3 + PB10/PB11 初始化(自包含,GPIO/时钟/NVIC 都在本文件配置,
-  *         不依赖 CubeMX;HAL_UART_MspInit 对 USART3 无处理,不冲突)
+  * @brief  USART2 + PA2/PA3 初始化(自包含,GPIO/时钟/NVIC 都在本文件配置,
+  *         不依赖 CubeMX;HAL_UART_MspInit 对 USART2 由本文件接管,不冲突)
   */
 static void ESP_GPIO_UART_Init(void)
 {
     GPIO_InitTypeDef gpio = {0};
 
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    __HAL_RCC_USART3_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_USART2_CLK_ENABLE();
 
-    /* PB10=USART3_TX, PB11=USART3_RX, AF7 */
-    gpio.Pin       = GPIO_PIN_10 | GPIO_PIN_11;
+    /* PA2=USART2_TX, PA3=USART2_RX, AF7 */
+    gpio.Pin       = GPIO_PIN_2 | GPIO_PIN_3;
     gpio.Mode      = GPIO_MODE_AF_PP;
     gpio.Pull      = GPIO_PULLUP;       /* RX 挂上拉,空闲时避免杂讯误触发 */
     gpio.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
-    gpio.Alternate = GPIO_AF7_USART3;
-    HAL_GPIO_Init(GPIOB, &gpio);
+    gpio.Alternate = GPIO_AF7_USART2;
+    HAL_GPIO_Init(GPIOA, &gpio);
 
-    huart3.Instance          = ESP_UART;
-    huart3.Init.BaudRate     = 115200;
-    huart3.Init.WordLength   = UART_WORDLENGTH_8B;
-    huart3.Init.StopBits     = UART_STOPBITS_1;
-    huart3.Init.Parity       = UART_PARITY_NONE;
-    huart3.Init.Mode         = UART_MODE_TX_RX;
-    huart3.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
-    huart3.Init.OverSampling = UART_OVERSAMPLING_16;
-    (void)HAL_UART_Init(&huart3);
+    huart_esp.Instance          = ESP_UART;
+    huart_esp.Init.BaudRate     = 115200;
+    huart_esp.Init.WordLength   = UART_WORDLENGTH_8B;
+    huart_esp.Init.StopBits     = UART_STOPBITS_1;
+    huart_esp.Init.Parity       = UART_PARITY_NONE;
+    huart_esp.Init.Mode         = UART_MODE_TX_RX;
+    huart_esp.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
+    huart_esp.Init.OverSampling = UART_OVERSAMPLING_16;
+    (void)HAL_UART_Init(&huart_esp);
 
     HAL_NVIC_SetPriority(ESP_UART_IRQN, ESP_UART_PRIO, 0U);
     HAL_NVIC_EnableIRQ(ESP_UART_IRQN);
-    __HAL_UART_ENABLE_IT(&huart3, UART_IT_RXNE);
+    __HAL_UART_ENABLE_IT(&huart_esp, UART_IT_RXNE);
 }
 
 static void ESP_RingFlush(void)
@@ -145,7 +151,7 @@ uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs)
 
     /* 发命令前清空旧应答,保证只匹配本次响应 */
     ESP_RingFlush();
-    (void)HAL_UART_Transmit(&huart3, (uint8_t *)cmd, (uint16_t)strlen(cmd), 2000U);
+    (void)HAL_UART_Transmit(&huart_esp, (uint8_t *)cmd, (uint16_t)strlen(cmd), 2000U);
 
     startTick = HAL_GetTick();
     do
