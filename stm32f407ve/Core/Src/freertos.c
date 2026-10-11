@@ -112,6 +112,32 @@ void MX_FREERTOS_Init(void) {
   /* 开机版本标记:烧录新固件后串口第一行应能看到本行(调度器启动前,轮询直发)。
    * 若看不到此行/时间戳是旧的,说明烧录的不是最新固件 */
   UART_Printf("\r\n[SYS] boot " __DATE__ " " __TIME__ "\r\n");
+
+  /* 复位来源诊断: 读 RCC->CSR 的复位标志后立即清除, 下次复位重新累计。
+   * 用于区分"不明复位"是否为 IWDG 咬狗(任务卡死时 MonitorTask 停止喂狗)。
+   * 注意: 上电时 NRST 引脚也被拉低过, PINRSTF 总会置位,
+   * 所以判断顺序是 看门狗/软件复位 优先, 都没有才归为上电/复位键。 */
+  if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST))
+  {
+    UART_Printf("[SYS] reset cause: IWDG watchdog!\r\n");
+  }
+  else if (__HAL_RCC_GET_FLAG(RCC_FLAG_WWDGRST))
+  {
+    UART_Printf("[SYS] reset cause: WWDG watchdog\r\n");
+  }
+  else if (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST))
+  {
+    UART_Printf("[SYS] reset cause: software (Keil flash / NVIC_SystemReset)\r\n");
+  }
+  else if (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWRRST))
+  {
+    UART_Printf("[SYS] reset cause: low-power management\r\n");
+  }
+  else
+  {
+    UART_Printf("[SYS] reset cause: power-on / NRST pin\r\n");
+  }
+  __HAL_RCC_CLEAR_RESET_FLAGS();
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */

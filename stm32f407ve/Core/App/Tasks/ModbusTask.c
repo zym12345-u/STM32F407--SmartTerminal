@@ -315,11 +315,13 @@ void StartModbusTask(void *argument)
         static char dbg[48];                        /* 诊断用 static, 不占栈 */
         int dbgLen = 0;
 
-        /* 阻塞等待 IDLE 中断通知(一帧结束)。portMAX_DELAY = 死等,
-         * 无请求时本任务挂起, 不占 CPU */
-        (void)xTaskNotifyWait(0U, 0U, NULL, portMAX_DELAY);
+        /* 等 IDLE 中断通知(一帧结束)。带 1s 超时兜底:
+         * 若用 portMAX_DELAY 死等, 主站停止轮询后本任务不再醒来、心跳停发,
+         * 3s 后会被 MonitorTask 误判卡死而停喂狗 -> IWDG 复位(真机复现过)。
+         * 有请求时仍由中断通知立即唤醒(低延迟不变), 1s 超时只是心跳保底 */
+        (void)xTaskNotifyWait(0U, 0U, NULL, pdMS_TO_TICKS(1000U));
 
-        /* 通知到达 => 一帧结束, 取出环形缓冲中所有字节 */
+        /* 通知到达或超时醒来: 先上报心跳, 再取环形缓冲 */
         Watchdog_Heartbeat(WDT_TASK_MODBUS);
         cnt = RS485_RxCount();
         if (cnt == 0U)
