@@ -35,7 +35,7 @@
 - DWT 周期统计：任务栈水位 + 各任务 CPU 占比，5s 周期打印
 
 ### V1.1 实战踩坑（已修复）
-事件驱动任务 `xTaskNotifyWait(portMAX_DELAY)` 死等通知，主站停轮询后心跳停发被误判卡死 → IWDG 误复位。修复：等待加 1s 超时兜底，心跳与外部流量解耦。详见 [.trae/skills/stm32-rs485-modbus-debug](.trae/skills/stm32-rs485-modbus-debug/SKILL.md)。
+事件驱动任务 `xTaskNotifyWait(portMAX_DELAY)` 死等通知，主站停轮询后心跳停发被误判卡死 → IWDG 误复位。修复：等待加 1s 超时兜底，心跳与外部流量解耦（`ModbusTask.c` 注释有完整记录）。
 
 ## 任务一览
 
@@ -73,6 +73,4 @@ stm32f407ve/          固件工程（CubeMX + Keil）
   Core/App/Tasks/     应用任务层
   Core/App/Bsp/       板级驱动（RS485/ESP8266/IWDG/Flash/LCD/触摸/传感器）
   Core/Src/           CubeMX 生成 + freertos.c 任务装配
-.trae/skills/         排障经验沉淀（AI 协作技能库）
-对话文件/              双智能体协作记录（本地，不入库）
 ```
