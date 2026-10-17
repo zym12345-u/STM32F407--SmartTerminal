@@ -194,6 +194,13 @@ void MX_FREERTOS_Init(void) {
     };
     osThreadNew(StartStatsTask, NULL, &statsTaskAttr);
   }
+  /* 稳态堆余量实测(应巡检 A1 要求, 2026-10-17): 所有应用任务创建完毕后打印。
+   * 此前 boot 日志的 13968B 是 WifiTask 建队列时的中途快照(其后还有
+   * Modbus/Monitor/Stats 未建), 不能用作 V1.2 预算基准。
+   * 注意 osKernelStart 还会建 Idle(512B)+TmrSvc(1024B),
+   * 故调度器启动后的真实余量 ≈ 本值 - 1536B */
+  UART_Printf("[SYS] free heap after all app tasks: %u bytes\r\n",
+              (unsigned)xPortGetFreeHeapSize());
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
