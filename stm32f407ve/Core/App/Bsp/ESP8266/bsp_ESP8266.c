@@ -155,6 +155,13 @@ uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs)
     ESP_RingFlush();
     (void)HAL_UART_Transmit(&huart_esp, (uint8_t *)cmd, (uint16_t)strlen(cmd), 2000U);
 
+    /* V1.1.3: 入口无条件上报一次心跳。
+     * V1.1.2 只在等待满 500ms 时才报, 模块秒回(OK<500ms)时整次调用零心跳;
+     * SNTP 轮询这类"1s 延时+快命令"循环会因此无限饿死心跳(真机复现:
+     * 开机自动连接后 SNTP 阶段 WifiTask 被判死, IWDG 反复复位)。
+     * 入口报一次后, 任意调用链的心跳空窗 <= 相邻调用间隔 */
+    Watchdog_Heartbeat(WDT_TASK_WIFI);
+
     startTick = HAL_GetTick();
     lastBeat  = startTick;
     do
