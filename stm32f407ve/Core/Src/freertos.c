@@ -205,6 +205,14 @@ void MX_FREERTOS_Init(void) {
    * 以出厂固化在系统存储区的容量寄存器为准(只读, 安全) */
   UART_Printf("[SYS] flash size register: %u KB\r\n",
               (unsigned)(*(__IO uint16_t *)0x1FFF7A22UL));
+  /* 地址别名甄别实验(应巡检要求, 2026-10-18): 凭据区 0x080E0000 超出 512KB
+   * 标称范围, 但实测可存可取。读两处首字对比:
+   *   二者不同 -> 0x080E0000 是独立物理区域(疑似 1MB 硅片按 512KB 打标)
+   *   二者相同 -> 地址回绕别名到 sector 7, 须立即停用内部 Flash 存凭据
+   * 纯读取, 安全; 出结果前冻结 WifiStore 改动(与巡检共识) */
+  UART_Printf("[SYS] magic@0x080E0000=0x%08lX word@0x08060000=0x%08lX\r\n",
+              (unsigned long)(*(__IO uint32_t *)0x080E0000UL),
+              (unsigned long)(*(__IO uint32_t *)0x08060000UL));
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
