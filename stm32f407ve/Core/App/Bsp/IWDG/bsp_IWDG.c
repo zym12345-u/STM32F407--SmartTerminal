@@ -50,6 +50,18 @@ void IWDG_Refresh(void)
     IWDG->KR = 0xAAAAU;
 }
 
+/* 动态修改重装载值(IWDG 运行时可改, 无需复位)。
+ * 用途(V1.1.1): 内部 Flash 扇区擦除(128KB, typ 1s/max 2s)期间 CPU 取指停顿,
+ * 全任务冻结无法喂狗, 需临时把窗口放宽到 >2s, 完成后恢复 1s。
+ * 注意: 写 RLR 后必须等 SR 清零(寄存器同步完成)再喂狗, 新窗口才生效 */
+void IWDG_SetReload(uint16_t rlr)
+{
+    IWDG->KR  = 0x5555U;            /* 解锁 PR/RLR */
+    IWDG->RLR = rlr;
+    while (IWDG->SR != 0U) { }      /* 等 RLR 同步完成 */
+    IWDG->KR  = 0xAAAAU;            /* 立即喂一次, 新窗口起算 */
+}
+
 void Watchdog_Heartbeat(WDT_TaskId_t taskId)
 {
     if (taskId < WDT_TASK_MAX)

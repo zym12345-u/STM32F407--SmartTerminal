@@ -7,6 +7,7 @@
 #include "bsp_WifiStore.h"
 
 #include "stm32f4xx_hal.h"
+#include "bsp_IWDG.h"
 #include <string.h>
 
 
@@ -64,6 +65,10 @@ uint8_t WifiStore_Save(const WifiCred_t *in)
     buf.checksum = Wifi_CalcChecksum(&buf);
     words = (uint32_t)((sizeof(buf) + 3U) / 4U);
 
+    /* V1.1.1: 擦除 128KB 扇区期间 CPU 取指停顿(typ 1s/max 2s), 全任务冻结,
+     * 1s 日常窗口必咬狗(真机已复现: 配网保存后 IWDG 复位)。
+     * 保存前放宽到 4s, 保存结束(无论成败)恢复 1s */
+    IWDG_SetReload(IWDG_RELOAD_FLASH_SAVE);
     HAL_FLASH_Unlock();
 
     erase.TypeErase    = FLASH_TYPEERASE_SECTORS;
@@ -89,6 +94,7 @@ uint8_t WifiStore_Save(const WifiCred_t *in)
     }
 
     HAL_FLASH_Lock();
+    IWDG_SetReload(IWDG_RELOAD_NORMAL);     /* 恢复 1s 日常窗口 */
 
     if (halSt != HAL_OK)
     {

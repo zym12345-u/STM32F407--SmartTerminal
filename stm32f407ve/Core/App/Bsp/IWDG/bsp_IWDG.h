@@ -37,6 +37,13 @@ void IWDG_Init(void);
 /** 喂狗(刷新计数器), 仅 MonitorTask 调用 */
 void IWDG_Refresh(void);
 
+/* 重装载档位: T = 256 * RLR / 32000(LSI) */
+#define IWDG_RELOAD_NORMAL      125U    /* ≈1s, 日常窗口 */
+#define IWDG_RELOAD_FLASH_SAVE  500U    /* ≈4s, 内部 Flash 擦除期间临时窗口(>max 2s) */
+
+/** 动态修改超时窗口(内部 Flash 擦除等长冻结操作前后配对调用) */
+void IWDG_SetReload(uint16_t rlr);
+
 /** 任务上报心跳(在任务主循环里调用, 传入本任务 ID) */
 void Watchdog_Heartbeat(WDT_TaskId_t taskId);
 
