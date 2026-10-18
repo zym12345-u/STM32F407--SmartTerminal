@@ -13,6 +13,7 @@
 
 #include "stm32f4xx_hal.h"
 #include "cmsis_os2.h"
+#include "bsp_IWDG.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -143,6 +144,7 @@ void ESP8266_Init(void)
 uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs)
 {
     uint32_t startTick;
+    uint32_t lastBeat;                  /* V1.1.2 心跳节流基准 */
 
     if ((cmd == NULL) || (expect == NULL))
     {
@@ -154,6 +156,7 @@ uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs)
     (void)HAL_UART_Transmit(&huart_esp, (uint8_t *)cmd, (uint16_t)strlen(cmd), 2000U);
 
     startTick = HAL_GetTick();
+    lastBeat  = startTick;
     do
     {
         uint16_t n = ESP_RingCopy(s_snap, (uint16_t)(sizeof(s_snap) - 1U));
@@ -177,6 +180,15 @@ uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs)
             return 0U;
         }
         osDelay(10);
+        /* V1.1.2: AT 等待最长 20s(CWJAP), 期间本循环不回到任务主循环,
+         * 心跳停发超 3s 会被 MonitorTask 误判卡死而停喂狗(真机复现:
+         * 配网 join 数秒后 IWDG 复位)。每 ~500ms 上报一次心跳。
+         * 注: ESP8266 仅 WifiTask 使用, 故固定以 WDT_TASK_WIFI 身份上报 */
+        if ((uint32_t)(HAL_GetTick() - lastBeat) >= 500U)
+        {
+            Watchdog_Heartbeat(WDT_TASK_WIFI);
+            lastBeat = HAL_GetTick();
+        }
     } while ((uint32_t)(HAL_GetTick() - startTick) < timeoutMs);
 
     return 0U;
