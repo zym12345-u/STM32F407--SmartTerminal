@@ -201,6 +201,10 @@ void MX_FREERTOS_Init(void) {
    * 故调度器启动后的真实余量 ≈ 本值 - 1536B */
   UART_Printf("[SYS] free heap after all app tasks: %u bytes\r\n",
               (unsigned)xPortGetFreeHeapSize());
+  /* 芯片 Flash 容量直读(应巡检要求, 2026-10-18): 丝印 VET6 应为 512KB,
+   * 以出厂固化在系统存储区的容量寄存器为准(只读, 安全) */
+  UART_Printf("[SYS] flash size register: %u KB\r\n",
+              (unsigned)(*(__IO uint16_t *)0x1FFF7A22UL));
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
