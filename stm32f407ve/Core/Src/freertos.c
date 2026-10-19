@@ -35,6 +35,7 @@ extern void SensorTask_Create(void);
 extern void WifiTask_Create(void);
 extern void ModbusTask_Create(void);   /* Modbus RTU 从站任务(App/Tasks/ModbusTask.c) */
 extern void MonitorTask_Create(void);  /* 心跳监控 + IWDG 喂狗(App/Tasks/MonitorTask.c) */
+#include "bsp_W25Q128.h"               /* V1.2 外部 Flash(boot 阶段 M1/M1.5 自检) */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -213,6 +214,14 @@ void MX_FREERTOS_Init(void) {
   UART_Printf("[SYS] magic@0x080E0000=0x%08lX word@0x08060000=0x%08lX\r\n",
               (unsigned long)(*(__IO uint32_t *)0x080E0000UL),
               (unsigned long)(*(__IO uint32_t *)0x08060000UL));
+  /* V1.2 存储阶段 M1+M1.5(调度器启动前执行, IWDG 未启动, 无喂狗压力):
+   * M1   = 0x9F 读 JEDEC ID 0xEF4018 + 0x90 读 0xEF17 交叉验证;
+   * M1.5 = 用户区尾扇区 擦除/页编程/回读校验, 顺手打印实测耗时
+   *        (本地无 W25Q128 手册, 实测值回填巡检草案时序表) */
+  if (W25Q128_Init() != 0U)
+  {
+    W25Q128_SelfTest();
+  }
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
