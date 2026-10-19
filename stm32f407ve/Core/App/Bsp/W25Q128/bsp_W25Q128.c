@@ -51,7 +51,32 @@ static uint8_t W25Q_SpiByte(uint8_t tx)
     return rx;
 }
 
-/* 等待 1ms: boot 阶段调度器未跑, osDelay 无当前 TCB 会崩, 退化为 HAL_Delay */
+/* 驱动内统一时基: DWT 周期计数(ms), 不依赖 HAL tick/中断/RTOS。
+ * 背景(V1.2 两次黑屏): boot 阶段(调度器启动前)HAL tick 实测不前进,
+ * HAL_Delay 死等/HAL_GetTick 超时失效, 两次上电实证; 故本驱动计时一律走 DWT。
+ * DWT 开 TRCENA 后自由计数, 32 位 @168MHz 约 25.5s 回绕, 无符号差分天然免疫;
+ * 懒使能, 重复调用无副作用 */
+static uint32_t W25Q_Millis(void)
+{
+    if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U)
+    {
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+        DWT->CTRL      |= DWT_CTRL_CYCCNTENA_Msk;
+    }
+    return DWT->CYCCNT / (SystemCoreClock / 1000U);
+}
+
+/* boot 阶段专用延时: DWT 忙等(时基见 W25Q_Millis)。不清零 CYCCNT——
+ * 保持全时单调, WaitReady 的超时判断与耗时测量共用同一时基 */
+static void W25Q_DelayMsBoot(uint32_t ms)
+{
+    uint32_t start = W25Q_Millis();
+    while ((W25Q_Millis() - start) < ms) { }
+}
+
+/* 等待 1ms: RTOS 下让出 CPU(osDelay); boot 阶段 DWT 忙等。
+ * 两个禁区: 不能退化为 osDelay(boot 无当前 TCB 会崩),
+ *           不能退化为 HAL_Delay(boot 期 HAL tick 不走, 会死等) */
 static void W25Q_Delay1ms(void)
 {
     if (osKernelGetState() == osKernelRunning)
@@ -60,25 +85,8 @@ static void W25Q_Delay1ms(void)
     }
     else
     {
-        HAL_Delay(1U);
+        W25Q_DelayMsBoot(1U);
     }
-}
-
-/* boot 阶段专用延时: DWT 周期计数忙等, 不依赖 HAL tick/任何中断/RTOS。
- * 背景(V1.2 黑屏定位): 本工程此前从未在调度器启动前调过 HAL_Delay,
- * "boot 阶段 HAL tick 是否可靠"是无出处的假设; DWT 开了 TRCENA 就自由计数,
- * 是 boot 阶段零依赖的延时手段。168MHz 下 32 位 CYCCNT 约 25.5s 才回绕 */
-static void W25Q_DelayMsBoot(uint32_t ms)
-{
-    uint32_t start;
-    uint32_t cycles = ms * (SystemCoreClock / 1000U);
-
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CYCCNT      = 0U;
-    DWT->CTRL       |= DWT_CTRL_CYCCNTENA_Msk;
-
-    start = DWT->CYCCNT;
-    while ((DWT->CYCCNT - start) < cycles) { }
 }
 
 uint8_t W25Q128_ReadStatus1(void)
@@ -94,7 +102,7 @@ uint8_t W25Q128_ReadStatus1(void)
 HAL_StatusTypeDef W25Q128_WaitReady(uint32_t timeoutMs)
 {
     uint8_t  st;
-    uint32_t t0 = HAL_GetTick();
+    uint32_t t0 = W25Q_Millis();
 
     /* ① 入口必报(D3 教训: 快响应路径若只在循环里报, 整次调用零心跳) */
     Watchdog_Heartbeat(WDT_TASK_STORAGE);
@@ -107,15 +115,15 @@ HAL_StatusTypeDef W25Q128_WaitReady(uint32_t timeoutMs)
         if ((st & 0x01U) == 0U)                 /* BUSY 清零 */
         {
             W25Q_CS_HIGH();
-            s_lastBusyMs = HAL_GetTick() - t0;
+            s_lastBusyMs = W25Q_Millis() - t0;
             return HAL_OK;
         }
         Watchdog_Heartbeat(WDT_TASK_STORAGE);   /* ② 长等待节流补报 */
         W25Q_Delay1ms();
-    } while ((HAL_GetTick() - t0) < timeoutMs);
+    } while ((W25Q_Millis() - t0) < timeoutMs);
 
     W25Q_CS_HIGH();
-    s_lastBusyMs = HAL_GetTick() - t0;
+    s_lastBusyMs = W25Q_Millis() - t0;
     return HAL_TIMEOUT;                         /* ③ 必须有超时, 不死等 */
 }
 
