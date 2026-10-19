@@ -88,7 +88,13 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  /* 故障留痕(V1.2 黑屏定位): 轮询直发, 不依赖 tick/DMA/RTOS 任一层;
+   * 失败也无所谓, 反正进死循环。用于区分"挂死"与"崩进 Fault"——
+   * 两者都是黑屏无日志, 没这行就无法区分 */
+  {
+    static const char msg[] = "\r\n[FATAL] HardFault!\r\n";
+    (void)HAL_UART_Transmit(&huart1, (const uint8_t *)msg, (uint16_t)(sizeof(msg) - 1U), 0xFFFFU);
+  }
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -103,7 +109,10 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+  {
+    static const char msg[] = "\r\n[FATAL] MemManage!\r\n";
+    (void)HAL_UART_Transmit(&huart1, (const uint8_t *)msg, (uint16_t)(sizeof(msg) - 1U), 0xFFFFU);
+  }
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -118,7 +127,10 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-
+  {
+    static const char msg[] = "\r\n[FATAL] BusFault!\r\n";
+    (void)HAL_UART_Transmit(&huart1, (const uint8_t *)msg, (uint16_t)(sizeof(msg) - 1U), 0xFFFFU);
+  }
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -133,7 +145,10 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-
+  {
+    static const char msg[] = "\r\n[FATAL] UsageFault!\r\n";
+    (void)HAL_UART_Transmit(&huart1, (const uint8_t *)msg, (uint16_t)(sizeof(msg) - 1U), 0xFFFFU);
+  }
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {

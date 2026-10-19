@@ -64,6 +64,23 @@ static void W25Q_Delay1ms(void)
     }
 }
 
+/* boot 阶段专用延时: DWT 周期计数忙等, 不依赖 HAL tick/任何中断/RTOS。
+ * 背景(V1.2 黑屏定位): 本工程此前从未在调度器启动前调过 HAL_Delay,
+ * "boot 阶段 HAL tick 是否可靠"是无出处的假设; DWT 开了 TRCENA 就自由计数,
+ * 是 boot 阶段零依赖的延时手段。168MHz 下 32 位 CYCCNT 约 25.5s 才回绕 */
+static void W25Q_DelayMsBoot(uint32_t ms)
+{
+    uint32_t start;
+    uint32_t cycles = ms * (SystemCoreClock / 1000U);
+
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT      = 0U;
+    DWT->CTRL       |= DWT_CTRL_CYCCNTENA_Msk;
+
+    start = DWT->CYCCNT;
+    while ((DWT->CYCCNT - start) < cycles) { }
+}
+
 uint8_t W25Q128_ReadStatus1(void)
 {
     uint8_t st;
@@ -257,6 +274,7 @@ uint8_t W25Q128_Init(void)
     gpio.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
     gpio.Alternate = GPIO_AF5_SPI1;
     HAL_GPIO_Init(GPIOA, &gpio);
+    UART_Printf("[W25Q] init: gpio ok\r\n");      /* 分段定位留痕(V1.2 黑屏) */
 
     /* SPI1: 与厂商一致的 Mode 3(CPOL=1/CPHA=2edge), 8bit MSB 软 NSS;
      * 里程碑先跑 10.5MHz(84MHz/8), 链路通后再逐级试 21M/42M */
@@ -278,10 +296,12 @@ uint8_t W25Q128_Init(void)
         s_initOk = 0U;
         return 0U;
     }
+    UART_Printf("[W25Q] init: spi ok\r\n");       /* 分段定位留痕(V1.2 黑屏) */
 
     /* 上电稳定延时(厂商注释: 避免烧录时多次复位导致擦写过程错误);
-     * 本函数当前只在 boot 阶段调用, IWDG 尚未启动, 300ms 无喂狗压力 */
-    HAL_Delay(300U);
+     * 用 DWT 忙等而非 HAL_Delay: 消除 boot 阶段对 HAL tick 的依赖(见函数注释) */
+    W25Q_DelayMsBoot(300U);
+    UART_Printf("[W25Q] init: delay ok\r\n");     /* 分段定位留痕(V1.2 黑屏) */
 
     /* M1 验收: 两条命令交叉验证, 全对才算链路通 */
     {
