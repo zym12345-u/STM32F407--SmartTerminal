@@ -26,9 +26,11 @@
 #define W25Q_CMD_DEVICE_ID      0x90U
 #define W25Q_CMD_JEDEC_ID       0x9FU
 
-/* ---- 超时(无本地手册, 先按巡检草案估算 max x2 取值, 实测后收紧) ---- */
-#define W25Q_ERASE_TIMEOUT_MS   1000U   /* 4KB 擦除: 唯一有出处的数字是 >150ms */
-#define W25Q_PROG_TIMEOUT_MS    100U    /* 页编程估算 max ~3ms */
+/* ---- 超时(2026-10-20 真机实测回填: 4KB 擦除 31~35ms, 256B 编程 2ms) ----
+ * 取实测值的 ~10x 余量, 既比原来的 1000/100ms 收紧 2.5~10 倍,
+ * 又给温度/工艺偏差留足空间; 仅在芯片异常时触发 */
+#define W25Q_ERASE_TIMEOUT_MS   400U    /* 实测 31~35ms, 取 400ms (~11x) */
+#define W25Q_PROG_TIMEOUT_MS    10U     /* 实测 2ms, 取 10ms (5x) */
 #define W25Q_SPI_BYTE_TIMEOUT   100U    /* 单字节 HAL 超时(10.5MHz 下 1 字节 <1us) */
 
 /* ---- CS(PC13) ---- */

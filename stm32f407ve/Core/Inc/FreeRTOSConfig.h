@@ -69,7 +69,7 @@
 #define configTICK_RATE_HZ                       ((TickType_t)1000)
 #define configMAX_PRIORITIES                     ( 56 )
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)128)
-#define configTOTAL_HEAP_SIZE                    ((size_t)20480)
+#define configTOTAL_HEAP_SIZE                    ((size_t)32768)  /* V1.2 A1: 20KB→32KB, 为 LittleFS (~1KB/实例) 预留, 扩后静态 RAM ≈107KB/128KB */
 #define configMAX_TASK_NAME_LEN                  ( 16 )
 #define configUSE_TRACE_FACILITY                 1
 #define configUSE_16_BIT_TICKS                   0

@@ -1,0 +1,22 @@
+{
+  "clangd.arguments": [
+    "--clang-tidy",
+    "--header-insertion=never",
+    "--pch-storage=memory",
+    "--background-index",
+    "--log=info"
+  ],
+  "clangd.fallbackFlags": [
+    "-target=arm-none-eabi",
+    "-std=c11"
+  ],
+  "clangd.checkUpdates": false,
+  "clangd.serverArgs": [],
+  "C_Cpp.intelliSenseEngine": "disabled",
+  "C_Cpp.autocomplete": "disabled",
+  "editor.inlayHints.enabled": "off",
+  "files.associations": {
+    "*.h": "c",
+    "*.c": "c"
+  }
+}
