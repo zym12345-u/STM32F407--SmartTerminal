@@ -74,4 +74,9 @@ uint32_t W25Q128_GetLastBusyMs(void);
  *  仅 Init 成功后调用; 测试地址避开 GBK 字库区。 */
 void W25Q128_SelfTest(void);
 
+/** M2: GBK 字库存在性检测(0x00A00000 起后 6MB)。
+ *  不解析字库格式, 只做存在性+结构合理性检测(首字节非全0xFF/边界干净/
+ *  6MB 采样覆盖/0xFF 占比<80%)。通过返回 1, 否则 0。 */
+uint8_t W25Q128_CheckGBKFont(void);
+
 #endif /* __BSP_W25Q128_H */

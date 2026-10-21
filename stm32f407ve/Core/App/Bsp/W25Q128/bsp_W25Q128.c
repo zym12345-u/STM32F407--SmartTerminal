@@ -406,3 +406,83 @@ void W25Q128_SelfTest(void)
                 (i == W25Q128_PAGE_SIZE) ? "PASS" : "FAIL",
                 (i == W25Q128_PAGE_SIZE) ? "matched" : "MISMATCH");
 }
+
+/* ====================== M2: GBK 字库存在性检测 ======================
+ * 字库区: 0x00A00000 ~ 0x01000000 (后 6MB), 厂商约定烧录宋体 12/16/24/32 字模。
+ * 本函数不解析字库格式(留待外挂字库适配阶段), 只做"存在性 + 结构合理性"检测:
+ *   ① 首 16 字节非全 0xFF(擦除态) → 有数据
+ *   ② 用户区末尾字节(0x009FFFFF)为 0xFF → 分区边界干净, 字库区不是误写
+ *   ③ 6MB 区间内 6 个采样点非全 0xFF → 数据覆盖整个区域(非零星字节)
+ *   ④ 首 256 字节中 0xFF 占比 < 80% → 非擦除态残留, 像真实字模数据
+ * 通过返回 1, 否则 0; 全程打印采样值便于人工核对 */
+uint8_t W25Q128_CheckGBKFont(void)
+{
+    static uint8_t s_buf[256U];     /* static: boot 阶段 MSP 栈仅 1KB */
+    uint8_t  head16[16];
+    uint8_t  boundary;
+    uint8_t  nonFFcnt = 0U;
+    uint8_t  ffRatio;
+    uint32_t off;
+    uint16_t i;
+    uint8_t  pass;
+
+    if (s_initOk == 0U)
+    {
+        UART_Printf("[W25Q] GBK check skipped (init failed)\r\n");
+        return 0U;
+    }
+
+    /* ① 首 16 字节: 全 0xFF = 擦除态 = 无字库 */
+    (void)W25Q128_ReadData(W25Q128_GBK_BASE, head16, 16U);
+    UART_Printf("[W25Q] GBK first 16B @0x%08lX:",
+                (unsigned long)W25Q128_GBK_BASE);
+    for (i = 0U; i < 16U; i++)
+    {
+        UART_Printf(" %02X", head16[i]);
+        if (head16[i] != 0xFFU) { nonFFcnt++; }
+    }
+    UART_Printf("\r\n");
+    if (nonFFcnt == 0U)
+    {
+        UART_Printf("[W25Q] M2 FAIL: font area all 0xFF (erased, no font)\r\n");
+        return 0U;
+    }
+
+    /* ② 分区边界: 用户区最后一字节应为 0xFF(未被字库数据覆盖) */
+    (void)W25Q128_ReadData(W25Q128_GBK_BASE - 1U, &boundary, 1U);
+    UART_Printf("[W25Q] GBK boundary byte @0x%08lX = 0x%02X (expect 0xFF)\r\n",
+                (unsigned long)(W25Q128_GBK_BASE - 1U), boundary);
+
+    /* ③ 6MB 区间均匀采样 6 点(每 1MB), 确认数据覆盖全区 */
+    nonFFcnt = 0U;
+    for (off = 0U; off < 0x00600000UL; off += 0x00100000UL)  /* 0,1,2,3,4,5 MB */
+    {
+        uint8_t b;
+        (void)W25Q128_ReadData(W25Q128_GBK_BASE + off, &b, 1U);
+        UART_Printf("[W25Q] GBK sample @+%luMB = 0x%02X%s\r\n",
+                    (unsigned long)(off / 0x00100000UL), b,
+                    (b != 0xFFU) ? "" : " (FF)");
+        if (b != 0xFFU) { nonFFcnt++; }
+    }
+
+    /* ④ 首 256 字节 0xFF 占比: 真实字模数据应 < 80% */
+    (void)W25Q128_ReadData(W25Q128_GBK_BASE, s_buf, 256U);
+    {
+        uint16_t ff = 0U;
+        for (i = 0U; i < 256U; i++)
+        {
+            if (s_buf[i] == 0xFFU) { ff++; }
+        }
+        ffRatio = (uint8_t)((uint32_t)ff * 100U / 256U);
+    }
+    UART_Printf("[W25Q] GBK first 256B: 0xFF ratio = %u%% (expect <80%%)\r\n",
+                (unsigned)ffRatio);
+
+    /* 综合判定 */
+    pass = (boundary == 0xFFU) && (nonFFcnt >= 5U) && (ffRatio < 80U);
+    UART_Printf("[W25Q] M2 %s: GBK font %s at 0x%08lX\r\n",
+                (pass != 0U) ? "PASS" : "FAIL",
+                (pass != 0U) ? "detected" : "NOT found",
+                (unsigned long)W25Q128_GBK_BASE);
+    return pass;
+}

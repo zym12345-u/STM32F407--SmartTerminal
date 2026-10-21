@@ -221,6 +221,7 @@ void MX_FREERTOS_Init(void) {
   if (W25Q128_Init() != 0U)
   {
     W25Q128_SelfTest();
+    W25Q128_CheckGBKFont();   /* M2: 检测 0xA00000 起的 GBK 字库是否存在 */
   }
   /* USER CODE END RTOS_THREADS */
 
