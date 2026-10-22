@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>s_lastBeat 锯齿波演练场 · bsp_IWDG.c</title>
+<style>
+:root {
+  --surface:#F7F7F8; --surface-muted:#EFEFF2; --text:#171717; --text-muted:#52525B;
+  --border:rgba(23,23,23,.12); --brand:#0FDC78; --brand-soft:#E5FFF2; --brand-text:#004D26;
+  --warn:#F5A524; --warn-soft:#FFF6E5; --warn-text:#7A4A00;
+  --danger:#F04438; --danger-soft:#FEECEA; --danger-text:#7A1710;
+}
+* { box-sizing:border-box; }
+body { margin:0; padding:24px 12px; background:var(--surface);
+  font:14px/20px "PingFang SC",system-ui,sans-serif; color:var(--text); }
+.w { max-width:680px; margin:0 auto; background:var(--surface); border:1px solid var(--border);
+  border-radius:12px; padding:20px; }
+.t { font-size:16px; font-weight:600; }
+.s { color:var(--text-muted); font-size:12px; margin-top:4px; }
+
+/* 三个实时值 */
+.row { display:flex; gap:10px; margin-top:16px; }
+.cell { flex:1; border:1px solid var(--border); border-radius:8px; padding:8px 12px;
+  background:var(--surface-muted); }
+.cell b { display:block; font-size:11px; color:var(--text-muted); font-weight:500; }
+.cell span { font:600 16px/24px Consolas,monospace; }
+.cell.hi span { color:var(--brand-text); }
+.cell.hi { border-color:var(--brand); background:var(--brand-soft); }
+.cell.dead span { color:var(--danger-text); }
+.cell.dead { border-color:var(--danger); background:var(--danger-soft); }
+
+/* 锯齿波图 */
+.chart { margin-top:16px; border:1px solid var(--border); border-radius:8px;
+  padding:12px; background:var(--surface-muted); }
+.bars { display:flex; gap:3px; align-items:flex-end; height:100px; position:relative; }
+.bar { flex:1; background:var(--brand); border-radius:2px 2px 0 0; min-height:2px;
+  transition:height .2s; }
+.bar.over { background:var(--danger); }
+.line { position:absolute; left:0; right:0; border-top:1px dashed var(--danger); }
+.line i { position:absolute; right:2px; top:-15px; font:10px Consolas,monospace;
+  color:var(--danger-text); font-style:normal; }
+.cnote { font-size:12px; color:var(--text-muted); margin-top:8px; }
+
+/* 参数区 */
+.pr { margin-top:16px; border:1px solid var(--border); border-radius:8px;
+  padding:10px 14px; font-size:12px; }
+.pr .r { display:flex; gap:8px; padding:2px 0; align-items:baseline; }
+.pr .n { font:600 13px Consolas,monospace; min-width:150px; }
+.pr .m { color:var(--text-muted); flex:1; }
+.pr .v { font:600 13px Consolas,monospace; }
+.c-g { color:var(--brand-text); } .c-r { color:var(--danger-text); }
+
+/* 代码区 */
+.code { margin-top:16px; background:#262626; color:#E5E5E5; border-radius:8px;
+  padding:12px 14px; font:13px/20px Consolas,monospace; white-space:pre-wrap; min-height:44px; }
+.log { margin-top:8px; font-size:12px; color:var(--text-muted); min-height:18px; }
+.log b { color:var(--danger-text); }
+
+/* 按钮 */
+.btns { display:flex; gap:8px; flex-wrap:wrap; margin-top:16px; }
+.btn { border:1px solid var(--border); background:var(--surface); border-radius:8px;
+  padding:8px 14px; font-size:12px; font-weight:600; cursor:pointer; color:var(--text); }
+.btn:hover { border-color:var(--brand); }
+.btn.p { border-color:var(--brand); background:var(--brand-soft); color:var(--brand-text); }
+
+.hint { margin-top:16px; font-size:12px; color:var(--text-muted); border-top:1px solid var(--border); padding-top:12px; }
+.hint b { color:var(--text); }
+</style>
+</head>
+<body>
+<div class="w">
+  <div class="t">s_lastBeat 锯齿波演练场</div>
+  <div class="s">bsp_IWDG.c · 一句话原理：<b>s_lastBeat 只在一个地方被写（心跳那一刻被盖成 now），它自己永不变小；会涨的是它的"年龄" now − s_lastBeat。</b></div>
+
+  <div class="row">
+    <div class="cell"><b>now（系统 tick）</b><span id="vNow">0s</span></div>
+    <div class="cell"><b>s_lastBeat[WIFI]</b><span id="vLb">0s</span></div>
+    <div class="cell" id="cAge"><b>年龄 = now − s_lastBeat</b><span id="vAge">0s</span></div>
+  </div>
+
+  <div class="chart">
+    <div class="bars" id="bars"><div class="line" style="bottom:68px"><i>3s 判死线</i></div></div>
+    <div class="cnote">年龄随时间的形状 —— 经典的<b>锯齿波</b>：心跳一报瞬间掉回 0，之后每秒匀速 +1</div>
+  </div>
+
+  <div class="pr">
+    <div class="r"><span class="n">now</span><span class="m">xTaskGetTickCount()，系统 tick，一直在涨</span><span class="v" id="p1">0s</span></div>
+    <div class="r"><span class="n c-g">s_lastBeat[WIFI]</span><span class="m">时间戳，只在 Watchdog_Heartbeat() 里被覆盖</span><span class="v" id="p2">0s</span></div>
+    <div class="r"><span class="n c-r">age &gt; 3s → 判死</span><span class="m">CheckAllAlive 里: (now − s_lastBeat[i]) &gt; pdMS_TO_TICKS(3000)</span><span class="v">3s</span></div>
+  </div>
+
+  <div class="code" id="code">// 点「时间 +1s」看年龄爬坡，点「WIFI 报心跳」看它掉回 0</div>
+  <div class="log" id="log"></div>
+
+  <div class="btns">
+    <button class="btn" id="bT">① 时间 +1s</button>
+    <button class="btn p" id="bH">② WIFI 报心跳</button>
+    <button class="btn" id="bR">重置</button>
+  </div>
+
+  <div class="hint">
+    <b>复习路径：</b>连点 ① 四次，看年龄 1→2→3→4 变红（超过判死线）；再点 ② 瞬间归 0。
+    然后想三个问题：<b>1.</b> 两次心跳之间 s_lastBeat 动了吗？（没动，动的是 now）
+    <b>2.</b> D3 那次 CWJAP 20s 慢等待，为什么必然复位？（20s 执行不到心跳，年龄必破 3s）
+    <b>3.</b> 为什么用无符号减法 now − s_lastBeat？（tick 49 天回绕时差值仍然正确）
+  </div>
+</div>
+
+<script>
+(function () {
+  var now = 0, lb = 0, hist = [];
+  var $ = function (id) { return document.getElementById(id); };
+
+  function render() {
+    var age = now - lb;
+    $('vNow').textContent = now + 's';
+    $('vLb').textContent  = lb  + 's';
+    $('vAge').textContent = age + 's';
+    $('p1').textContent = now + 's';
+    $('p2').textContent = lb + 's';
+    $('cAge').className = 'cell' + (age > 3 ? ' dead' : (age === 0 ? ' hi' : ''));
+
+    var b = $('bars');
+    var olds = b.querySelectorAll('.bar');
+    for (var k = 0; k < olds.length; k++) olds[k].remove();
+    for (var j = 0; j < hist.length; j++) {
+      var d = document.createElement('div');
+      d.className = 'bar' + (hist[j] > 3 ? ' over' : '');
+      d.style.height = Math.min(hist[j] / 4.4 * 100, 100) + '%';
+      b.appendChild(d);
+    }
+  }
+
+  $('bT').onclick = function () {
+    now++;
+    hist.push(now - lb); if (hist.length > 16) hist.shift();
+    $('code').textContent = '/* 时间过去 1s, 没有任何代码执行 */\n/* 但 age = now - s_lastBeat 被动变大了 */';
+    $('log').textContent = (now - lb) > 3 ? '年龄超过 3s！MonitorTask 下次巡查就判 WIFI 卡死、拒喂狗' : '';
+    render();
+  };
+
+  $('bH').onclick = function () {
+    lb = now;
+    hist.push(0); if (hist.length > 16) hist.shift();
+    $('code').textContent = 'Watchdog_Heartbeat(WDT_TASK_WIFI);\n\n/* 全系统唯一写它的地方(bsp_IWDG.c:69): */\ns_lastBeat[taskId] = xTaskGetTickCount();';
+    $('log').textContent = '时间戳被盖成 now → 年龄瞬间归 0，锯齿波完成一个齿';
+    render();
+  };
+
+  $('bR').onclick = function () {
+    now = 0; lb = 0; hist = [];
+    $('code').textContent = '/* 已重置。static volatile uint32_t s_lastBeat[9] = {0} */\n/* 出生值 0 = "从未上报", CheckAllAlive 会跳过不判死 */';
+    $('log').textContent = '';
+    render();
+  };
+
+  render();
+})();
+</script>
+</body>
+</html>

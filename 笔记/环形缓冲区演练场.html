@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>环形缓冲区演练场 · RS485</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8;
+  --surface-muted: #EFEFF2;
+  --text: #171717;
+  --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+  --brand: #0FDC78;
+  --brand-soft: #E5FFF2;
+  --brand-text: #004D26;
+  --brand-on: #004D26;
+  --accent: #27D2BF;
+  --accent-soft: #EAFBF8;
+  --accent-text: #0F766E;
+  --radius: 8px;
+  --radius-card: 12px;
+  --radius-full: 999px;
+  --spacer-4: 4px;
+  --spacer-8: 8px;
+  --spacer-12: 12px;
+  --spacer-16: 16px;
+  --spacer-20: 20px;
+  --font-sans: "SF Pro Text", "PingFang SC", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --text-caption: 12px/18px;
+  --text-body: 14px/20px;
+  --text-title: 16px/24px;
+  --text-code: 13px/20px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-widget-theme]) {
+    color-scheme: dark;
+    --surface: #171717;
+    --surface-muted: #262626;
+    --text: #E5E5E5;
+    --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #32F08C;
+    --brand-soft: #004D26;
+    --brand-text: #E5FFF2;
+    --accent-soft: #123F3C;
+    --accent-text: #CCFBF1;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: var(--spacer-24) 0; background: var(--surface); font: var(--weight-regular) var(--text-body) var(--font-sans); }
+.rb-widget { max-width: 720px; margin: 0 auto; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-card); padding: var(--spacer-20); }
+.rb-title { font: var(--weight-medium) var(--text-title) var(--font-sans); }
+.rb-sub { color: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); margin-top: var(--spacer-4); }
+.rb-legend { display: flex; gap: var(--spacer-16); margin-top: var(--spacer-12); align-items: center; flex-wrap: wrap; }
+.rb-chip { font: var(--weight-medium) var(--text-caption) var(--font-sans); border-radius: var(--radius-full); padding: 0 var(--spacer-8); line-height: 18px; display: inline-block; }
+.rb-chip-h { background: var(--brand); color: var(--brand-on); }
+.rb-chip-t { background: var(--accent-soft); color: var(--accent-text); border: 1px solid var(--accent); }
+.rb-legend-note { color: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); }
+.rb-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: var(--spacer-4); max-width: 480px; margin: var(--spacer-16) auto 0; }
+.rb-idx { text-align: center; color: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-mono); }
+.rb-cell { height: 44px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); font: var(--weight-medium) var(--text-code) var(--font-mono); }
+.rb-cell.filled { background: var(--surface-muted); }
+.rb-ptr { height: 20px; display: flex; align-items: center; justify-content: center; }
+.rb-ptr .rb-chip { visibility: hidden; }
+.rb-code { margin-top: var(--spacer-16); background: var(--surface-muted); border-radius: var(--radius); padding: var(--spacer-12); font: var(--weight-medium) var(--text-code) var(--font-mono); white-space: pre-wrap; word-break: break-all; }
+.rb-note { margin-top: var(--spacer-4); color: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); }
+.rb-status { margin-top: var(--spacer-12); display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: var(--spacer-8); }
+.rb-count { font: var(--weight-medium) var(--text-code) var(--font-mono); }
+.rb-state { color: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); }
+.rb-btns { margin-top: var(--spacer-12); display: flex; gap: var(--spacer-8); flex-wrap: wrap; }
+.rb-btn { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: var(--radius); padding: var(--spacer-8) var(--spacer-12); font: var(--weight-medium) var(--text-body) var(--font-sans); cursor: pointer; transition: border-color .12s; }
+.rb-btn:hover { border-color: var(--brand); }
+.rb-btn-primary { border-color: var(--brand); color: var(--brand-text); }
+
+/* 参数说明区：把 count 公式里的 head/tail/N 三个参数明确写出来 */
+.rb-params {
+  margin-top: var(--spacer-16);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--spacer-12) var(--spacer-16);
+}
+.rb-params-title { font: var(--weight-medium) var(--text-caption) var(--font-sans); color: var(--text-muted); margin-bottom: var(--spacer-8); }
+.rb-param-row { display: flex; align-items: baseline; gap: var(--spacer-12); margin: var(--spacer-4) 0; flex-wrap: wrap; }
+.rb-param-name { font: var(--weight-medium) var(--text-code) var(--font-mono); min-width: 56px; }
+.rb-param-name.head { color: var(--brand); }
+.rb-param-name.tail { color: var(--accent); }
+.rb-param-desc { color: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); }
+.rb-param-val { font: var(--weight-medium) var(--text-code) var(--font-mono); margin-left: auto; }
+.rb-formula { margin-top: var(--spacer-8); font: var(--weight-medium) var(--text-code) var(--font-mono); color: var(--text); }
+.rb-formula .var-head { color: var(--brand); font-weight: 600; }
+.rb-formula .var-tail { color: var(--accent); font-weight: 600; }
+.rb-formula .var-n { font-weight: 600; }
+.rb-tip { margin-top: var(--spacer-12); color: var(--text-muted); font: var(--weight-regular) var(--text-caption) var(--font-sans); border-top: 1px solid var(--border); padding-top: var(--spacer-12); }
+</style>
+</head>
+<body>
+<div class="rb-widget">
+  <div class="rb-title">环形缓冲区演练场</div>
+  <div class="rb-sub">bsp_RS485.c 的 8 格缩影（真实是 256 格，逻辑逐行一致）</div>
+  <div class="rb-legend">
+    <span><span class="rb-chip rb-chip-h">H</span> <span class="rb-legend-note">head · ISR 写</span></span>
+    <span><span class="rb-chip rb-chip-t">T</span> <span class="rb-legend-note">tail · 任务读</span></span>
+    <span class="rb-legend-note">有效数据 = T 到 H 之间的格子</span>
+  </div>
+  <div class="rb-grid"></div>
+  <div class="rb-code">/* 空缓冲: s_rxTail == s_rxHead */</div>
+  <div class="rb-note">head 追 tail：相遇即空，差一格即满</div>
+  <div class="rb-status">
+    <span class="rb-count">count = (0 + 8 − 0) % 8 = 0</span>
+    <span class="rb-state">空</span>
+  </div>
+
+  <!-- 参数说明：count 公式用到的三个变量 -->
+  <div class="rb-params">
+    <div class="rb-params-title">count 公式的三个参数</div>
+    <div class="rb-param-row">
+      <span class="rb-param-name head">head</span>
+      <span class="rb-param-desc">写指针（下一个要写入的坑位），仅 ISR 推进</span>
+      <span class="rb-param-val" data-var="head">0</span>
+    </div>
+    <div class="rb-param-row">
+      <span class="rb-param-name tail">tail</span>
+      <span class="rb-param-desc">读指针（下一个要读出的坑位），仅任务推进</span>
+      <span class="rb-param-val" data-var="tail">0</span>
+    </div>
+    <div class="rb-param-row">
+      <span class="rb-param-name">N</span>
+      <span class="rb-param-desc">缓冲大小（演示 8，真实代码 RS485_RX_BUF_SIZE = 256）</span>
+      <span class="rb-param-val">8</span>
+    </div>
+    <div class="rb-formula">
+      count = (<span class="var-head">head</span> + N − <span class="var-tail">tail</span>) % N
+    </div>
+  </div>
+
+  <div class="rb-btns">
+    <button class="rb-btn rb-btn-primary" data-act="w1">写 1 字节（ISR）</button>
+    <button class="rb-btn" data-act="r1">读 1 字节（任务）</button>
+    <button class="rb-btn" data-act="w3">连写 3 字节</button>
+    <button class="rb-btn" data-act="flush">RxFlush()</button>
+    <button class="rb-btn" data-act="reset">复位</button>
+  </div>
+  <div class="rb-tip">复习路径：①先看参数说明里 head/tail/N 是谁；②点「写 1 字节」观察 head 前进、count 增长；③点「读 1 字节」观察 tail 追 head；④连续写满验证"牺牲一格"的满判定；⑤RxFlush 就是把 tail 甩到 head。</div>
+</div>
+
+<script>
+(function () {
+  var N = 8;
+  var head = 0, tail = 0, nextChar = 0;
+  var buf = [];
+  for (var i = 0; i < N; i++) buf.push('');
+  var grid = document.querySelector('.rb-grid');
+  var codeEl = document.querySelector('.rb-code');
+  var noteEl = document.querySelector('.rb-note');
+  var countEl = document.querySelector('.rb-count');
+  var stateEl = document.querySelector('.rb-state');
+  var headVal = document.querySelector('[data-var="head"]');
+  var tailVal = document.querySelector('[data-var="tail"]');
+  var cells = [], hSlots = [], tSlots = [];
+  var i;
+  for (i = 0; i < N; i++) { var d = document.createElement('div'); d.className = 'rb-idx'; d.textContent = i; grid.appendChild(d); }
+  for (i = 0; i < N; i++) { var c = document.createElement('div'); c.className = 'rb-cell'; grid.appendChild(c); cells.push(c); }
+  for (i = 0; i < N; i++) { var h = document.createElement('div'); h.className = 'rb-ptr'; h.innerHTML = '<span class="rb-chip rb-chip-h">H</span>'; grid.appendChild(h); hSlots.push(h.firstChild); }
+  for (i = 0; i < N; i++) { var t = document.createElement('div'); t.className = 'rb-ptr'; t.innerHTML = '<span class="rb-chip rb-chip-t">T</span>'; grid.appendChild(t); tSlots.push(t.firstChild); }
+  function setCode(code, note) { codeEl.textContent = code; noteEl.textContent = note; }
+  function render() {
+    for (var i = 0; i < N; i++) {
+      cells[i].textContent = buf[i];
+      cells[i].classList.toggle('filled', buf[i] !== '');
+      hSlots[i].style.visibility = (i === head) ? 'visible' : 'hidden';
+      tSlots[i].style.visibility = (i === tail) ? 'visible' : 'hidden';
+    }
+    var count = (head + N - tail) % N;
+    countEl.textContent = 'count = (' + head + ' + 8 − ' + tail + ') % 8 = ' + count;
+    stateEl.textContent = count === 0 ? '空' : (count === N - 1 ? '满（7/7，第 8 格被牺牲）' : '有数据（' + count + '/7）');
+    headVal.textContent = head;
+    tailVal.textContent = tail;
+  }
+  function writeOne() {
+    var next = (head + 1) % N;
+    if (next === tail) {
+      setCode('next == s_rxTail  →  丢弃新字节（head 不动）', '满判定的代价：8 格最多存 7 字节，空出 1 格换「满/空」可区分');
+      return false;
+    }
+    var ch = String.fromCharCode(65 + nextChar);
+    nextChar = (nextChar + 1) % 26;
+    buf[head] = ch;
+    setCode('s_rxBuf[s_rxHead] = \'' + ch + '\';  s_rxHead = (head+1)%8 → ' + next, 'ISR 生产者只动 head；tail 它只读不写');
+    head = next;
+    return true;
+  }
+  document.querySelector('[data-act="w1"]').addEventListener('click', function () { writeOne(); render(); });
+  document.querySelector('[data-act="w3"]').addEventListener('click', function () { writeOne() && writeOne() && writeOne(); render(); });
+  document.querySelector('[data-act="r1"]').addEventListener('click', function () {
+    if (tail === head) {
+      setCode('s_rxTail == s_rxHead  →  return 0（空，无字节可读）', '空判定：两个指针相遇');
+    } else {
+      var ch = buf[tail];
+      buf[tail] = '';
+      setCode('*byte = s_rxBuf[s_rxTail](\'' + ch + '\');  s_rxTail = (tail+1)%8 → ' + ((tail + 1) % N), '任务消费者只动 tail；head 它只读不写');
+      tail = (tail + 1) % N;
+    }
+    render();
+  });
+  document.querySelector('[data-act="flush"]').addEventListener('click', function () {
+    tail = head;
+    for (var i = 0; i < N; i++) buf[i] = '';
+    setCode('s_rxTail = s_rxHead;', '逻辑上全部丢弃（物理字节仍在数组里，图中已隐藏）——你光标停的那行');
+    render();
+  });
+  document.querySelector('[data-act="reset"]').addEventListener('click', function () {
+    head = 0; tail = 0; nextChar = 0;
+    for (var i = 0; i < N; i++) buf[i] = '';
+    setCode('/* 空缓冲: s_rxTail == s_rxHead */', 'head 追 tail：相遇即空，差一格即满');
+    render();
+  });
+  render();
+})();
+</script>
+</body>
+</html>

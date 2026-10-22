@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>看门狗心跳演练场 · bsp_IWDG.c</title>
+<style>
+:root {
+  --surface:#F7F7F8; --surface-muted:#EFEFF2; --text:#171717; --text-muted:#52525B;
+  --border:rgba(23,23,23,.12); --brand:#0FDC78; --brand-soft:#E5FFF2; --brand-text:#004D26;
+  --warn:#F5A524; --warn-soft:#FFF6E5; --warn-text:#7A4A00;
+  --danger:#F04438; --danger-soft:#FEECEA; --danger-text:#7A1710;
+}
+* { box-sizing:border-box; }
+body { margin:0; padding:24px 12px; background:var(--surface);
+  font:14px/20px "PingFang SC",system-ui,sans-serif; color:var(--text); }
+.w { max-width:680px; margin:0 auto; background:var(--surface); border:1px solid var(--border);
+  border-radius:12px; padding:20px; }
+.t { font-size:16px; font-weight:600; }
+.s { color:var(--text-muted); font-size:12px; margin-top:4px; }
+
+/* 计数器 */
+.g { height:26px; background:var(--surface-muted); border:1px solid var(--border);
+  border-radius:6px; overflow:hidden; margin-top:16px; }
+.gf { height:100%; background:var(--brand); transition:width .25s, background .25s; }
+.gf.warn { background:var(--warn); } .gf.danger { background:var(--danger); }
+.gv { font-size:12px; color:var(--text-muted); margin-top:4px; }
+.gv b { color:var(--text); font-family:Consolas,monospace; }
+
+/* 任务心跳 */
+.tasks { display:flex; gap:6px; flex-wrap:wrap; margin-top:16px; }
+.tk { flex:1 1 96px; border:1px solid var(--border); border-radius:6px; padding:4px 8px;
+  background:var(--surface-muted); }
+.tk b { display:block; font:600 11px/16px Consolas,monospace; color:var(--text-muted); }
+.tk span { font:600 13px/20px Consolas,monospace; }
+.tk.ok { border-color:var(--brand); background:var(--brand-soft); }
+.tk.ok b, .tk.ok span { color:var(--brand-text); }
+.tk.bad { border-color:var(--danger); background:var(--danger-soft); }
+.tk.bad b, .tk.bad span { color:var(--danger-text); }
+.tk.stuck { border-style:dashed; }
+.tk.skip { opacity:.5; }
+
+/* 参数区 */
+.pr { margin-top:16px; border:1px solid var(--border); border-radius:8px;
+  padding:10px 14px; font-size:12px; }
+.pr .r { display:flex; gap:8px; padding:2px 0; align-items:baseline; }
+.pr .n { font:600 13px Consolas,monospace; min-width:110px; }
+.pr .m { color:var(--text-muted); flex:1; }
+.pr .v { font:600 13px Consolas,monospace; }
+.c-g { color:var(--brand-text); } .c-r { color:var(--danger-text); } .c-y { color:var(--warn-text); }
+
+/* 代码区 */
+.code { margin-top:16px; background:#262626; color:#E5E5E5; border-radius:8px;
+  padding:12px 14px; font:13px/20px Consolas,monospace; white-space:pre-wrap; min-height:44px; }
+.log { margin-top:8px; font-size:12px; color:var(--text-muted); min-height:18px; }
+.log b { color:var(--danger-text); }
+
+/* 按钮 */
+.btns { display:flex; gap:8px; flex-wrap:wrap; margin-top:16px; }
+.btn { border:1px solid var(--border); background:var(--surface); border-radius:8px;
+  padding:8px 14px; font-size:12px; font-weight:600; cursor:pointer; color:var(--text); }
+.btn:hover { border-color:var(--brand); }
+.btn.p { border-color:var(--brand); background:var(--brand-soft); color:var(--brand-text); }
+.btn.d { border-color:var(--danger); background:var(--danger-soft); color:var(--danger-text); }
+
+.hint { margin-top:16px; font-size:12px; color:var(--text-muted); border-top:1px solid var(--border); padding-top:12px; }
+.hint b { color:var(--text); }
+</style>
+</head>
+<body>
+<div class="w">
+  <div class="t">看门狗心跳演练场</div>
+  <div class="s">bsp_IWDG.c · 一句话原理：<b>MonitorTask 每 500ms 查一圈心跳，全活才喂狗；有任务 3s 没报，就谁也不喂，计数器数到 0，整板复位。</b></div>
+
+  <div class="g"><div class="gf" id="gf"></div></div>
+  <div class="gv">IWDG 递减计数器 <b id="gv">125 / 125</b> · 数到 0 就复位 · 喂一次狗（写 0xAAAA）装回 125</div>
+
+  <div class="tasks" id="tasks"></div>
+
+  <div class="pr">
+    <div class="r"><span class="n c-g">counter</span><span class="m">硬件递减计数器，喂狗时装回 RLR=125</span><span class="v" id="p1">125</span></div>
+    <div class="r"><span class="n">now</span><span class="m">当前时间（秒），每点一次「时间+0.5s」前进</span><span class="v" id="p2">0.0s</span></div>
+    <div class="r"><span class="n c-y">s_lastBeat[i]</span><span class="m">各任务最后心跳时间戳，Watchdog_Heartbeat() 只更新它，不喂狗</span><span class="v">见上</span></div>
+    <div class="r"><span class="n c-r">判死公式</span><span class="m">now − s_lastBeat[i] > 3s 判卡死（CheckAllAlive 返回 0）</span><span class="v">3s</span></div>
+  </div>
+
+  <div class="code" id="code">// 点下面的按钮，这里显示刚执行的真实代码</div>
+  <div class="log" id="log"></div>
+
+  <div class="btns">
+    <button class="btn" id="b1">① 各任务报心跳</button>
+    <button class="btn p" id="b2">② MonitorTask 巡查一圈</button>
+    <button class="btn" id="b3">③ 时间 +0.5s</button>
+    <button class="btn d" id="b4">④ WIFI 任务卡死</button>
+    <button class="btn" id="b5">重置演练场</button>
+  </div>
+
+  <div class="hint">
+    <b>复习路径：</b>先 ①②③ 循环几次，感受「报心跳 → 巡查喂狗 → 计数器回满」的正常节奏；
+    再按 ④ 让 WIFI 卡死，继续 ①③ —— 注意 <b>① 时 WIFI 不再上报</b>，3s 后按 ② 会显示「不喂狗」，
+    之后只按 ③ 让计数器一路数到 0，看整板复位。最后想一个问题：<b>挂的是 WIFI 一个任务，为什么复位的是整块板子？</b>
+  </div>
+</div>
+
+<script>
+(function () {
+  var NAMES = ['GUI','SENSOR','WIFI','MODBUS','KEY','LED','COMMAND','MONITOR','STORAGE'];
+  var MON = 7, WIFI = 2, RELOAD = 125, STEP_S = 0.5, STEP_CNT = 62; /* 0.5s ≈ 125的一半 */
+  var now, counter, lastBeat, stuck;
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function reset() {
+    now = 0; counter = RELOAD; stuck = false;
+    lastBeat = []; for (var i = 0; i < NAMES.length; i++) lastBeat.push(null); /* null=从未上报 */
+    $('b4').textContent = '④ WIFI 任务卡死';
+    say('/* IWDG_Init(): KR=0xCCCC 启动, PR=256分频, RLR=125, 首次喂狗 */\n/* 窗口 = 256×125/32000 ≈ 1.0s */');
+    $('log').textContent = '';
+    render();
+  }
+
+  function say(c) { $('code').textContent = c; }
+
+  function render() {
+    var pct = counter / RELOAD * 100;
+    var gf = $('gf');
+    gf.style.width = pct + '%';
+    gf.className = 'gf' + (counter === 0 ? ' danger' : (counter <= 40 ? ' warn' : ''));
+    $('gv').textContent = counter + ' / ' + RELOAD;
+    $('p1').textContent = counter;
+    $('p2').textContent = now.toFixed(1) + 's';
+
+    var box = $('tasks'); box.innerHTML = '';
+    for (var i = 0; i < NAMES.length; i++) {
+      var d = document.createElement('div');
+      var cls = 'tk', txt;
+      if (i === MON) { cls += ' skip'; txt = '自己·不查'; }
+      else if (lastBeat[i] === null) { txt = '未上报'; }
+      else {
+        var age = now - lastBeat[i];
+        txt = age.toFixed(1) + 's 前';
+        cls += (age > 3 ? ' bad' : ' ok');
+      }
+      if (i === WIFI && stuck) cls += ' stuck';
+      d.className = cls;
+      d.innerHTML = '<b>' + NAMES[i] + (i === WIFI && stuck ? ' ✕卡死' : '') + '</b><span>' + txt + '</span>';
+      box.appendChild(d);
+    }
+  }
+
+  /* ① 报心跳 */
+  $('b1').onclick = function () {
+    for (var i = 0; i < NAMES.length; i++) {
+      if (i === WIFI && stuck) continue;
+      lastBeat[i] = now;
+    }
+    say('Watchdog_Heartbeat(WDT_TASK_xxx);\n\n/* 函数体就一行, 注意它不喂狗: */\ns_lastBeat[taskId] = xTaskGetTickCount();');
+    $('log').textContent = stuck ? '各任务已上报 —— 但 WIFI 卡死了，它的 s_lastBeat 还停在原地' : '全部任务已上报，s_lastBeat 全部更新为 now';
+    render();
+  };
+
+  /* ② 巡查 */
+  $('b2').onclick = function () {
+    var dead = -1;
+    for (var i = 0; i < NAMES.length; i++) {
+      if (i === MON || lastBeat[i] === null) continue;
+      if (now - lastBeat[i] > 3) { dead = i; break; }
+    }
+    if (dead < 0) {
+      counter = RELOAD;
+      say('if (Watchdog_CheckAllAlive()) {   /* 返回 1: 全活 */\n    IWDG_Refresh();                /* IWDG->KR = 0xAAAA */\n}');
+      $('log').textContent = '巡查通过 → 喂狗，计数器装回 125';
+    } else {
+      say('if ((now - s_lastBeat[' + NAMES[dead] + ']) > pdMS_TO_TICKS(3000))\n    return 0U;      /* 有任务卡死 → 不喂狗 */');
+      $('log').textContent = NAMES[dead] + ' 已超过 3s 没上报 → 这一轮不喂狗，计数器继续往下数！';
+    }
+    render();
+  };
+
+  /* ③ 时间流逝 */
+  $('b3').onclick = function () {
+    now += STEP_S; counter -= STEP_CNT;
+    if (counter <= 0) {
+      counter = 0; render();
+      say('/* 没有人写 0xAAAA, 计数器数到 0 */\n/* IWDG 是硬件: 不看谁卡死, 直接拉低复位脚 → 整板复位 */');
+      $('log').innerHTML = '<b>复位！系统重启，一切从头开始。</b>（演练场已自动重置）';
+      setTimeout(reset, 1500);
+      return;
+    }
+    say('/* 时间流逝 0.5s... IWDG 计数器 -62 */\n/* 硬件在后台自动递减, 不需要任何代码 */');
+    render();
+  };
+
+  /* ④ 卡死/恢复 */
+  $('b4').onclick = function () {
+    stuck = !stuck;
+    $('b4').textContent = stuck ? '④ WIFI 恢复正常' : '④ WIFI 任务卡死';
+    say(stuck ? '/* WIFI 任务进入死循环, 再也执行不到 Watchdog_Heartbeat() */\nwhile(1) { /* 卡死 */ }'
+              : '/* WIFI 恢复, 下次按①它会重新上报 */');
+    $('log').textContent = stuck ? 'WIFI 卡死了。继续按①③观察它的时间戳越落越远' : '';
+    render();
+  };
+
+  $('b5').onclick = reset;
+  reset();
+})();
+</script>
+</body>
+</html>
