@@ -1,17 +1,17 @@
 /**
   ******************************************************************************
   * @file    bsp_lfs_port.c
-  * @brief   LittleFS 块设备适配层(W25Q128 -> lfs_config 四函数)
+  * @brief   LittleFS ???豸?????(W25Q128 -> lfs_config ?????)
   *
-  *          设计要点:
-  *            1. 四函数 read/prog/erase/sync 全部薄封装到 W25Q128 驱动,
-  *               超时/心跳/字库写保护都留在驱动层, 这里不重复实现
-  *            2. prog 必须按 256B 页且不跨页拆分(W25Q128 页编程硬约束)
-  *            3. 缓冲区全部 static 提供(lfs_config.read_buffer/prog_buffer/
-  *               lookahead_buffer + 文件 buffer), 不依赖 FreeRTOS 堆,
-  *               也不占 boot 阶段仅 1KB 的 MSP 栈
-  *            4. 格式化只在"Flash 全 0xFF(从未烧过)"时做; 挂载失败一律上报,
-  *               绝不自动 format —— LittleFS 掉电一致性很好, 但被误格式化就是全丢
+  *          ??????:
+  *            1. ????? read/prog/erase/sync ?????????? W25Q128 ????,
+  *               ???/????/???д????????????????, ??????????
+  *            2. prog ???? 256B ??????????(W25Q128 ????????)
+  *            3. ????????? static ??(lfs_config.read_buffer/prog_buffer/
+  *               lookahead_buffer + ??? buffer), ?????? FreeRTOS ??,
+  *               ???? boot ??ν? 1KB ?? MSP ?
+  *            4. ????????"Flash ? 0xFF(??δ???)"???; ?????????????,
+  *               ??????? format ???? LittleFS ???????????, ?????????????????
   ******************************************************************************
   */
 #include "bsp_lfs_port.h"
@@ -20,22 +20,22 @@
 
 #include <string.h>
 
-/* ---- 分区 ---- */
+/* ---- ???? ---- */
 #define LFS_FLASH_BASE   0x00000000UL
-/* 2559 块: 0x00000000 ~ 0x009FEFFF, 把 0x009FF000 自测扇区排除在外,
- * 否则每次 boot 的 SelfTest 会把文件系统某个块擦掉 */
+/* 2559 ??: 0x00000000 ~ 0x009FEFFF, ?? 0x009FF000 ??????????????,
+ * ??????? boot ?? SelfTest ???????????????? */
 #define LFS_BLOCK_COUNT  ((lfs_size_t)((W25Q128_GBK_BASE - W25Q128_SECTOR_SIZE) / W25Q128_SECTOR_SIZE))
 
-/* ---- 缓存(全部静态, 共 512*3 + 512 = 2KB .bss) ---- */
+/* ---- ????(??????, ?? 512*3 + 512 = 2KB .bss) ---- */
 #define LFS_CACHE_SIZE       512U
-#define LFS_LOOKAHEAD_SIZE   512U   /* 1 bit/块, 512B 可覆盖 4096 块 > 2559 */
+#define LFS_LOOKAHEAD_SIZE   512U   /* 1 bit/??, 512B ????? 4096 ?? > 2559 */
 
 static uint8_t s_readBuf[LFS_CACHE_SIZE];
 static uint8_t s_progBuf[LFS_CACHE_SIZE];
 static uint8_t s_lookBuf[LFS_LOOKAHEAD_SIZE];
 static uint8_t s_fileBuf[LFS_CACHE_SIZE];
 
-/* ---- 块设备四函数 ---- */
+/* ---- ???豸????? ---- */
 static int lfs_bd_read(const struct lfs_config *c, lfs_block_t block,
                        lfs_off_t off, void *buffer, lfs_size_t size)
 {
@@ -57,7 +57,7 @@ static int lfs_bd_prog(const struct lfs_config *c, lfs_block_t block,
     uint16_t       chunk;
     uint16_t       pageLeft;
 
-    /* W25Q128 页编程: 单次 <=256B 且不得跨页, 按页边界切分 */
+    /* W25Q128 ????: ???? <=256B ???????, ???????з? */
     while (left > 0U)
     {
         chunk    = (uint16_t)((left > W25Q128_PAGE_SIZE) ? W25Q128_PAGE_SIZE : left);
@@ -83,7 +83,7 @@ static int lfs_bd_erase(const struct lfs_config *c, lfs_block_t block)
 {
     uint32_t addr = LFS_FLASH_BASE + (uint32_t)block * c->block_size;
 
-    /* 双保险: 文件系统区之外(字库/自测扇区)一律拒绝 */
+    /* ?????: ??????????(???/???????)????? */
     if (addr >= (W25Q128_GBK_BASE - W25Q128_SECTOR_SIZE))
     {
         return LFS_ERR_IO;
@@ -98,10 +98,10 @@ static int lfs_bd_erase(const struct lfs_config *c, lfs_block_t block)
 static int lfs_bd_sync(const struct lfs_config *c)
 {
     (void)c;
-    return LFS_ERR_OK;      /* SPI NOR 写完即落地, 无独立 flush 命令 */
+    return LFS_ERR_OK;      /* SPI NOR д?????, ????? flush ???? */
 }
 
-/* ---- 配置 ---- */
+/* ---- ???? ---- */
 static const struct lfs_config s_cfg = {
     .context = NULL,
     .read    = lfs_bd_read,
@@ -109,11 +109,11 @@ static const struct lfs_config s_cfg = {
     .erase   = lfs_bd_erase,
     .sync    = lfs_bd_sync,
 
-    .read_size      = W25Q128_PAGE_SIZE,      /* 256B, 与页粒度一致 */
+    .read_size      = W25Q128_PAGE_SIZE,      /* 256B, ?????????? */
     .prog_size      = W25Q128_PAGE_SIZE,      /* 256B */
     .block_size     = W25Q128_SECTOR_SIZE,    /* 4096B */
     .block_count    = LFS_BLOCK_COUNT,        /* 2559 */
-    .block_cycles   = 500,                    /* 每块 500 次擦写后迁移元数据, 兼顾寿命与性能 */
+    .block_cycles   = 500,                    /* ??? 500 ?β?д??????????, ????????????? */
     .cache_size     = LFS_CACHE_SIZE,
     .lookahead_size = LFS_LOOKAHEAD_SIZE,
 
@@ -142,11 +142,11 @@ uint32_t LFS_Port_UsedBlocks(void)
     return (used < 0) ? 0xFFFFFFFFUL : (uint32_t)used;
 }
 
-/* ---- M3 冒烟测试: 写一次 /m3.txt, 之后每次开机只读回读, 顺带验证掉电持久性 ---- */
+/* ---- M3 ??????: д??? /m3.txt, ?????ο?????????, ?????????????? ---- */
 static void LFS_Port_SmokeTest(void)
 {
     static lfs_file_t            s_file;
-    static struct lfs_file_config s_fcfg;   /* 必须 static: boot 栈只有 1KB */
+    static struct lfs_file_config s_fcfg;   /* ???? static: boot ???? 1KB */
     char   rd[32];
     int    err;
     lfs_ssize_t n;
@@ -154,7 +154,7 @@ static void LFS_Port_SmokeTest(void)
     memset(&s_fcfg, 0, sizeof(s_fcfg));
     s_fcfg.buffer = s_fileBuf;
 
-    /* 1. 先尝试只读打开; 不存在说明是首次, 创建并写入 */
+    /* 1. ??????????; ??????????????, ??????д?? */
     err = lfs_file_opencfg(&s_lfs, &s_file, "/m3.txt", LFS_O_RDONLY, &s_fcfg);
     if (err == LFS_ERR_NOENT)
     {
@@ -182,7 +182,7 @@ static void LFS_Port_SmokeTest(void)
         return;
     }
 
-    /* 2. 回读比对 */
+    /* 2. ?????? */
     memset(rd, 0, sizeof(rd));
     n = lfs_file_read(&s_lfs, &s_file, rd, 11);
     (void)lfs_file_close(&s_lfs, &s_file);
@@ -209,7 +209,7 @@ uint8_t LFS_Port_Mount(void)
         return 1U;
     }
 
-    /* 1. 探测 0 号扇区: 全 0xFF 视为从未格式化 */
+    /* 1. ??? 0 ??????: ? 0xFF ?????δ????? */
     (void)W25Q128_ReadData(LFS_FLASH_BASE, probe, (uint32_t)sizeof(probe));
     for (i = 0U; i < (uint8_t)sizeof(probe); i++)
     {
@@ -231,11 +231,11 @@ uint8_t LFS_Port_Mount(void)
         }
     }
 
-    /* 2. 挂载 */
+    /* 2. ???? */
     err = lfs_mount(&s_lfs, &s_cfg);
     if (err != LFS_ERR_OK)
     {
-        UART_Printf("[LFS] mount FAIL err=%d (不自动格式化, 请人工确认)\r\n", err);
+        UART_Printf("[LFS] mount FAIL err=%d (??????????, ????????)\r\n", err);
         return 0U;
     }
     s_mounted = 1U;
@@ -246,7 +246,7 @@ uint8_t LFS_Port_Mount(void)
                 (unsigned long)((uint32_t)s_cfg.block_count * s_cfg.block_size / 1024U),
                 (unsigned long)LFS_Port_UsedBlocks());
 
-    /* 3. M3 冒烟测试 */
+    /* 3. M3 ?????? */
     LFS_Port_SmokeTest();
     return 1U;
 }
