@@ -365,7 +365,7 @@ e.g. "hal_data.h"*/
 #define LV_FONT_MONTSERRAT_10 0
 #define LV_FONT_MONTSERRAT_12 1
 #define LV_FONT_MONTSERRAT_14 1
-#define LV_FONT_MONTSERRAT_16 0
+#define LV_FONT_MONTSERRAT_16 1
 #define LV_FONT_MONTSERRAT_18 0
 #define LV_FONT_MONTSERRAT_20 0
 #define LV_FONT_MONTSERRAT_22 0
@@ -389,8 +389,9 @@ e.g. "hal_data.h"*/
 #define LV_FONT_DEJAVU_16_PERSIAN_HEBREW 0  /*Hebrew, Arabic, Persian letters and all their forms*/
 #define LV_FONT_SIMSUN_16_CJK            0  /*1000 most common CJK radicals*/
 
-/* 自定义 GB2312 一级汉字 + ASCII + 中文标点,共 3875 字形,用于 WiFi SSID 显示 */
-#define LV_FONT_GB2312_16               1
+/* 内置 GB2312 字库约 262KB, 已由外挂字库(BSP_Font_Gbk16)替代, 关掉以省内部 Flash。
+ * montserrat_16 作为外挂字库的 ASCII fallback, line_height 与之一致(19)。 */
+#define LV_FONT_GB2312_16               0
 
 /*Pixel perfect monospace fonts*/
 #define LV_FONT_UNSCII_8  0

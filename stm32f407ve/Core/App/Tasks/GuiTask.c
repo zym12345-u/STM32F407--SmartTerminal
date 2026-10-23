@@ -39,6 +39,7 @@
 #include "SensorData.h"
 #include "ClockData.h"
 #include "WifiNet.h"
+#include "bsp_font_gbk.h"   /* V1.2: 中文改走外挂字库(内部 262KB 字库已关闭) */
 #include "usart.h"
 #include "PowerMgr.h"
 #include <stdio.h>
@@ -531,7 +532,7 @@ static void WifiList_Refresh(void)
             lv_obj_set_width(lbl, 280);
             lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
             lv_obj_set_style_text_color(lbl, COLOR_TEXT, 0);
-            lv_obj_set_style_text_font(lbl, &lv_font_gb2312_16, 0);
+            lv_obj_set_style_text_font(lbl, BSP_Font_Gbk16(), 0);
         }
     }
 }
@@ -771,7 +772,7 @@ static void GUI_CreateWifiScreen(void)
     s_pwdPrompt = lv_label_create(s_pwdPanel);
     lv_label_set_text(s_pwdPrompt, "Password");
     lv_obj_set_style_text_color(s_pwdPrompt, COLOR_TEXT, 0);
-    lv_obj_set_style_text_font(s_pwdPrompt, &lv_font_gb2312_16, 0);
+    lv_obj_set_style_text_font(s_pwdPrompt, BSP_Font_Gbk16(), 0);
     lv_obj_set_pos(s_pwdPrompt, 8, 2);
 
     s_pwdTa = lv_textarea_create(s_pwdPanel);
