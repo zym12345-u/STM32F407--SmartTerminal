@@ -9,14 +9,21 @@
   *            2. 点阵 1bpp/16x16/32B, 直接读进 static 缓冲交给 LVGL 使用。
   *               LVGL 是"取一个字形 -> 立刻画 -> 再取下一个"的串行流程,
   *               所以单个静态缓冲就够, 不需要按字形分配内存。
-  *            3. 查不到(ASCII/emoji/未收录汉字)返回 false, 由 fallback
+  *            3. **这块字库是列式(纵向)存储**: 32 字节 = 16 列 x 每列 2 字节,
+  *               列内高位在上。LVGL 要的是行式(横向), 所以取到后必须转置一次。
+  *               2026-10-23 真机现象: 汉字显示出来但左右镜像 + 逆时针 90 度,
+  *               正是"把转置后的图当原图"的特征; 实测 "中" 前 8 字节
+  *               00 00 00 00 3F E0 10 40, 按列读 = 第 3 列长竖 + 第 4 列上下两点
+  *               (口字左边框 + 内部上下横), 按行读则不成立 → 列式坐实。
+  *            4. 查不到(ASCII/emoji/未收录汉字)返回 false, 由 fallback
   *               字体 lv_font_montserrat_16 兜底。
-  *            4. 缓冲用 static, 不占堆, 也不占 boot 阶段仅 1KB 的 MSP 栈。
+  *            5. 缓冲用 static, 不占堆, 也不占 boot 阶段仅 1KB 的 MSP 栈。
   ******************************************************************************
   */
 #include "bsp_font_gbk.h"
 #include "bsp_W25Q128.h"
 #include "usart.h"
+#include <string.h>
 
 #define GBK_FONT_BASE       0x00A00000UL   /* 外挂字库基址 */
 #define GBK16_SECTION_OFS   0x0008C460UL   /* 16px 段在字库内的偏移 */
@@ -79,6 +86,31 @@ static uint32_t gbk16_glyph_addr(uint16_t gbk)
     return GBK_FONT_BASE + GBK16_SECTION_OFS + idx * GBK16_GLYPH_BYTES;
 }
 
+/** 列式 -> 行式: 16x16 1bpp 转置(两次转置等于还原, 可逆) */
+static void gbk16_transpose(uint8_t *buf)
+{
+    uint8_t  src[GBK16_GLYPH_BYTES];
+    uint8_t  oy;
+    uint8_t  ox;
+
+    memcpy(src, buf, GBK16_GLYPH_BYTES);
+    memset(buf, 0, GBK16_GLYPH_BYTES);
+
+    for (oy = 0U; oy < 16U; oy++)                 /* oy: 行式缓冲的行 */
+    {
+        for (ox = 0U; ox < 16U; ox++)             /* ox: 行式缓冲的列 */
+        {
+            /* out(oy,ox) = in(ox,oy): 第 ox 行、第 oy 位 */
+            uint8_t b = src[ox * 2U + (oy >> 3)];
+
+            if ((b & (uint8_t)(0x80U >> (oy & 7U))) != 0U)
+            {
+                buf[oy * 2U + (ox >> 3)] |= (uint8_t)(0x80U >> (ox & 7U));
+            }
+        }
+    }
+}
+
 /** LVGL 取字形描述 */
 static bool gbk16_get_dsc(const lv_font_t *font, lv_font_glyph_dsc_t *dsc,
                           uint32_t letter, uint32_t letter_next)
@@ -127,6 +159,7 @@ static const uint8_t *gbk16_get_bitmap(const lv_font_t *font, uint32_t letter)
         return NULL;
     }
 
+    gbk16_transpose(s_glyphBuf);         /* 列式字库 -> LVGL 要的行式 */
     return s_glyphBuf;
 }
 
@@ -150,6 +183,27 @@ const lv_font_t *BSP_Font_Gbk16(void)
     return &s_gbk16;
 }
 
+/** 把 16x16 点阵按 '#'/'.' 打印出来, 方便对着串口判断方向 */
+static void gbk16_dump_art(const uint8_t *buf, const char *tag)
+{
+    uint8_t y;
+    uint8_t x;
+
+    UART_Printf("[FONT] %s\r\n", tag);
+    for (y = 0U; y < 16U; y++)
+    {
+        char line[17];
+
+        for (x = 0U; x < 16U; x++)
+        {
+            uint8_t b = buf[y * 2U + (x >> 3)];
+            line[x] = ((b & (uint8_t)(0x80U >> (x & 7U))) != 0U) ? '#' : '.';
+        }
+        line[16] = '\0';
+        UART_Printf("[FONT] %s\r\n", line);
+    }
+}
+
 uint8_t BSP_Font_SelfTest(void)
 {
     const uint16_t gbk  = 0xD6D0U;        /* "中" */
@@ -169,6 +223,8 @@ uint8_t BSP_Font_SelfTest(void)
         UART_Printf("[FONT] self-test FAIL: read @0x%08lX\r\n", (unsigned long)addr);
         return 0U;
     }
+
+    gbk16_transpose(s_glyphBuf);          /* 与渲染路径完全一致 */
 
     for (i = 0U; i < (uint8_t)GBK16_GLYPH_BYTES; i++)
     {
@@ -195,5 +251,6 @@ uint8_t BSP_Font_SelfTest(void)
     }
 
     UART_Printf("[FONT] self-test PASS: %u/256 bits lit\r\n", (unsigned int)bits);
+    gbk16_dump_art(s_glyphBuf, "art (should look like 中, not rotated):");
     return 1U;
 }
