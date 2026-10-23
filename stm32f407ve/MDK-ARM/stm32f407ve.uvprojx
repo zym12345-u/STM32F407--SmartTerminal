@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F407xx,MY_DISP_HOR_RES=320,MY_DISP_VER_RES=240</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/Flash;../Core/App/Bsp/RS485;../Core/App/Bsp/IWDG;../Core/App/Bsp/W25Q128</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/Flash;../Core/App/Bsp/RS485;../Core/App/Bsp/IWDG;../Core/App/Bsp/W25Q128;../Core/App/Bsp/LittleFS</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -3206,6 +3206,21 @@
               <FileName>bsp_W25Q128.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Bsp\W25Q128\bsp_W25Q128.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_lfs_port.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\LittleFS\bsp_lfs_port.c</FilePath>
+            </File>
+            <File>
+              <FileName>lfs.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\LittleFS\lfs.c</FilePath>
+            </File>
+            <File>
+              <FileName>lfs_util.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\LittleFS\lfs_util.c</FilePath>
             </File>
           </Files>
         </Group>

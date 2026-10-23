@@ -36,6 +36,7 @@ extern void WifiTask_Create(void);
 extern void ModbusTask_Create(void);   /* Modbus RTU 从站任务(App/Tasks/ModbusTask.c) */
 extern void MonitorTask_Create(void);  /* 心跳监控 + IWDG 喂狗(App/Tasks/MonitorTask.c) */
 #include "bsp_W25Q128.h"               /* V1.2 外部 Flash(boot 阶段 M1/M1.5 自检) */
+#include "bsp_lfs_port.h"              /* V1.2 M3 LittleFS 挂载 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -222,6 +223,9 @@ void MX_FREERTOS_Init(void) {
   {
     W25Q128_SelfTest();
     W25Q128_CheckGBKFont();   /* M2: 检测 0xA00000 起的 GBK 字库是否存在 */
+    /* M3: 挂载 LittleFS(0x000000~0x009FEFFF, 2559 x 4KB);
+     * 空白 Flash 自动格式化, 挂载后做一次 /m3.txt 写读验证 */
+    (void)LFS_Port_Mount();
   }
   /* USER CODE END RTOS_THREADS */
 
