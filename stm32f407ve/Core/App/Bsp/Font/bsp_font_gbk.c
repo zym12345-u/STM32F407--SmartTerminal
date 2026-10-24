@@ -183,27 +183,6 @@ const lv_font_t *BSP_Font_Gbk16(void)
     return &s_gbk16;
 }
 
-/** 把 16x16 点阵按 '#'/'.' 打印出来, 方便对着串口判断方向 */
-static void gbk16_dump_art(const uint8_t *buf, const char *tag)
-{
-    uint8_t y;
-    uint8_t x;
-
-    UART_Printf("[FONT] %s\r\n", tag);
-    for (y = 0U; y < 16U; y++)
-    {
-        char line[17];
-
-        for (x = 0U; x < 16U; x++)
-        {
-            uint8_t b = buf[y * 2U + (x >> 3)];
-            line[x] = ((b & (uint8_t)(0x80U >> (x & 7U))) != 0U) ? '#' : '.';
-        }
-        line[16] = '\0';
-        UART_Printf("[FONT] %s\r\n", line);
-    }
-}
-
 uint8_t BSP_Font_SelfTest(void)
 {
     const uint16_t gbk  = 0xD6D0U;        /* "中" */
@@ -237,7 +216,7 @@ uint8_t BSP_Font_SelfTest(void)
         }
     }
 
-    UART_Printf("[FONT] glyph \"中\"(0xD6D0) @0x%08lX, first8: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+    UART_Printf("[FONT] glyph(0xD6D0) @0x%08lX, first8: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
                 (unsigned long)addr,
                 s_glyphBuf[0], s_glyphBuf[1], s_glyphBuf[2], s_glyphBuf[3],
                 s_glyphBuf[4], s_glyphBuf[5], s_glyphBuf[6], s_glyphBuf[7]);
@@ -251,6 +230,5 @@ uint8_t BSP_Font_SelfTest(void)
     }
 
     UART_Printf("[FONT] self-test PASS: %u/256 bits lit\r\n", (unsigned int)bits);
-    gbk16_dump_art(s_glyphBuf, "art (should look like 中, not rotated):");
     return 1U;
 }
