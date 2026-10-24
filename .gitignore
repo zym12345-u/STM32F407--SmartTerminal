@@ -4,7 +4,7 @@ MDK-ARM/Objects/
 MDK-ARM/RTE/
 MDK-ARM/DebugConfig/
 MDK-ARM/EventRecorderStub.scvd
-MDK-ARM/build_log.txt
+build_log.txt
 *.uvguix.*
 *.uvoptx
 JLinkLog.txt
