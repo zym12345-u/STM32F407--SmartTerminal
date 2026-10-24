@@ -1,23 +1,23 @@
 /**
   ******************************************************************************
   * @file    bsp_font_gbk.c
-  * @brief   LVGL Íâ¹Ò GBK ×Ö¿âÊÊÅä²ã(ÏêÊö¼û bsp_font_gbk.h)
+  * @brief   LVGL å¤–æŒ‚ GBK å­—åº“é€‚é…å±‚(è¯¦è¿°è§ bsp_font_gbk.h)
   *
-  *          ÊµÏÖÒªµã:
-  *            1. LVGL Ö»ÈÏ Unicode, °åÔØ×Ö¿â°´ GB2312 ÂëÎ»Ë÷Òı,
-  *               ËùÒÔÏÈÓÃ g_bspGbkMap ×ö Unicode -> GB2312 ¶ş·Ö²éÕÒ¡£
-  *            2. µãÕó 1bpp/16x16/32B, Ö±½Ó¶Á½ø static »º³å½»¸ø LVGL Ê¹ÓÃ¡£
-  *               LVGL ÊÇ"È¡Ò»¸ö×ÖĞÎ -> Á¢¿Ì»­ -> ÔÙÈ¡ÏÂÒ»¸ö"µÄ´®ĞĞÁ÷³Ì,
-  *               ËùÒÔµ¥¸ö¾²Ì¬»º³å¾Í¹», ²»ĞèÒª°´×ÖĞÎ·ÖÅäÄÚ´æ¡£
-  *            3. **Õâ¿é×Ö¿âÊÇÁĞÊ½(×İÏò)´æ´¢**: 32 ×Ö½Ú = 16 ÁĞ x Ã¿ÁĞ 2 ×Ö½Ú,
-  *               ÁĞÄÚ¸ßÎ»ÔÚÉÏ¡£LVGL ÒªµÄÊÇĞĞÊ½(ºáÏò), ËùÒÔÈ¡µ½ºó±ØĞë×ªÖÃÒ»´Î¡£
-  *               2026-10-23 Õæ»úÏÖÏó: ºº×ÖÏÔÊ¾³öÀ´µ«×óÓÒ¾µÏñ + ÄæÊ±Õë 90 ¶È,
-  *               ÕıÊÇ"°Ñ×ªÖÃºóµÄÍ¼µ±Ô­Í¼"µÄÌØÕ÷; Êµ²â "ÖĞ" Ç° 8 ×Ö½Ú
-  *               00 00 00 00 3F E0 10 40, °´ÁĞ¶Á = µÚ 3 ÁĞ³¤Êú + µÚ 4 ÁĞÉÏÏÂÁ½µã
-  *               (¿Ú×Ö×ó±ß¿ò + ÄÚ²¿ÉÏÏÂºá), °´ĞĞ¶ÁÔò²»³ÉÁ¢ ¡ú ÁĞÊ½×øÊµ¡£
-  *            4. ²é²»µ½(ASCII/emoji/Î´ÊÕÂ¼ºº×Ö)·µ»Ø false, ÓÉ fallback
-  *               ×ÖÌå lv_font_montserrat_16 ¶µµ×¡£
-  *            5. »º³åÓÃ static, ²»Õ¼¶Ñ, Ò²²»Õ¼ boot ½×¶Î½ö 1KB µÄ MSP Õ»¡£
+  *          å®ç°è¦ç‚¹:
+  *            1. LVGL åªè®¤ Unicode, æ¿è½½å­—åº“æŒ‰ GB2312 ç ä½ç´¢å¼•,
+  *               æ‰€ä»¥å…ˆç”¨ g_bspGbkMap åš Unicode -> GB2312 äºŒåˆ†æŸ¥æ‰¾ã€‚
+  *            2. ç‚¹é˜µ 1bpp/16x16/32B, ç›´æ¥è¯»è¿› static ç¼“å†²äº¤ç»™ LVGL ä½¿ç”¨ã€‚
+  *               LVGL æ˜¯"å–ä¸€ä¸ªå­—å½¢ -> ç«‹åˆ»ç”» -> å†å–ä¸‹ä¸€ä¸ª"çš„ä¸²è¡Œæµç¨‹,
+  *               æ‰€ä»¥å•ä¸ªé™æ€ç¼“å†²å°±å¤Ÿ, ä¸éœ€è¦æŒ‰å­—å½¢åˆ†é…å†…å­˜ã€‚
+  *            3. **è¿™å—å­—åº“æ˜¯åˆ—å¼(çºµå‘)å­˜å‚¨**: 32 å­—èŠ‚ = 16 åˆ— x æ¯åˆ— 2 å­—èŠ‚,
+  *               åˆ—å†…é«˜ä½åœ¨ä¸Šã€‚LVGL è¦çš„æ˜¯è¡Œå¼(æ¨ªå‘), æ‰€ä»¥å–åˆ°åå¿…é¡»è½¬ç½®ä¸€æ¬¡ã€‚
+  *               2026-10-23 çœŸæœºç°è±¡: æ±‰å­—æ˜¾ç¤ºå‡ºæ¥ä½†å·¦å³é•œåƒ + é€†æ—¶é’ˆ 90 åº¦,
+  *               æ­£æ˜¯"æŠŠè½¬ç½®åçš„å›¾å½“åŸå›¾"çš„ç‰¹å¾; å®æµ‹ "ä¸­" å‰ 8 å­—èŠ‚
+  *               00 00 00 00 3F E0 10 40, æŒ‰åˆ—è¯» = ç¬¬ 3 åˆ—é•¿ç«– + ç¬¬ 4 åˆ—ä¸Šä¸‹ä¸¤ç‚¹
+  *               (å£å­—å·¦è¾¹æ¡† + å†…éƒ¨ä¸Šä¸‹æ¨ª), æŒ‰è¡Œè¯»åˆ™ä¸æˆç«‹ â†’ åˆ—å¼åå®ã€‚
+  *            4. æŸ¥ä¸åˆ°(ASCII/emoji/æœªæ”¶å½•æ±‰å­—)è¿”å› false, ç”± fallback
+  *               å­—ä½“ lv_font_montserrat_16 å…œåº•ã€‚
+  *            5. ç¼“å†²ç”¨ static, ä¸å å †, ä¹Ÿä¸å  boot é˜¶æ®µä»… 1KB çš„ MSP æ ˆã€‚
   ******************************************************************************
   */
 #include "bsp_font_gbk.h"
@@ -25,16 +25,16 @@
 #include "usart.h"
 #include <string.h>
 
-#define GBK_FONT_BASE       0x00A00000UL   /* Íâ¹Ò×Ö¿â»ùÖ· */
-#define GBK16_SECTION_OFS   0x0008C460UL   /* 16px ¶ÎÔÚ×Ö¿âÄÚµÄÆ«ÒÆ */
+#define GBK_FONT_BASE       0x00A00000UL   /* å¤–æŒ‚å­—åº“åŸºå€ */
+#define GBK16_SECTION_OFS   0x0008C460UL   /* 16px æ®µåœ¨å­—åº“å†…çš„åç§» */
 #define GBK16_GLYPH_BYTES   32U            /* 16x16 1bpp = 32B */
-#define GBK16_CELL          16             /* ×ÖÉí¿í¸ß = 16px */
-#define GBK16_LINE_HEIGHT   19             /* ÓëÄÚÖÃ gb2312_16 / montserrat_16 ¶ÔÆë */
+#define GBK16_CELL          16             /* å­—èº«å®½é«˜ = 16px */
+#define GBK16_LINE_HEIGHT   19             /* ä¸å†…ç½® gb2312_16 / montserrat_16 å¯¹é½ */
 #define GBK16_BASE_LINE     3
 
 static uint8_t s_glyphBuf[GBK16_GLYPH_BYTES];
 
-/** Unicode -> GB2312 Ë«×Ö½ÚÂë; ±íÀïÃ»ÓĞ·µ»Ø 0 */
+/** Unicode -> GB2312 åŒå­—èŠ‚ç ; è¡¨é‡Œæ²¡æœ‰è¿”å› 0 */
 static uint16_t gbk16_uni_to_code(uint32_t uni)
 {
     uint16_t lo;
@@ -42,11 +42,11 @@ static uint16_t gbk16_uni_to_code(uint32_t uni)
 
     if (uni > 0xFFFFU)
     {
-        return 0U;                       /* Ó³Éä±íÖ»¸²¸Ç BMP */
+        return 0U;                       /* æ˜ å°„è¡¨åªè¦†ç›– BMP */
     }
 
     lo = 0U;
-    hi = g_bspGbkMapNum;                 /* ×ó±ÕÓÒ¿ª */
+    hi = g_bspGbkMapNum;                 /* å·¦é—­å³å¼€ */
     while (lo < hi)
     {
         uint16_t mid = (uint16_t)((lo + hi) >> 1);
@@ -68,7 +68,7 @@ static uint16_t gbk16_uni_to_code(uint32_t uni)
     return 0U;
 }
 
-/** GB2312 ÂëÎ» -> ×Ö¿âÄÚ×Ö½ÚµØÖ·; Ô½½ç·µ»Ø 0xFFFFFFFF */
+/** GB2312 ç ä½ -> å­—åº“å†…å­—èŠ‚åœ°å€; è¶Šç•Œè¿”å› 0xFFFFFFFF */
 static uint32_t gbk16_glyph_addr(uint16_t gbk)
 {
     uint8_t  hi = (uint8_t)(gbk >> 8);
@@ -86,7 +86,7 @@ static uint32_t gbk16_glyph_addr(uint16_t gbk)
     return GBK_FONT_BASE + GBK16_SECTION_OFS + idx * GBK16_GLYPH_BYTES;
 }
 
-/** ÁĞÊ½ -> ĞĞÊ½: 16x16 1bpp ×ªÖÃ(Á½´Î×ªÖÃµÈÓÚ»¹Ô­, ¿ÉÄæ) */
+/** åˆ—å¼ -> è¡Œå¼: 16x16 1bpp è½¬ç½®(ä¸¤æ¬¡è½¬ç½®ç­‰äºè¿˜åŸ, å¯é€†) */
 static void gbk16_transpose(uint8_t *buf)
 {
     uint8_t  src[GBK16_GLYPH_BYTES];
@@ -96,11 +96,11 @@ static void gbk16_transpose(uint8_t *buf)
     memcpy(src, buf, GBK16_GLYPH_BYTES);
     memset(buf, 0, GBK16_GLYPH_BYTES);
 
-    for (oy = 0U; oy < 16U; oy++)                 /* oy: ĞĞÊ½»º³åµÄĞĞ */
+    for (oy = 0U; oy < 16U; oy++)                 /* oy: è¡Œå¼ç¼“å†²çš„è¡Œ */
     {
-        for (ox = 0U; ox < 16U; ox++)             /* ox: ĞĞÊ½»º³åµÄÁĞ */
+        for (ox = 0U; ox < 16U; ox++)             /* ox: è¡Œå¼ç¼“å†²çš„åˆ— */
         {
-            /* out(oy,ox) = in(ox,oy): µÚ ox ĞĞ¡¢µÚ oy Î» */
+            /* out(oy,ox) = in(ox,oy): ç¬¬ ox è¡Œã€ç¬¬ oy ä½ */
             uint8_t b = src[ox * 2U + (oy >> 3)];
 
             if ((b & (uint8_t)(0x80U >> (oy & 7U))) != 0U)
@@ -111,7 +111,7 @@ static void gbk16_transpose(uint8_t *buf)
     }
 }
 
-/** LVGL È¡×ÖĞÎÃèÊö */
+/** LVGL å–å­—å½¢æè¿° */
 static bool gbk16_get_dsc(const lv_font_t *font, lv_font_glyph_dsc_t *dsc,
                           uint32_t letter, uint32_t letter_next)
 {
@@ -120,21 +120,21 @@ static bool gbk16_get_dsc(const lv_font_t *font, lv_font_glyph_dsc_t *dsc,
 
     if (gbk16_uni_to_code(letter) == 0U)
     {
-        return false;                    /* ½»¸ø fallback ×ÖÌå */
+        return false;                    /* äº¤ç»™ fallback å­—ä½“ */
     }
 
     dsc->adv_w  = GBK16_CELL;
     dsc->box_w  = GBK16_CELL;
     dsc->box_h  = GBK16_CELL;
     dsc->ofs_x  = 0;
-    /* 16px ×ÖÉíÕûÌå×øÔÚ»ùÏßÉÏ·½: ¶¥²¿ = (19-3) - 16 - 0 = 0 */
+    /* 16px å­—èº«æ•´ä½“ååœ¨åŸºçº¿ä¸Šæ–¹: é¡¶éƒ¨ = (19-3) - 16 - 0 = 0 */
     dsc->ofs_y  = 0;
     dsc->bpp    = 1;
     dsc->is_placeholder = 0;
     return true;
 }
 
-/** LVGL È¡×ÖĞÎµãÕóÖ¸Õë(Ö¸Ïò static »º³å, ÏÂÒ»´Îµ÷ÓÃ»á±»¸²¸Ç) */
+/** LVGL å–å­—å½¢ç‚¹é˜µæŒ‡é’ˆ(æŒ‡å‘ static ç¼“å†², ä¸‹ä¸€æ¬¡è°ƒç”¨ä¼šè¢«è¦†ç›–) */
 static const uint8_t *gbk16_get_bitmap(const lv_font_t *font, uint32_t letter)
 {
     uint16_t gbk;
@@ -159,7 +159,7 @@ static const uint8_t *gbk16_get_bitmap(const lv_font_t *font, uint32_t letter)
         return NULL;
     }
 
-    gbk16_transpose(s_glyphBuf);         /* ÁĞÊ½×Ö¿â -> LVGL ÒªµÄĞĞÊ½ */
+    gbk16_transpose(s_glyphBuf);         /* åˆ—å¼å­—åº“ -> LVGL è¦çš„è¡Œå¼ */
     return s_glyphBuf;
 }
 
@@ -185,7 +185,7 @@ const lv_font_t *BSP_Font_Gbk16(void)
 
 uint8_t BSP_Font_SelfTest(void)
 {
-    const uint16_t gbk  = 0xD6D0U;        /* "ÖĞ" */
+    const uint16_t gbk  = 0xD6D0U;        /* "ä¸­" */
     const uint32_t addr = gbk16_glyph_addr(gbk);
     uint16_t bits = 0U;
     uint8_t  i;
@@ -203,7 +203,7 @@ uint8_t BSP_Font_SelfTest(void)
         return 0U;
     }
 
-    gbk16_transpose(s_glyphBuf);          /* ÓëäÖÈ¾Â·¾¶ÍêÈ«Ò»ÖÂ */
+    gbk16_transpose(s_glyphBuf);          /* ä¸æ¸²æŸ“è·¯å¾„å®Œå…¨ä¸€è‡´ */
 
     for (i = 0U; i < (uint8_t)GBK16_GLYPH_BYTES; i++)
     {
@@ -221,7 +221,7 @@ uint8_t BSP_Font_SelfTest(void)
                 s_glyphBuf[0], s_glyphBuf[1], s_glyphBuf[2], s_glyphBuf[3],
                 s_glyphBuf[4], s_glyphBuf[5], s_glyphBuf[6], s_glyphBuf[7]);
 
-    /* "ÖĞ" ÊÇ¿ÕĞÄ + Ò»Êú, µãÁÁ±ÈÀı²»»á½Ó½ü 0% Ò²²»»á½Ó½ü 100% */
+    /* "ä¸­" æ˜¯ç©ºå¿ƒ + ä¸€ç«–, ç‚¹äº®æ¯”ä¾‹ä¸ä¼šæ¥è¿‘ 0% ä¹Ÿä¸ä¼šæ¥è¿‘ 100% */
     if (bits == 0U || bits >= 256U)
     {
         UART_Printf("[FONT] self-test FAIL: bitmap all %s (%u/256 bits)\r\n",
