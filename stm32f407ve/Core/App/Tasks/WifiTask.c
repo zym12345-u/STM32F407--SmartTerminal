@@ -3,10 +3,13 @@
   * @file    WifiTask.c
   * @brief   WiFi 网络任务:屏幕配网 + SNTP 网络对时
   *
-  *          两种取凭据途径(凭据保存在 STM32 内部 Flash sector 11):
-  *            A. 开机自动连:从 Flash 读凭据,连上后 SNTP 对时;
+  *          两种取凭据途径(凭据保存在 W25Q128 的 LittleFS /wifi.conf):
+  *            A. 开机自动连:从 LittleFS 读凭据,连上后 SNTP 对时;
   *            B. 屏幕配网:GuiTask 扫到热点、用户输密码,经命令队列提交,
-  *               连接成功后写入 Flash,下次开机走 A 自动连。
+  *               连接成功后写入 LittleFS,下次开机走 A 自动连。
+  *
+  *          V1.2 起凭据不再放内部 Flash sector11(降级打标灰色地带,
+  *          擦 128KB 会冻结 CPU 1~2s),首次开机会自动把旧凭据迁过来。
   *
   *          队列(在 WifiTask_Create 中创建,早于任务首次运行):
   *            GuiTask --WifiCmd_t-->  本任务  扫描/连接命令(元素约 100B,深 4)
@@ -14,6 +17,12 @@
   *
   *          运行中本地每秒走秒(公历进位+星期),每 30 分钟重新 SNTP 校准;
   *          掉线自动重连已保存凭据。
+  *
+  *          ⚠️ 本任务是全工程最容易被看门狗咬死的地方:
+  *            AT+CWJAP 单次调用最多连续阻塞 20s,期间本任务回不到主循环,
+  *            调不到 Watchdog_Heartbeat(),只能靠 ESP8266_Cmd() 内部补报。
+  *            详见 WiFi_JoinAp() / DoJoinCmd() 里的注释。
+  *            (V1.2 起凭据保存走 LittleFS 不再冻结 CPU,不再是咬狗因素)
   ******************************************************************************
   */
 #include "cmsis_os2.h"
@@ -22,6 +31,7 @@
 
 #include "bsp_ESP8266.h"
 #include "bsp_WifiStore.h"
+#include "bsp_WifiStoreLfs.h"
 #include "bsp_IWDG.h"
 #include "ClockData.h"
 #include "WifiNet.h"
@@ -66,6 +76,8 @@ void Wifi_PostScan(void)
     cmd.type = WIFI_CMD_SCAN;
     if (s_cmdQ != NULL)
     {
+        /* 超时 0 = 不阻塞:这是给 GuiTask 调用的界面线程,
+         * 队列满就直接丢弃,绝不能让界面卡在这里等 WifiTask */
         (void)osMessageQueuePut(s_cmdQ, &cmd, 0U, 0U);
     }
     else
@@ -97,6 +109,8 @@ void Wifi_PostJoin(const char *ssid, const char *pwd)
     }
 }
 
+/* GuiTask 每轮界面刷新时轮询一次:超时 0 不阻塞,取不到就继续刷界面。
+ * 用轮询而不是阻塞等待,是因为 GUI 必须持续响应触摸和刷新 */
 uint8_t Wifi_TryGetEvent(WifiEvent_t *ev)
 {
     if ((s_evtQ != NULL) && (ev != NULL) &&
@@ -186,6 +200,10 @@ static uint8_t WiFi_JoinAp(const char *ssid, const char *pwd)
     for (i = 0U; i < 3U; i++)
     {
         UART_Printf("[WIFI] joining %s (try %d)\r\n", ssid, (int)(i + 1U));
+        /* ⚠️ 这一行最多阻塞 20s:ESP8266_Cmd 要一直等到模块回 OK 或超时。
+         * 这 20s 是"一次调用连续阻塞",本任务完全回不到主循环,调不到
+         * Watchdog_Heartbeat();而判死线只有 3s。
+         * 所以 ESP8266_Cmd() 内部必须每 500ms 补报心跳,否则必被 IWDG 复位 */
         if (ESP8266_Cmd(joinCmd, "OK", 20000U) != 0U)
         {
             return 1U;
@@ -206,6 +224,11 @@ static uint8_t WiFi_WaitSync(ClockData_t *now)
         UART_Printf("[WIFI] SNTP config fail (need AT v1.6+)\r\n");
         return 0U;
     }
+    /* 注意这里的 20s 和 WiFi_JoinAp() 的 20s 不是一回事:
+     * 这里是 20 次 x osDelay(1s),每次都能回到主循环报心跳,天然安全;
+     * 但 ESP8266_FetchTime() 单次只有 ~0.1s,比喂狗节流门槛 500ms 还短,
+     * 若只做"循环内节流补报"会永远够不着门槛 → 整轮零心跳。
+     * 所以 ESP8266_Cmd() 除了节流,还必须有"入口必报" */
     for (i = 0U; i < FIRST_SYNC_TRIES; i++)
     {
         osDelay(1000U);
@@ -452,19 +475,19 @@ static void DoJoinCmd(const WifiCmd_t *cmd)
         return;
     }
 
-    /* 联网对时成功:写 Flash(擦 128KB 扇区会停 CPU 约 1~2s,在此可接受) */
+    /* V1.2: 凭据已迁到 LittleFS,保存只擦 4KB 块(busy 33ms),不再冻结 CPU,
+     * 也无需放宽 IWDG 窗口。 */
     memset(&s_cred, 0, sizeof(s_cred));
     s_cred.magic = WIFI_FLASH_MAGIC;
     (void)strncpy(s_cred.ssid, cmd->ssid, WIFI_SSID_LEN);
     (void)strncpy(s_cred.pwd,  cmd->pwd,  WIFI_PWD_LEN);
-    if (WifiStore_Save(&s_cred) != 0U)
+    if (WifiStoreLfs_Save(&s_cred) != 0U)
     {
-        UART_Printf("[WIFI] credential saved to flash\r\n");
         s_haveCred = 1U;
     }
     else
     {
-        UART_Printf("[WIFI] WARN: credential flash save failed\r\n");
+        UART_Printf("[WIFI] WARN: credential lfs save failed\r\n");
     }
 
     s_connected = 1U;
@@ -488,8 +511,9 @@ void StartWifiTask(void *argument)
 
     osDelay(2000U);    /* 等模块上电稳定 + 避开开机 LVGL 首屏渲染 */
 
-    /* A. 开机:有保存凭据则自动连 */
-    if (WifiStore_Load(&s_cred) != 0U)
+    /* A. 开机:有保存凭据则自动连(先迁后读) */
+    (void)WifiStoreLfs_Migrate();
+    if (WifiStoreLfs_Load(&s_cred) != 0U)
     {
         s_haveCred = 1U;
         UART_Printf("[WIFI] saved credential: %s, auto connecting...\r\n", s_cred.ssid);
@@ -519,9 +543,13 @@ void StartWifiTask(void *argument)
         WifiCmd_t   cmd;
         osStatus_t  st;
 
+        /* ⚠️ 别以为有这一句就安全:下面 DoScan()/DoJoinCmd() 一跑就是几秒到 20s,
+         * 这期间根本走不到这里。本任务的存活实际取决于 ESP8266_Cmd()
+         * 内部有没有做心跳注入,而不是这一句 */
         Watchdog_Heartbeat(WDT_TASK_WIFI);
 
-        /* 已连接时每秒醒一次走秒;未连接时 200ms 醒一次好快速响应配网/重连 */
+        /* 已连接时每秒醒一次走秒(顺带满足 3s 判死线);
+         * 未连接时 200ms 醒一次,好快速响应配网/重连命令 */
         st = osMessageQueueGet(s_cmdQ, &cmd, NULL, s_connected ? 1000U : 200U);
 
         if (st == osOK)

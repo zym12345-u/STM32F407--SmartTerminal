@@ -3193,6 +3193,11 @@
               <FilePath>..\Core\App\Bsp\Flash\bsp_WifiStore.c</FilePath>
             </File>
             <File>
+              <FileName>bsp_WifiStoreLfs.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\Flash\bsp_WifiStoreLfs.c</FilePath>
+            </File>
+            <File>
               <FileName>bsp_RS485.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Bsp\RS485\bsp_RS485.c</FilePath>
