@@ -12,6 +12,10 @@
   *          COLOR: 1=红 2=绿 3=蓝(案例枚举+1);本板只有绿灯/蓝灯,
   *                 2 -> LEDColor_Green,3 -> LEDColor_Blue,1(红)忽略
   *          STATE: 0=灭 1=亮
+  *
+  *          三路控制(按键 / 触摸按钮 / 本串口命令)都只往 LEDQueue 投消息,
+  *          由 LEDTask 单点执行点灯,避免多方直接写 GPIO 导致状态互相覆盖。
+  *          ⚠️ 内存约定:这里 pvPortMalloc,由 LEDTask 那边 vPortFree。
   */
 /* USER CODE END Header */
 

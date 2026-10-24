@@ -167,6 +167,9 @@ uint16_t W25Q128_ReadDeviceId(void)
     return id;
 }
 
+/* 读数据:03h + 24 位地址,之后每多收一个字节,芯片内部地址就自动 +1,
+ * 可以一口气读完整片,中间不用重发命令 —— 这是 SPI NOR 的特性。
+ * 读不需要写使能,也不会置 BUSY,所以这里没有 WaitReady */
 HAL_StatusTypeDef W25Q128_ReadData(uint32_t addr, uint8_t *pData, uint32_t num)
 {
     uint32_t i;
@@ -196,13 +199,22 @@ HAL_StatusTypeDef W25Q128_SectorErase4K(uint32_t addr)
     {
         return HAL_ERROR;
     }
-    if (addr >= W25Q128_GBK_BASE)      /* 字库写保护(M2 证实前一律拒绝) */
+    /* 0x00A00000 以上是 GBK 字库区,一律拒绝擦除
+     * (字模是外部烧进去的,擦掉就没了;读不受限制) */
+    if (addr >= W25Q128_GBK_BASE)
     {
         UART_Printf("[W25Q] erase 0x%08lX rejected: GBK font region\r\n",
                     (unsigned long)addr);
         return HAL_ERROR;
     }
 
+    /* 这里有两次 WaitReady,各等一件事:
+     *   第 1 次(下面)—— 等上一次编程/擦除结束,确保芯片空闲;
+     *   第 2 次(函数末尾)—— 等本次擦除真正完成。
+     * 注意顺序是"先 06h 写使能、再等空闲":芯片忙时只接受读状态类命令,
+     * 若上一次确实还在跑,这个 06h 会被忽略。实际调用序列里上一次通常
+     * 已结束(WaitReady 随即返回),所以没问题;
+     * 万一遇到"擦除静默失败",优先怀疑这里 */
     W25Q_WriteEnable();
     st = W25Q128_WaitReady(W25Q_ERASE_TIMEOUT_MS);   /* 等前一次操作完成 */
     if (st != HAL_OK)

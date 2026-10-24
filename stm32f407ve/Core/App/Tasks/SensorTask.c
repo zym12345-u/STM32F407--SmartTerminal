@@ -80,6 +80,8 @@ void StartSensorTask(void *argument)
      * 单总线读 40 位是 us 级时序敏感操作(超时窗口 70~100us),读取期间临时把
      * 本任务提到 Realtime(高于 CommandTask High1/KEYTask High),避免被任务级
      * 抢占导致 T:err;只挡任务切换,不影响 UART/DMA 等中断响应。整个读取约 5ms */
+    /* Realtime 期间连 MonitorTask 都抢不过本任务,但整段只有约 5ms,
+     * 远小于 3s 判死线,喂狗不受影响 */
     osThreadSetPriority(osThreadGetId(), osPriorityRealtime);
     stEnv = DHT11_Read(&env);
     osThreadSetPriority(osThreadGetId(), osPriorityNormal);

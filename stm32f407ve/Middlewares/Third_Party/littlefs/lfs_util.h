@@ -8,11 +8,11 @@
 #ifndef LFS_UTIL_H
 #define LFS_UTIL_H
 
-/* ---- ±¾¹¤³Ì²Ã¼ô(2026-10-23, M3 ÒÆÖ²) ----
- * Âã»ú/RTOS ÉÏÃ»ÓÐ±ê×¼ assert Óë printf ÊÕÁ²Â·¾¶:
- *   LFS_NO_ASSERT  : ¹Øµô assert(), ±ÜÃâ Keil ÏÂ __aeabi_assert ËÀÑ­»·
- *   LFS_NO_DEBUG/WARN/ERROR : ¹Øµô¿âÄÚÈÕÖ¾, Í³Ò»ÓÉ bsp_lfs_port.c ÓÃ UART_Printf ´òÓ¡·µ»ØÖµ
- * ±£Áô malloc(Î´¶¨Òå LFS_NO_MALLOC), µ«±¾¹¤³ÌÒ»ÂÉ´«¾²Ì¬»º³åÇø, ²»ÒÀÀµ¶Ñ */
+/* ---- æœ¬å·¥ç¨‹è£å‰ª(2026-10-23, M3 ç§»æ¤) ----
+ * è£¸æœº/RTOS ä¸Šæ²¡æœ‰æ ‡å‡† assert ä¸Ž printf æ”¶æ•›è·¯å¾„:
+ *   LFS_NO_ASSERT  : å…³æŽ‰ assert(), é¿å… Keil ä¸‹ __aeabi_assert æ­»å¾ªçŽ¯
+ *   LFS_NO_DEBUG/WARN/ERROR : å…³æŽ‰åº“å†…æ—¥å¿—, ç»Ÿä¸€ç”± bsp_lfs_port.c ç”¨ UART_Printf æ‰“å°è¿”å›žå€¼
+ * ä¿ç•™ malloc(æœªå®šä¹‰ LFS_NO_MALLOC), ä½†æœ¬å·¥ç¨‹ä¸€å¾‹ä¼ é™æ€ç¼“å†²åŒº, ä¸ä¾èµ–å † */
 #ifndef LFS_NO_ASSERT
 #define LFS_NO_ASSERT
 #endif

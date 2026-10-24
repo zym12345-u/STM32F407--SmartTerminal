@@ -31,6 +31,9 @@ void StartMonitorTask(void *argument)
 
     for (;;)
     {
+        /* 报自己的心跳。注意 CheckAllAlive() 会跳过 MONITOR(不监控自己),
+         * 所以本任务自己卡死时不会被"判死"逻辑发现 ——
+         * 但那时也没人喂狗了,IWDG 照样会复位,这是最后的兜底 */
         Watchdog_Heartbeat(WDT_TASK_MONITOR);
 
         if (Watchdog_CheckAllAlive())

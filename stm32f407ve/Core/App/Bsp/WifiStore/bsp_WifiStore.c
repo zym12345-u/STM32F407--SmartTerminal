@@ -17,7 +17,8 @@ static uint32_t Wifi_CalcChecksum(const WifiCred_t *c)
     const uint8_t *p = (const uint8_t *)c;
     uint32_t sum = 0U;
     uint32_t n;
-    /* checksum 是最后一个字段,只校验它之前的所有字节 */
+    /* 只累加 checksum 字段"之前"的字节,不含它自身 ——
+     * 否则算之前就得先把自己填进去,鸡生蛋问题 */
     uint32_t bodyLen = (uint32_t)((const uint8_t *)&c->checksum - p);
 
     for (n = 0U; n < bodyLen; n++)
@@ -27,6 +28,9 @@ static uint32_t Wifi_CalcChecksum(const WifiCred_t *c)
     return sum;
 }
 
+/* 注意这里直接把 Flash 地址当结构体指针读 —— 内部 Flash 是"内存映射"的,
+ * CPU 能像读 RAM 一样读它,不需要任何驱动函数。
+ * 对比:外部 W25Q128 是 SPI Flash,必须走 bsp_W25Q128 的读接口 */
 uint8_t WifiStore_Load(WifiCred_t *out)
 {
     const WifiCred_t *stored = (const WifiCred_t *)WIFI_FLASH_BASE;
@@ -65,15 +69,18 @@ uint8_t WifiStore_Save(const WifiCred_t *in)
     buf.checksum = Wifi_CalcChecksum(&buf);
     words = (uint32_t)((sizeof(buf) + 3U) / 4U);
 
-    /* V1.1.1: 擦除 128KB 扇区期间 CPU 取指停顿(typ 1s/max 2s), 全任务冻结,
+    /* ⚠️ 这是"擦除冻结"的落点,调用方见 WifiTask.c 的 DoJoinCmd()。
+     * V1.1.1: 擦除 128KB 扇区期间 CPU 取指停顿(typ 1s/max 2s), 全任务冻结,
      * 1s 日常窗口必咬狗(真机已复现: 配网保存后 IWDG 复位)。
-     * 保存前放宽到 4s, 保存结束(无论成败)恢复 1s */
+     * 保存前放宽到 4s, 保存结束(无论成败)恢复 1s。
+     * 关键:此刻连喂狗的代码都执行不到,喂狗策略完全无效,
+     * 所以"放宽窗口"是这里唯一有效的手段 */
     IWDG_SetReload(IWDG_RELOAD_FLASH_SAVE);
     HAL_FLASH_Unlock();
 
     erase.TypeErase    = FLASH_TYPEERASE_SECTORS;
     erase.Banks        = FLASH_BANK_1;
-    erase.Sector       = FLASH_SECTOR_11;
+    erase.Sector       = FLASH_SECTOR_11;      /* 用最后一个扇区(128KB),远离程序区 */
     erase.NbSectors    = 1U;
     erase.VoltageRange = FLASH_VOLTAGE_RANGE_3;   /* 2.7~3.6V */
     halSt = HAL_FLASHEx_Erase(&erase, &err);

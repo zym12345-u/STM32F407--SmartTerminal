@@ -60,7 +60,11 @@ void USART2_IRQHandler(void)
     {
         uint8_t d = (uint8_t)(ESP_UART->DR & 0xFFU);
         uint16_t next = (uint16_t)((s_rxHead + 1U) % ESP_RX_BUF_SIZE);
-        if (next != s_rxTail)          /* 缓冲满则丢弃最旧?这里直接丢弃新字节 */
+        /* 满时丢弃"新到的"字节、保留已收到的旧数据(即丢弃最新的):
+         * 应答匹配靠 strstr 从头找 expect,已经攒下的前半段更有价值;
+         * 丢最新字节只是少收个尾巴,丢旧数据会让整条应答永远匹配不上。
+         * 2KB 缓冲对单条 AT 应答足够,实际很难真满 */
+        if (next != s_rxTail)
         {
             s_rx[s_rxHead] = d;
             s_rxHead = next;
@@ -113,7 +117,10 @@ static void ESP_RingFlush(void)
     s_rxTail = 0U;
 }
 
-/* 把环形缓冲当前内容拍快照成线性字符串(不改读写位置),返回长度 */
+/* 把环形缓冲当前内容拍快照成线性字符串,返回长度。
+ * ⚠️ 关键:只拷贝、不推进 s_rxTail(不改读写位置)。
+ *    因为调用方要反复检查 expect,且一条应答是分多次到达的,
+ *    消费掉就找不回前面的内容了。真正清缓冲只有 ESP_RingFlush() */
 static uint16_t ESP_RingCopy(uint8_t *out, uint16_t max)
 {
     uint16_t n = 0U;
@@ -153,6 +160,8 @@ uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs)
 
     /* 发命令前清空旧应答,保证只匹配本次响应 */
     ESP_RingFlush();
+    /* 阻塞发送。命令只有几十字节,115200 下实际 <10ms,不会撞上 2s 超时,
+     * 所以这一小段没有心跳注入也是安全的(相对下面最长 20s 的等待) */
     (void)HAL_UART_Transmit(&huart_esp, (uint8_t *)cmd, (uint16_t)strlen(cmd), 2000U);
 
     /* V1.1.3: 入口无条件上报一次心跳。
@@ -186,6 +195,8 @@ uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs)
         {
             return 0U;
         }
+        /* 10ms 轮询:再快没意义(115200 下字节间隔约 0.09ms),
+         * 再慢会拖长短命令的响应延迟;同时让出 CPU 给其它任务 */
         osDelay(10);
         /* V1.1.2: AT 等待最长 20s(CWJAP), 期间本循环不回到任务主循环,
          * 心跳停发超 3s 会被 MonitorTask 误判卡死而停喂狗(真机复现:
