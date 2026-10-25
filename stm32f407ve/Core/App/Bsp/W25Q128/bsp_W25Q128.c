@@ -211,16 +211,17 @@ HAL_StatusTypeDef W25Q128_SectorErase4K(uint32_t addr)
     /* 这里有两次 WaitReady,各等一件事:
      *   第 1 次(下面)—— 等上一次编程/擦除结束,确保芯片空闲;
      *   第 2 次(函数末尾)—— 等本次擦除真正完成。
-     * 注意顺序是"先 06h 写使能、再等空闲":芯片忙时只接受读状态类命令,
-     * 若上一次确实还在跑,这个 06h 会被忽略。实际调用序列里上一次通常
-     * 已结束(WaitReady 随即返回),所以没问题;
-     * 万一遇到"擦除静默失败",优先怀疑这里 */
-    W25Q_WriteEnable();
-    st = W25Q128_WaitReady(W25Q_ERASE_TIMEOUT_MS);   /* 等前一次操作完成 */
+     * ⚠️ 顺序必须是"先等空闲、再发 06h 写使能":芯片 BUSY 期间只接受
+     * 读状态寄存器类命令,06h 会被直接忽略且不报错,接着的擦除命令因
+     * WEL=0 被丢弃 —— 表现为"擦除静默失败、函数仍返回 OK"。
+     * 原先写成 06h 在前,靠调用方保证进来时已空闲,属隐式契约;对调后
+     * 自包含,不再依赖调用顺序 */
+    st = W25Q128_WaitReady(W25Q_ERASE_TIMEOUT_MS);   /* 先等前一次操作完成 */
     if (st != HAL_OK)
     {
         return st;
     }
+    W25Q_WriteEnable();
 
     W25Q_CS_LOW();
     (void)W25Q_SpiByte(W25Q_CMD_SECTOR_ERASE);
@@ -254,12 +255,14 @@ HAL_StatusTypeDef W25Q128_PageProgram(uint32_t addr, const uint8_t *pData, uint1
         return HAL_ERROR;
     }
 
-    W25Q_WriteEnable();
+    /* 同 SectorErase4K: 必须先等空闲再发 06h, 否则忙时 06h 被忽略,
+     * 编程命令因 WEL=0 被丢弃而静默失败 */
     st = W25Q128_WaitReady(W25Q_PROG_TIMEOUT_MS);
     if (st != HAL_OK)
     {
         return st;
     }
+    W25Q_WriteEnable();
 
     W25Q_CS_LOW();
     (void)W25Q_SpiByte(W25Q_CMD_PAGE_PROGRAM);

@@ -199,7 +199,9 @@ static void LFS_Port_SmokeTest(void)
 
 uint8_t LFS_Port_Mount(void)
 {
-    uint8_t probe[16];
+    /* 初值给 0x00 而不是留空: 若下面读失败且残留随机值恰好全 0xFF,
+     * 会被误判成空白片从而 format 抹掉数据。宁可初值"非空白" */
+    uint8_t probe[16] = {0};
     uint8_t blank = 1U;
     uint8_t i;
     int     err;
@@ -209,8 +211,13 @@ uint8_t LFS_Port_Mount(void)
         return 1U;
     }
 
-    /* 1. 探测块 0 是否空白: 全 0xFF 说明从未写过 */
-    (void)W25Q128_ReadData(LFS_FLASH_BASE, probe, (uint32_t)sizeof(probe));
+    /* 1. 探测块 0 是否空白: 全 0xFF 说明从未写过。
+     * 读失败直接返回, 绝不在"读不到"的情况下冒险 format */
+    if (W25Q128_ReadData(LFS_FLASH_BASE, probe, (uint32_t)sizeof(probe)) != HAL_OK)
+    {
+        UART_Printf("[LFS] mount aborted: probe read failed\r\n");
+        return 0U;
+    }
     for (i = 0U; i < (uint8_t)sizeof(probe); i++)
     {
         if (probe[i] != 0xFFU)
