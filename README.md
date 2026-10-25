@@ -22,7 +22,7 @@
 **V1.0（已验证）**
 - 10 个 FreeRTOS 任务，队列/任务通知/互斥锁分层通信
 - LVGL 现代化 UI + 触摸，30s 无操作自动息屏（时间戳比对，零定时器开销）
-- WiFi 配网（凭据存内部 Flash Sector 11）+ SNTP 自动对时
+- WiFi 配网 + SNTP 自动对时（V1.2 起凭据存 W25Q128/LittleFS）
 - RS485 Modbus RTU 从站：9600-8-N-1 地址 1，功能码 03/06/16，异常码 01/02/03
 - I2C 总线死锁恢复、SPI 触摸数据范围校验等总线容错
 
@@ -36,6 +36,12 @@
 
 ### V1.1 实战踩坑（已修复）
 事件驱动任务 `xTaskNotifyWait(portMAX_DELAY)` 死等通知，主站停轮询后心跳停发被误判卡死 → IWDG 误复位。修复：等待加 1s 超时兜底，心跳与外部流量解耦（`ModbusTask.c` 注释有完整记录）。
+
+**V1.2（已验证）**
+- W25Q128 SPI Flash（16MB）驱动：DWT 周期计数时基（boot 阶段零 tick 依赖）、字库区地址写保护、真机实测擦写时序
+- LittleFS 文件系统：2559×4KB≈10MB 分区，二次冷上电免格式化直挂，掉电持久性验证通过
+- LVGL 外挂 W25Q128 GBK 字库：RO-data 省 218KB，Unicode→GB2312 二分查表（6877 项），ASCII 回落内置字体
+- WiFi 凭据从内部 Flash 迁移至 LittleFS，FreeRTOS 堆扩至 32KB
 
 ## 任务一览
 
@@ -54,17 +60,17 @@
 ## 构建
 
 - Keil MDK5（AC5 编译器），工程：`stm32f407ve/MDK-ARM/stm32f407ve.uvprojx`
-- 当前固件指标：`Code≈193KB RO≈295KB RW≈1KB ZI≈92.4KB`，稳态 FreeRTOS 堆余量 ≈4.8KB
+- 当前固件指标（V1.2）：`Code≈213KB RO≈78KB RW≈1KB ZI≈92.5KB`，FreeRTOS 堆 32KB、稳态余量 ≈18KB
 
 ## 调试入口
 
 USART1（板载 USB-TTL，115200）输出全部运行日志：boot 复位源、稳态堆余量、WiFi 状态机、Modbus 收发帧、任务列表与 CPU 占比。
 
-## Roadmap（V1.2 规划）
+## Roadmap（远景）
 
-- W25Q128 SPI Flash + LittleFS（需先补 HAL SPI 驱动 + 堆扩至 32KB）
-- Modbus 补功能码 01/04、帧逐帧消费
-- MQTT 上云
+- CAN 总线（板载收发器，CAN1 = PB8/PB9）
+- OTA 升级：先串口 IAP（BootLoader / Flash 分区 / 固件校验 / 回滚），再叠加 MQTT 通道远程升级
+- SDIO/TF 卡、MQTT 上云
 
 ## 仓库结构
 
@@ -73,4 +79,5 @@ stm32f407ve/          固件工程（CubeMX + Keil）
   Core/App/Tasks/     应用任务层
   Core/App/Bsp/       板级驱动（RS485/ESP8266/IWDG/Flash/LCD/触摸/传感器）
   Core/Src/           CubeMX 生成 + freertos.c 任务装配
+  Middlewares/Third_Party/littlefs/  LittleFS 文件系统
 ```

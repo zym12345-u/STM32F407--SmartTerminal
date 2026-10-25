@@ -37,6 +37,8 @@ JLinkLog.txt
 # 需要查阅时从 zip 重新解压即可。
 案例/*.zip
 案例/*/
+# 笔记/ 下是本地学习用的交互教学演练场 HTML, 非工程文件, 只留本地不入库
+笔记/
 .trae/
 .trae-html-share-packages/
 debug.log
