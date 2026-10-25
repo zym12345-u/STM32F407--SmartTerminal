@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
 <Project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="project_projx.xsd">
 
   <SchemaVersion>2.1</SchemaVersion>
@@ -593,6 +593,11 @@
               <FilePath>../Core/App/Tasks/KeyTask.c</FilePath>
             </File>
             <File>
+              <FileName>LEDType.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/App/Types/LEDType.h</FilePath>
+            </File>
+            <File>
               <FileName>LEDTask.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/App/Tasks/LEDTask.c</FilePath>
@@ -601,11 +606,6 @@
               <FileName>CommandTask.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/App/Tasks/CommandTask.c</FilePath>
-            </File>
-            <File>
-              <FileName>LEDType.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Core/App/Types/LEDType.h</FilePath>
             </File>
             <File>
               <FileName>SensorData.h</FileName>
