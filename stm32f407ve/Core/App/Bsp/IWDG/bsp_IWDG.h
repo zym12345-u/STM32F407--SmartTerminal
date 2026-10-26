@@ -29,7 +29,8 @@ typedef enum {
     WDT_TASK_COMMAND  = 6,
     WDT_TASK_MONITOR  = 7,
     WDT_TASK_STORAGE  = 8,   /* V1.2: W25Q128/LittleFS 存储访问(boot 阶段自测也记到此槽位) */
-    WDT_TASK_MAX      = 9
+    WDT_TASK_CAN      = 9,   /* V1.3: CAN 通信任务(常规任务槽, 不跳过检查) */
+    WDT_TASK_MAX      = 10
 } WDT_TaskId_t;
 
 /** 初始化并启动 IWDG(超时约 1000ms), 启动后无法关闭 */

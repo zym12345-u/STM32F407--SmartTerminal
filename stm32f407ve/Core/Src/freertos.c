@@ -34,6 +34,7 @@ extern void GuiTask_Create(void);
 extern void SensorTask_Create(void);
 extern void WifiTask_Create(void);
 extern void ModbusTask_Create(void);   /* Modbus RTU 从站任务(App/Tasks/ModbusTask.c) */
+extern void CanTask_Create(void);      /* CAN 通信任务(App/Tasks/CanTask.c) */
 extern void MonitorTask_Create(void);  /* 心跳监控 + IWDG 喂狗(App/Tasks/MonitorTask.c) */
 #include "bsp_W25Q128.h"               /* V1.2 外部 Flash(boot 阶段 M1/M1.5 自检) */
 #include "bsp_lfs_port.h"              /* V1.2 M3 LittleFS 挂载 */
@@ -182,10 +183,12 @@ void MX_FREERTOS_Init(void) {
   GuiTask_Create();
   /* 传感器采集任务:实现在 Core/App/Tasks/SensorTask.c,采集 BH1750+DHT11 */
   SensorTask_Create();
-  /* WiFi 对时任务:实现在 Core/App/Tasks/WifiTask.c,ESP8266(USART3) SNTP 取网络时间 */
+  /* WiFi 对时任务:实现在 Core/App/Tasks/WifiTask.c,ESP8266(USART2) SNTP 取网络时间 */
   WifiTask_Create();
   /* Modbus RTU 从站任务:实现在 Core/App/Tasks/ModbusTask.c,RS485(USART3) */
   ModbusTask_Create();
+  /* CAN 通信任务:实现在 Core/App/Tasks/CanTask.c, CAN1(PB8/PB9) 500Kbps */
+  CanTask_Create();
   /* 系统监控任务:心跳检测 + IWDG 喂狗(App/Tasks/MonitorTask.c) */
   MonitorTask_Create();
   /* 系统统计任务:5s 周期打印任务栈水位 + 各任务 CPU 占比(DWT 计数) */

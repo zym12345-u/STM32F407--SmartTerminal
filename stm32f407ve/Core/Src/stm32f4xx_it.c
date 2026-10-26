@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "can.h"   /* hcan1 声明(CubeMX 生成) */
 #include "usart.h"   /* huart1 / hdma_usart1_tx */
 #include "bsp_RS485.h"  /* RS485_IdleISR, USART3 IDLE 中断处理 */
 /* USER CODE END Includes */
@@ -261,5 +262,20 @@ void USART1_IRQHandler(void)
 void DMA2_Stream7_IRQHandler(void)
 {
   HAL_DMA_IRQHandler(&hdma_usart1_tx);
+}
+
+/**
+  * @brief CAN1 RX0 中断(接收 FIFO0 有挂起报文)
+  * @note  抢占优先级 = 5(.ioc 中配置, 见 HAL_NVIC_SetPriority(CAN1_RX0_IRQn, 5, 0))。
+  *        必须 >= 5 是因为回调里会调 xQueueSendToBackFromISR:
+  *        FreeRTOS 的 configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY = 5,
+  *        优先级数值小于 5 会触发断言(厂商例程写 0/0 是不能照抄的)。
+  * @note  本函数在 USER CODE 区手写: CubeMX 生成路径(Inc/Src)与工程实际结构
+  *        (Core/Inc、Core/Src)不一致, 生成产物需人工搬移。若以后 CubeMX 直接在
+  *        Core 下生成, 它会再产生同名函数导致重复定义, 届时删除本版本即可。
+  */
+void CAN1_RX0_IRQHandler(void)
+{
+  HAL_CAN_IRQHandler(&hcan1);
 }
 /* USER CODE END 1 */
