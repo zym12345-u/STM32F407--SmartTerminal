@@ -145,6 +145,15 @@ void StartCanTask(void *argument)
         UART_Printf("[CAN] task abort: BspInit failed\r\n");
     }
 
+#if CAN_TEST_FILTER_EXACT
+    /* T4 验收: 精确匹配 0x123,分析仪发其它 ID 应一律不打印。
+     * 注意(R6): 运行期改过滤器会置 FMR.FINIT,期间到期的帧会丢,属 HAL 固有行为。 */
+    if (CAN_FilterSet(CAN_ID_TEST, 0x7FFU) == 0U)
+    {
+        UART_Printf("[CAN] T4: filter exact 0x%03lX only\r\n", (unsigned long)CAN_ID_TEST);
+    }
+#endif
+
     for (;;)
     {
         Watchdog_Heartbeat(WDT_TASK_CAN);      /* 每轮入口无条件上报 */

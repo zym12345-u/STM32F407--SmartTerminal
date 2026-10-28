@@ -92,6 +92,7 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();   /* RS485 物理层(PB10/PB11);USART2 由 ESP8266 自初始化 */
+  MX_CAN1_Init();          /* CAN1(PB8/PB9 AF9); 位时序由 bsp_CAN.c 的 CAN_BspInit 覆写 */
   /* USER CODE BEGIN 2 */
   /* 板载 LED 为低电平点亮(灌电流):输出 RESET 亮、SET 灭。
    * MX_GPIO_Init 后引脚默认 RESET(灯亮),调度器启动前先熄灭两灯,

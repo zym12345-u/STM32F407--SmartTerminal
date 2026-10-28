@@ -45,6 +45,14 @@
   */
 #define CAN_TEST_LOOPBACK   0U
 
+/**
+  * @brief  T4 验收开关: 精确匹配过滤器测试
+  * @note   1 = 收端只放行 CAN_ID_TEST(0x123),其余标准帧全被硬件拦掉,
+  *         用于验证 CAN_FilterSet; 0 = 全通过滤(默认)。
+  *         验收完必须改回 0,同 CAN_TEST_LOOPBACK 的管理方式。
+  */
+#define CAN_TEST_FILTER_EXACT 0U
+
 /* 波特率: 500000 / 250000 / 125000 / 1000000(位时序表见派活单 §7) */
 #define CAN_BAUDRATE        500000U
 

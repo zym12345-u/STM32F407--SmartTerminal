@@ -316,8 +316,10 @@ uint8_t CAN_FilterSet(uint32_t stdId, uint32_t mask)
 void CAN_UpdateBusState(void)
 {
     uint32_t esr = hcan1.Instance->ESR;
-    uint8_t  tec = (uint8_t)(esr & 0xFFU);
-    uint8_t  rec = (uint8_t)((esr >> 8) & 0xFFU);
+    /* CAN_ESR 位段: [0]EWGF [1]EPVF [2]BOFF [6:4]LEC [15:8]TEC [23:16]REC。
+     * 别再把 TEC/REC 读成低字节 —— 低 8 位是标志+LEC,不是计数器。 */
+    uint8_t  tec = (uint8_t)((esr & CAN_ESR_TEC) >> CAN_ESR_TEC_Pos);
+    uint8_t  rec = (uint8_t)((esr & CAN_ESR_REC) >> CAN_ESR_REC_Pos);
 
     /* ⑥ BOFF 优先 */
     CanBusState_t st;
