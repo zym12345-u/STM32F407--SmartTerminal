@@ -170,7 +170,8 @@ void StartCanTask(void *argument)
              * 任务插入, 这一行就断成两截 —— 现场 [CANSOR] 之类花屏的直接来源。
              * 边界: 每字节占 3 字符("XX "), 8 字节共 24, 缓冲 32 足够;
              * 仍用 p < sizeof-4 卡住, 防 snprintf 写越界。 */
-            char hex[32];
+            char hex[32] = {0};   /* 必须清零: dlc=0(零长度帧)时循环不执行,
+                                   * 未初始化的栈内容会被 %s 一直读到随机 0x00 */
             int  p = 0;
             for (uint8_t i = 0U; i < msg.dlc && p < (int)sizeof(hex) - 4; i++)
             {

@@ -51,9 +51,13 @@ void StartMonitorTask(void *argument)
              * 容量: WDT_TASK_MAX(10) * "  task[NN]=NNNNNNNNN\r\n"(约 22B)
              *      ≈ 220B, 给 320B 留足余量; 用 snprintf 逐段拼并卡边界。 */
             uint8_t i;
-            char    beats[320];
+            char    beats[320] = {0};
             int     p = 0;
-            for (i = 0U; i < WDT_TASK_MAX; i++)
+            /* 边界: snprintf 返回的是"应写入长度"而非实际写入长度, p 可能超过
+             * 缓冲容量; 若 p > sizeof(beats), 下面 sizeof - (size_t)p 会无符号
+             * 下溢成极大值, snprintf 就会写爆栈。故循环条件必须卡住剩余空间。
+             * 单行最长 "  task[99]=4294967295\r\n" = 23 字符, 留 28 保守。 */
+            for (i = 0U; (i < WDT_TASK_MAX) && (p < (int)sizeof(beats) - 28); i++)
             {
                 p += snprintf(&beats[p], sizeof(beats) - (size_t)p,
                               "  task[%u]=%lu\r\n", (unsigned)i,
