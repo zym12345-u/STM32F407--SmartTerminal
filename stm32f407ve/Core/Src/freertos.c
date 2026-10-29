@@ -347,8 +347,10 @@ static void StartStatsTask(void *argument)
 
     /* CPU 占比: Name AbsTime(统计单位) Percent%%(上电以来累计平均) */
     vTaskGetRunTimeStats(buf);
-    UART_Printf("================ CPU Usage =================\r\n%s", buf);
-    UART_Printf("============================================\r\n");
+    /* 分隔线并入同一次调用: 单独再打一行的话, 其它任务的日志可能插在
+     * CPU 占比内容和结尾分隔线之间, 这一份报告就断开了 */
+    UART_Printf("================ CPU Usage =================\r\n%s"
+                "============================================\r\n", buf);
 
     osDelay(5000U);
   }

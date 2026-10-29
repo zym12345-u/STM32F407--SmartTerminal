@@ -402,76 +402,95 @@ void UART_Printf(const char *fmt, ...)
   va_list ap;
   int len;
 
-  va_start(ap, fmt);
-  len = vsnprintf(uart1PrintfBuf, sizeof(uart1PrintfBuf), fmt, ap);
-  va_end(ap);
-
-  if (len <= 0)
-    return;
-  if (len >= (int)sizeof(uart1PrintfBuf))
-    len = (int)sizeof(uart1PrintfBuf) - 1;
-
-  /* RTOS 未启动(main 初始化阶段):单线程,直接轮询发送 */
+  /* ===== 分支 A: RTOS 未启动(main 初始化阶段) =====
+   * 单线程无并发, 直接格式化 + 轮询发送, 不取锁。
+   * 顺序必须是"先判内核状态、后决定是否取锁": 内核未运行时 osMutexAcquire
+   * 不可用(调度器未起 / 句柄为 NULL), 在这条路径上取锁会直接挂死。 */
   if (osKernelGetState() != osKernelRunning ||
       uart1PrintfMutex == NULL || uart1TxDoneSem == NULL)
   {
+    va_start(ap, fmt);
+    len = vsnprintf(uart1PrintfBuf, sizeof(uart1PrintfBuf), fmt, ap);
+    va_end(ap);
+
+    if (len <= 0)
+      return;
+    if (len >= (int)sizeof(uart1PrintfBuf))
+      len = (int)sizeof(uart1PrintfBuf) - 1;
+
     (void)HAL_UART_Transmit(&huart1, (uint8_t *)uart1PrintfBuf, (uint16_t)len, 0xFFFFU);
     return;
   }
 
+  /* ===== 分支 B: RTOS 已启动 =====
+   * 【先取锁, 再格式化】。uart1PrintfBuf 是静态共享缓冲: 若把格式化留在锁外,
+   * 高优先级任务可以在本任务 vsnprintf 之后、取锁之前抢占并覆盖这块缓冲,
+   * 本任务随后发出去的就是对方的内容 —— 日志张冠李戴或半截杂交。
+   * 这与本文件 uart1WireBuf 是同一个道理(那处注释早就写明"绝不能在锁外
+   * 组装"), 但 uart1PrintfBuf 此前一直没遵守, 是真实的内存竞争, 不是显示问题。 */
+  (void)osMutexAcquire(uart1PrintfMutex, osWaitForever);
+
   /* 默认发裸载荷;诊断成帧在互斥锁内组装(uart1WireBuf 也是静态共享资源,
    * 绝不能在锁外组装,否则会被高优先级任务在取锁前重写) */
   uint8_t *txData = (uint8_t *)uart1PrintfBuf;
-  uint16_t txLen  = (uint16_t)len;
+  uint16_t txLen  = 0U;
 
-  (void)osMutexAcquire(uart1PrintfMutex, osWaitForever);
+  va_start(ap, fmt);
+  len = vsnprintf(uart1PrintfBuf, sizeof(uart1PrintfBuf), fmt, ap);
+  va_end(ap);
+
+  /* 单一出口: 下面不再出现 return, 保证任何路径都走到末尾的 Release。
+   * 锁内提前 return 会漏放锁, 其它任务将永久阻塞在 UART_Printf 上 ——
+   * 这比日志穿插严重得多, 等于把串口打成一个死锁。 */
+  if (len > 0)
+  {
+    if (len >= (int)sizeof(uart1PrintfBuf))
+      len = (int)sizeof(uart1PrintfBuf) - 1;
+    txLen = (uint16_t)len;
 
 #if UART_DIAG_FRAME
-  {
-    uint8_t xor = 0U;
-    int i;
-    for (i = 0; i < len; i++)
-      xor ^= (uint8_t)uart1PrintfBuf[i];
-    int h = snprintf((char *)uart1WireBuf, 8U, "<B%04lu>",
-                     (unsigned long)(uart1MsgSeq & 0xFFFFU));
-    int t = snprintf((char *)uart1WireBuf + h + len, 8U, "<E%02X>",
-                     (unsigned)xor);
-    memcpy(&uart1WireBuf[h], uart1PrintfBuf, (size_t)len);
-    txData = uart1WireBuf;
-    txLen  = (uint16_t)(h + len + t);
-    uart1MsgSeq++;
-  }
+    {
+      uint8_t xor = 0U;
+      int i;
+      for (i = 0; i < len; i++)
+        xor ^= (uint8_t)uart1PrintfBuf[i];
+      int h = snprintf((char *)uart1WireBuf, 8U, "<B%04lu>",
+                       (unsigned long)(uart1MsgSeq & 0xFFFFU));
+      int t = snprintf((char *)uart1WireBuf + h + len, 8U, "<E%02X>",
+                       (unsigned)xor);
+      memcpy(&uart1WireBuf[h], uart1PrintfBuf, (size_t)len);
+      txData = uart1WireBuf;
+      txLen  = (uint16_t)(h + len + t);
+      uart1MsgSeq++;
+    }
 #endif
 
-  /* 防御:排空可能遗留的完成信号量计数(历史 fputc DMA 路径曾留下多余计数,
-   * 会让下面的等待提前返回),确保随后的 acquire 等到的一定是本次 DMA 的 TC */
-  while (osSemaphoreAcquire(uart1TxDoneSem, 0U) == osOK) { ; }
+    /* 防御:排空可能遗留的完成信号量计数(历史 fputc DMA 路径曾留下多余计数,
+     * 会让下面的等待提前返回),确保随后的 acquire 等到的一定是本次 DMA 的 TC */
+    while (osSemaphoreAcquire(uart1TxDoneSem, 0U) == osOK) { ; }
 
-  /* 等上一条 DMA 真正发完(正常情况下 UART_Printf 返回时已等完,busy 恒为 0) */
-  if (uart1DmaBusy)
-    (void)osSemaphoreAcquire(uart1TxDoneSem, osWaitForever);
+    /* 等上一条 DMA 真正发完(正常情况下 UART_Printf 返回时已等完,busy 恒为 0) */
+    if (uart1DmaBusy)
+      (void)osSemaphoreAcquire(uart1TxDoneSem, osWaitForever);
 
-  uart1DmaBusy = 1U;
-  if (HAL_UART_Transmit_DMA(&huart1, txData, txLen) != HAL_OK)
-  {
-    uart1DmaBusy = 0U;
-    (void)osMutexRelease(uart1PrintfMutex);
-    return;
-  }
-
-  /* 等发送真正结束。信号量只作"完成唤醒",最终以硬件为准:DMA 剩余计数为 0
-   * 且 UART 移位完成(TC)才放行——即使信号量存在任何多余计数,也绝不可能在
-   * DMA 还读 uart1PrintfBuf 时提前返回去复用该缓冲(此前线上撕裂的根因) */
-  for (;;)
-  {
-    (void)osSemaphoreAcquire(uart1TxDoneSem, osWaitForever);
-    if ((__HAL_DMA_GET_COUNTER(&hdma_usart1_tx) == 0U) &&
-        (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_TC) != RESET))
+    uart1DmaBusy = 1U;
+    if (HAL_UART_Transmit_DMA(&huart1, txData, txLen) == HAL_OK)
     {
-      break;
+      /* 等发送真正结束。信号量只作"完成唤醒",最终以硬件为准:DMA 剩余计数为 0
+       * 且 UART 移位完成(TC)才放行——即使信号量存在任何多余计数,也绝不可能在
+       * DMA 还读 uart1PrintfBuf 时提前返回去复用该缓冲(此前线上撕裂的根因) */
+      for (;;)
+      {
+        (void)osSemaphoreAcquire(uart1TxDoneSem, osWaitForever);
+        if ((__HAL_DMA_GET_COUNTER(&hdma_usart1_tx) == 0U) &&
+            (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_TC) != RESET))
+        {
+          break;
+        }
+      }
     }
+    uart1DmaBusy = 0U;
   }
-  uart1DmaBusy = 0U;
 
   (void)osMutexRelease(uart1PrintfMutex);
 }

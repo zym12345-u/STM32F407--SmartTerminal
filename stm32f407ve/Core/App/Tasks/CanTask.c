@@ -31,6 +31,7 @@
 #include "cmsis_os2.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include <stdio.h>          /* snprintf: 整行日志先在局部缓冲拼好再发出 */
 #include "usart.h"          /* UART_Printf */
 #include "bsp_IWDG.h"       /* Watchdog_Heartbeat / WDT_TASK_CAN */
 #include "bsp_CAN.h"
@@ -163,13 +164,21 @@ void StartCanTask(void *argument)
         /* ---- 1. 收帧分发: 非阻塞排空 ---- */
         while (CAN_RxPop(&msg, 0U) == 0U)
         {
-            UART_Printf("[CAN] rx id=0x%03lX dlc=%u data=",
-                        (unsigned long)msg.id, (unsigned)msg.dlc);
-            for (uint8_t i = 0U; i < msg.dlc; i++)
+            /* 整行先拼进局部缓冲, 再一次 UART_Printf 发出。
+             * UART_Printf 保证的是【单次调用】原子: 此前拆成
+             * "前缀 + 8 个 %02X + 换行" 共 10 次调用, 中间任何一次被别的
+             * 任务插入, 这一行就断成两截 —— 现场 [CANSOR] 之类花屏的直接来源。
+             * 边界: 每字节占 3 字符("XX "), 8 字节共 24, 缓冲 32 足够;
+             * 仍用 p < sizeof-4 卡住, 防 snprintf 写越界。 */
+            char hex[32];
+            int  p = 0;
+            for (uint8_t i = 0U; i < msg.dlc && p < (int)sizeof(hex) - 4; i++)
             {
-                UART_Printf("%02X ", (unsigned)msg.data[i]);
+                p += snprintf(&hex[p], sizeof(hex) - (size_t)p, "%02X ",
+                              (unsigned)msg.data[i]);
             }
-            UART_Printf("\r\n");
+            UART_Printf("[CAN] rx id=0x%03lX dlc=%u data=%s\r\n",
+                        (unsigned long)msg.id, (unsigned)msg.dlc, hex);
         }
 
         /* ---- 2. 周期心跳帧 ---- */

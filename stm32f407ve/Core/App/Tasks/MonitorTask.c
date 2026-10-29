@@ -15,6 +15,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "cmsis_os2.h"
+#include <stdio.h>   /* snprintf: 诊断报告先在局部缓冲拼好再发出 */
 
 #include "bsp_IWDG.h"
 #include "usart.h"   /* UART_Printf */
@@ -43,13 +44,22 @@ void StartMonitorTask(void *argument)
         else
         {
             /* 有任务卡死: 打印诊断信息, 不喂狗, 等待 IWDG 复位 */
+            /* 整个报告先拼进局部缓冲, 再一次 UART_Printf 发出。
+             * 与 CanTask 的 rx 行同理: 这里是"多行拼一份报告", 若逐行调用,
+             * 其它任务的日志会插在 task[3] 与 task[4] 之间, 这份诊断就被
+             * 打散得没法读。真正卡死的现场恰恰最需要它可读。
+             * 容量: WDT_TASK_MAX(10) * "  task[NN]=NNNNNNNNN\r\n"(约 22B)
+             *      ≈ 220B, 给 320B 留足余量; 用 snprintf 逐段拼并卡边界。 */
             uint8_t i;
-            UART_Printf("[MON] task stuck! last beats:\r\n");
+            char    beats[320];
+            int     p = 0;
             for (i = 0U; i < WDT_TASK_MAX; i++)
             {
-                UART_Printf("  task[%u]=%lu\r\n", (unsigned)i,
-                            (unsigned long)Watchdog_GetLastBeat((WDT_TaskId_t)i));
+                p += snprintf(&beats[p], sizeof(beats) - (size_t)p,
+                              "  task[%u]=%lu\r\n", (unsigned)i,
+                              (unsigned long)Watchdog_GetLastBeat((WDT_TaskId_t)i));
             }
+            UART_Printf("[MON] task stuck! last beats:\r\n%s", beats);
             /* 不喂狗, IWDG 约 1s 后复位 */
         }
 
