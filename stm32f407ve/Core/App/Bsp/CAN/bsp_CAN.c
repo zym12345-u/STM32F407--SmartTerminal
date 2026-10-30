@@ -364,7 +364,11 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
     while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0U)
     {
         CAN_RxHeaderTypeDef hdr;
-        CanMsg_t            msg;
+        /* 必须整体清零: HAL_CAN_GetRxMessage 只按 DLC 拷贝有效字节,
+         * dlc<8 时 data[] 剩余字节是未初始化的栈垃圾。V1.4 的命令处理器
+         * 会直接读 data[0]/data[1],若对端发来 dlc=1 的 0x201,param 就会
+         * 取到随机值 —— 可能把 0x04 之类的垃圾当合法灯编号, 误动作。 */
+        CanMsg_t            msg = {0};
 
         if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &hdr, msg.data) != HAL_OK)
         {
