@@ -1,8 +1,10 @@
 # ===== Keil MDK 编译产物（可再生成，不入库） =====
-MDK-ARM/Listings/
-MDK-ARM/Objects/
-MDK-ARM/RTE/
-MDK-ARM/DebugConfig/
+# 工程实际在 stm32f407ve/MDK-ARM 下，用 **/ 前缀保证嵌套路径也能命中
+**/MDK-ARM/Listings/
+**/MDK-ARM/Objects/
+**/MDK-ARM/BootLoader/
+**/MDK-ARM/RTE/
+**/MDK-ARM/DebugConfig/
 MDK-ARM/EventRecorderStub.scvd
 build_log.txt
 *.uvguix.*
@@ -41,5 +43,6 @@ JLinkLog.txt
 笔记/
 .trae/
 .trae-html-share-packages/
+.screenshots/
 debug.log
 *.log

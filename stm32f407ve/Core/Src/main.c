@@ -69,7 +69,16 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  /* V2.0：本工程固件已从 0x08000000 平移到 0x0800C000（0x08000000 起归 BootLoader）。
+   * Cortex-M 的异常/中断入口由 SCB->VTOR 决定，而 SystemInit 里默认写的是
+   * FLASH_BASE(0x08000000)——那是 BootLoader 的向量表；若不在此纠正，本工程所有
+   * 中断都会按 BootLoader 的表分发，直接跳进它的 Default_Handler 死循环。
+   * 放在 main() 最开头、HAL_Init 之前，是因为 HAL_Init 会启动时基中断。
+   * 不直接改 system_stm32f4xx.c 的 VECT_TAB_OFFSET：那个文件由 CubeMX 生成，
+   * 重新生成时会被覆盖；USER CODE 区不会被覆盖。 */
+  SCB->VTOR = 0x0800C000UL;
+  __DSB();
+  __ISB();
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
