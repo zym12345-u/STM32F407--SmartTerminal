@@ -19,6 +19,13 @@
   *            - WiFi 配网走 WifiTask 的 cmdQ/evtQ 双向队列
   *
   *          屏幕方向:横屏 320x240。LVGL tick 由 FreeRTOS xTaskGetTickCount 提供。
+  *
+  *          与其它任务的配合:
+  *            - LEDTask:GUI 只往 LEDQueue 投消息,不直接操作 GPIO
+  *            - SensorTask:单向读全局 g_sensorData(在 LVGL 定时器里读,不阻塞)
+  *            - WifiTask:双向队列,GUI 发命令、定时器轮询收事件
+  *          本任务不阻塞等待任何东西(所有队列操作都是非阻塞),保证 5ms 一轮刷新。
+  *
   * 硬件连接(魔女 STM32F407VET6 + 2.8寸屏):
   *   LCD  ILI9341,FSMC Bank1 8080并口16bit,背光 PA15
   *   触摸 XPT2046,GPIO 模拟 SPI:IRQ=PE4 CS=PD13 CLK=PE0 MOSI=PE2 MISO=PE3
@@ -39,6 +46,7 @@
 #include "SensorData.h"
 #include "ClockData.h"
 #include "WifiNet.h"
+#include "bsp_font_gbk.h"   /* V1.2: 中文改走外挂字库(内部 262KB 字库已关闭) */
 #include "usart.h"
 #include "PowerMgr.h"
 #include <stdio.h>
@@ -92,6 +100,9 @@ static uint8_t   s_wifiBusy;
 
 /* ======================================================================== */
 
+/* 跨任务投递 LED 命令:队列里只传指针,不传结构体本身,省一次拷贝。
+ * ⚠️ 内存约定:这里 pvPortMalloc,由 LEDTask 那边 vPortFree(见 LEDTask.c)。
+ *    投递失败时必须自己释放,否则泄漏 —— 这是最容易漏的一处 */
 static void GUI_LedPost(LEDColor color, LEDState state)
 {
   LEDMessage *msg = pvPortMalloc(sizeof(LEDMessage));
@@ -99,6 +110,7 @@ static void GUI_LedPost(LEDColor color, LEDState state)
   {
     msg->color = color;
     msg->state = state;
+    /* 超时 0:界面线程不能被队列卡住,投不进就丢弃 */
     if(osMessageQueuePut(LEDQueueHandle, &msg, 0U, 0U) != osOK)
     {
       vPortFree(msg);
@@ -531,7 +543,7 @@ static void WifiList_Refresh(void)
             lv_obj_set_width(lbl, 280);
             lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
             lv_obj_set_style_text_color(lbl, COLOR_TEXT, 0);
-            lv_obj_set_style_text_font(lbl, &lv_font_gb2312_16, 0);
+            lv_obj_set_style_text_font(lbl, BSP_Font_Gbk16(), 0);
         }
     }
 }
@@ -640,6 +652,10 @@ static void WifiPwdHideReady(lv_anim_t *a)
     lv_obj_set_style_translate_y(s_pwdPanel, 0, 0);  /* 复位 translate,下次滑入从 0 开始 */
 }
 
+/* 100ms 轮询一次 WifiTask 的事件队列。
+ * ⚠️ 不在 WiFi 页时直接 return,事件不会被取走,会一直堆在 evtQ 里。
+ *    所以进入 WiFi 页时(WifiEntryEventCb)必须先把陈旧事件清空,
+ *    否则一进去就收到上一次的 SCAN_DONE/JOIN_OK,界面状态就乱了 */
 static void WifiEventTimerCb(lv_timer_t *timer)
 {
     WifiEvent_t ev;
@@ -688,6 +704,8 @@ static void WifiEntryEventCb(lv_event_t *event)
     WifiEvent_t stale;
     (void)event;
 
+    /* 清空上次留下的陈旧事件(原因见 WifiEventTimerCb 的注释),
+     * 否则刚进页面就会被历史事件覆盖掉状态 */
     while (Wifi_TryGetEvent(&stale) != 0U) { ; }
 
     s_wifiBusy = 1U;
@@ -771,7 +789,7 @@ static void GUI_CreateWifiScreen(void)
     s_pwdPrompt = lv_label_create(s_pwdPanel);
     lv_label_set_text(s_pwdPrompt, "Password");
     lv_obj_set_style_text_color(s_pwdPrompt, COLOR_TEXT, 0);
-    lv_obj_set_style_text_font(s_pwdPrompt, &lv_font_gb2312_16, 0);
+    lv_obj_set_style_text_font(s_pwdPrompt, BSP_Font_Gbk16(), 0);
     lv_obj_set_pos(s_pwdPrompt, 8, 2);
 
     s_pwdTa = lv_textarea_create(s_pwdPanel);
@@ -845,22 +863,30 @@ void StartGuiTask(void *argument)
   GUI_CreateMainScreen();
   GUI_CreateWifiScreen();
 
-  /* 传感器刷新定时器:1s */
+  /* LVGL 定时器不是硬件定时器,而是挂在 lv_timer_handler() 上的软件回调,
+   * 只有主循环跑到 handler 时才会被执行 */
+  /* 传感器刷新:1s */
   lv_timer_create(SensorRefreshTimerCb, 1000, NULL);
 
-  /* WiFi 配网事件定时器:100ms */
+  /* WiFi 配网事件轮询:100ms */
   lv_timer_create(WifiEventTimerCb, 100, NULL);
 
   UART_Printf("[GUI] modern UI created, entering loop\r\n");
 
   PowerMgr_Init();
 
+  /* LVGL 是"单线程轮询"模型:必须周期性调用 lv_timer_handler(),
+   * 它内部才会去跑定时器回调、重绘界面、读触摸。这个周期决定流畅度:
+   *   正常 → 5ms 一轮,动画和触摸都跟手
+   *   息屏 → 跳过 handler,只轮询触摸,省掉无谓的重绘开销 */
   for(;;)
   {
+    /* 每 5ms 就报一次,远快于 3s 判死线 —— GUI 这条心跳是全工程最稳的 */
     Watchdog_Heartbeat(WDT_TASK_GUI);
 
     if (PowerMgr_IsSleeping() != 0U)
     {
+      /* 息屏:不再刷新界面,只查触摸用于唤醒 */
       if (XPT2046_IsPressed() != 0U)
         PowerMgr_Wakeup();
       osDelay(POWERMGR_SLEEP_POLL_MS);

@@ -82,6 +82,14 @@ uint8_t Watchdog_CheckAllAlive(void)
         {
             continue;
         }
+        /* STORAGE 槽位仅 boot 阶段由 W25Q128/LittleFS 自检使用,
+         * boot 完成后没有任何常驻任务持续上报该槽位;
+         * 若参与判死, boot 心跳 3s 后即超时, MonitorTask 拒喂 -> IWDG 复位。
+         * 这里直接跳过, 未来真建 StorageTask 时再把它加回判死集合 */
+        if (i == WDT_TASK_STORAGE)
+        {
+            continue;
+        }
         /* 心跳为 0 说明该任务从未上报(可能尚未启动), 暂不判死 */
         if (s_lastBeat[i] != 0U &&
             (now - s_lastBeat[i]) > pdMS_TO_TICKS(WDT_HEARTBEAT_TIMEOUT_MS))

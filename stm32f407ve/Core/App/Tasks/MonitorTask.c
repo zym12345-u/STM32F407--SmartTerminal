@@ -15,6 +15,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "cmsis_os2.h"
+#include <stdio.h>   /* snprintf: 诊断报告先在局部缓冲拼好再发出 */
 
 #include "bsp_IWDG.h"
 #include "usart.h"   /* UART_Printf */
@@ -31,6 +32,9 @@ void StartMonitorTask(void *argument)
 
     for (;;)
     {
+        /* 报自己的心跳。注意 CheckAllAlive() 会跳过 MONITOR(不监控自己),
+         * 所以本任务自己卡死时不会被"判死"逻辑发现 ——
+         * 但那时也没人喂狗了,IWDG 照样会复位,这是最后的兜底 */
         Watchdog_Heartbeat(WDT_TASK_MONITOR);
 
         if (Watchdog_CheckAllAlive())
@@ -40,13 +44,26 @@ void StartMonitorTask(void *argument)
         else
         {
             /* 有任务卡死: 打印诊断信息, 不喂狗, 等待 IWDG 复位 */
+            /* 整个报告先拼进局部缓冲, 再一次 UART_Printf 发出。
+             * 与 CanTask 的 rx 行同理: 这里是"多行拼一份报告", 若逐行调用,
+             * 其它任务的日志会插在 task[3] 与 task[4] 之间, 这份诊断就被
+             * 打散得没法读。真正卡死的现场恰恰最需要它可读。
+             * 容量: WDT_TASK_MAX(10) * "  task[NN]=NNNNNNNNN\r\n"(约 22B)
+             *      ≈ 220B, 给 320B 留足余量; 用 snprintf 逐段拼并卡边界。 */
             uint8_t i;
-            UART_Printf("[MON] task stuck! last beats:\r\n");
-            for (i = 0U; i < WDT_TASK_MAX; i++)
+            char    beats[320] = {0};
+            int     p = 0;
+            /* 边界: snprintf 返回的是"应写入长度"而非实际写入长度, p 可能超过
+             * 缓冲容量; 若 p > sizeof(beats), 下面 sizeof - (size_t)p 会无符号
+             * 下溢成极大值, snprintf 就会写爆栈。故循环条件必须卡住剩余空间。
+             * 单行最长 "  task[99]=4294967295\r\n" = 23 字符, 留 28 保守。 */
+            for (i = 0U; (i < WDT_TASK_MAX) && (p < (int)sizeof(beats) - 28); i++)
             {
-                UART_Printf("  task[%u]=%lu\r\n", (unsigned)i,
-                            (unsigned long)Watchdog_GetLastBeat((WDT_TaskId_t)i));
+                p += snprintf(&beats[p], sizeof(beats) - (size_t)p,
+                              "  task[%u]=%lu\r\n", (unsigned)i,
+                              (unsigned long)Watchdog_GetLastBeat((WDT_TaskId_t)i));
             }
+            UART_Printf("[MON] task stuck! last beats:\r\n%s", beats);
             /* 不喂狗, IWDG 约 1s 后复位 */
         }
 

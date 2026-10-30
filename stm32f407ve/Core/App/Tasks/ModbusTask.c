@@ -159,6 +159,7 @@ static uint16_t MB_OnReadHolding(const uint8_t *req, uint16_t reqLen, uint8_t *r
     resp[2] = (uint8_t)(qty * 2U);
     for (i = 0U; i < qty; i++)
     {
+        /* Modbus 寄存器在线上是大端(高字节在前),和 CRC 的小端相反 */
         uint16_t v = MB_RegRead((uint16_t)(start + i));
         resp[3U + i * 2U]     = (uint8_t)(v >> 8);
         resp[3U + i * 2U + 1U] = (uint8_t)(v & 0xFFU);
@@ -249,6 +250,8 @@ static void MB_ProcessFrame(const uint8_t *frame, uint16_t len)
     uint8_t  resp[MB_FRAME_MAX];
     uint16_t respLen = 0U;
     uint16_t crc;
+    /* Modbus 广播地址是 0:所有从站都要执行写操作,但任何一个都不回应答
+     * (多个从站同时发会撞总线)。所以下面每一处应答都要先看 isBroadcast */
     uint8_t  isBroadcast = (frame[0] == 0U);
 
     /* 从站地址过滤: 非本机且非广播, 直接丢弃 */
@@ -272,6 +275,7 @@ static void MB_ProcessFrame(const uint8_t *frame, uint16_t len)
         default:                                        /* 不支持的功能码 */
             if (!isBroadcast)
             {
+                /* Modbus 异常应答规则:把功能码最高位置 1,后面跟一个异常码 */
                 resp[1] = (uint8_t)(frame[1] | 0x80U);
                 resp[2] = MB_EX_ILLEGAL_FUNCTION;
                 respLen = 3U;

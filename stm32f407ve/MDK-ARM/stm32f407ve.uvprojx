@@ -137,7 +137,7 @@
             <DriverSelection>4101</DriverSelection>
           </Flash1>
           <bUseTDR>1</bUseTDR>
-          <Flash2>BIN\UL2V8M.DLL</Flash2>
+          <Flash2>BIN\UL2CM3.DLL</Flash2>
           <Flash3></Flash3>
           <Flash4></Flash4>
           <pFcarmOut></pFcarmOut>
@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F407xx,MY_DISP_HOR_RES=320,MY_DISP_VER_RES=240</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/Flash;../Core/App/Bsp/RS485;../Core/App/Bsp/IWDG</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/WifiStore;../Core/App/Bsp/RS485;../Core/App/Bsp/IWDG;../Core/App/Bsp/W25Q128;../Middlewares/Third_Party/littlefs;../Core/App/Bsp/LittleFS;../Core/App/Bsp/Font;../Core/App/Bsp/CAN</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -582,6 +582,11 @@
                 </FileArmAds>
               </FileOption>
             </File>
+            <File>
+              <FileName>can.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/can.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -593,6 +598,11 @@
               <FilePath>../Core/App/Tasks/KeyTask.c</FilePath>
             </File>
             <File>
+              <FileName>LEDType.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/App/Types/LEDType.h</FilePath>
+            </File>
+            <File>
               <FileName>LEDTask.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/App/Tasks/LEDTask.c</FilePath>
@@ -601,11 +611,6 @@
               <FileName>CommandTask.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/App/Tasks/CommandTask.c</FilePath>
-            </File>
-            <File>
-              <FileName>LEDType.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>../Core/App/Types/LEDType.h</FilePath>
             </File>
             <File>
               <FileName>SensorData.h</FileName>
@@ -656,6 +661,16 @@
               <FileName>PowerMgr.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Tasks\PowerMgr.c</FilePath>
+            </File>
+            <File>
+              <FileName>CanTask.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Tasks/CanTask.c</FilePath>
+            </File>
+            <File>
+              <FileName>CanData.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/App/Types/CanData.h</FilePath>
             </File>
           </Files>
         </Group>
@@ -840,6 +855,11 @@
               <FilePath>../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_exti.c</FilePath>
             </File>
             <File>
+              <FileName>stm32f4xx_hal_spi.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_spi.c</FilePath>
+            </File>
+            <File>
               <FileName>stm32f4xx_hal_uart.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c</FilePath>
@@ -894,6 +914,11 @@
                   </Cads>
                 </FileArmAds>
               </FileOption>
+            </File>
+            <File>
+              <FileName>stm32f4xx_hal_can.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -3185,7 +3210,12 @@
             <File>
               <FileName>bsp_WifiStore.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\Core\App\Bsp\Flash\bsp_WifiStore.c</FilePath>
+              <FilePath>..\Core\App\Bsp\WifiStore\bsp_WifiStore.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_WifiStoreLfs.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\WifiStore\bsp_WifiStoreLfs.c</FilePath>
             </File>
             <File>
               <FileName>bsp_RS485.c</FileName>
@@ -3196,6 +3226,46 @@
               <FileName>bsp_IWDG.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Bsp\IWDG\bsp_IWDG.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_W25Q128.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\W25Q128\bsp_W25Q128.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_lfs_port.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\LittleFS\bsp_lfs_port.c</FilePath>
+            </File>
+            <File>
+              <FileName>lfs.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Middlewares\Third_Party\littlefs\lfs.c</FilePath>
+            </File>
+            <File>
+              <FileName>lfs_util.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Middlewares\Third_Party\littlefs\lfs_util.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_font_gbk.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\Font\bsp_font_gbk.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_gbk_map.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\Font\bsp_gbk_map.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_CAN.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Bsp/CAN/bsp_CAN.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_CAN.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/App/Bsp/CAN/bsp_CAN.h</FilePath>
             </File>
           </Files>
         </Group>
@@ -3218,5 +3288,14 @@
     </components>
     <files/>
   </RTE>
+
+  <LayerInfo>
+    <Layers>
+      <Layer>
+        <LayName>stm32f407ve</LayName>
+        <LayPrjMark>1</LayPrjMark>
+      </Layer>
+    </Layers>
+  </LayerInfo>
 
 </Project>

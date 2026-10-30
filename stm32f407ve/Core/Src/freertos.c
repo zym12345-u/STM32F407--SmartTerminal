@@ -34,7 +34,11 @@ extern void GuiTask_Create(void);
 extern void SensorTask_Create(void);
 extern void WifiTask_Create(void);
 extern void ModbusTask_Create(void);   /* Modbus RTU 从站任务(App/Tasks/ModbusTask.c) */
+extern void CanTask_Create(void);      /* CAN 通信任务(App/Tasks/CanTask.c) */
 extern void MonitorTask_Create(void);  /* 心跳监控 + IWDG 喂狗(App/Tasks/MonitorTask.c) */
+#include "bsp_W25Q128.h"               /* V1.2 外部 Flash(boot 阶段 M1/M1.5 自检) */
+#include "bsp_lfs_port.h"              /* V1.2 M3 LittleFS 挂载 */
+#include "bsp_font_gbk.h"              /* V1.2 M4 外挂 GBK 字库自检 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -179,10 +183,12 @@ void MX_FREERTOS_Init(void) {
   GuiTask_Create();
   /* 传感器采集任务:实现在 Core/App/Tasks/SensorTask.c,采集 BH1750+DHT11 */
   SensorTask_Create();
-  /* WiFi 对时任务:实现在 Core/App/Tasks/WifiTask.c,ESP8266(USART3) SNTP 取网络时间 */
+  /* WiFi 对时任务:实现在 Core/App/Tasks/WifiTask.c,ESP8266(USART2) SNTP 取网络时间 */
   WifiTask_Create();
   /* Modbus RTU 从站任务:实现在 Core/App/Tasks/ModbusTask.c,RS485(USART3) */
   ModbusTask_Create();
+  /* CAN 通信任务:实现在 Core/App/Tasks/CanTask.c, CAN1(PB8/PB9) 500Kbps */
+  CanTask_Create();
   /* 系统监控任务:心跳检测 + IWDG 喂狗(App/Tasks/MonitorTask.c) */
   MonitorTask_Create();
   /* 系统统计任务:5s 周期打印任务栈水位 + 各任务 CPU 占比(DWT 计数) */
@@ -213,6 +219,20 @@ void MX_FREERTOS_Init(void) {
   UART_Printf("[SYS] magic@0x080E0000=0x%08lX word@0x08060000=0x%08lX\r\n",
               (unsigned long)(*(__IO uint32_t *)0x080E0000UL),
               (unsigned long)(*(__IO uint32_t *)0x08060000UL));
+  /* V1.2 存储阶段 M1+M1.5(调度器启动前执行, IWDG 未启动, 无喂狗压力):
+   * M1   = 0x9F 读 JEDEC ID 0xEF4018 + 0x90 读 0xEF17 交叉验证;
+   * M1.5 = 用户区尾扇区 擦除/页编程/回读校验, 顺手打印实测耗时
+   *        (本地无 W25Q128 手册, 实测值回填巡检草案时序表) */
+  if (W25Q128_Init() != 0U)
+  {
+    W25Q128_SelfTest();
+    W25Q128_CheckGBKFont();   /* M2: 检测 0xA00000 起的 GBK 字库是否存在 */
+    /* M3: 挂载 LittleFS(0x000000~0x009FEFFF, 2559 x 4KB);
+     * 空白 Flash 自动格式化, 挂载后做一次 /m3.txt 写读验证 */
+    (void)LFS_Port_Mount();
+    /* M4: 外挂 GBK 字库适配层自检(读 "中" 的 16px 点阵, 校验内容非空) */
+    (void)BSP_Font_SelfTest();
+  }
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -327,8 +347,10 @@ static void StartStatsTask(void *argument)
 
     /* CPU 占比: Name AbsTime(统计单位) Percent%%(上电以来累计平均) */
     vTaskGetRunTimeStats(buf);
-    UART_Printf("================ CPU Usage =================\r\n%s", buf);
-    UART_Printf("============================================\r\n");
+    /* 分隔线并入同一次调用: 单独再打一行的话, 其它任务的日志可能插在
+     * CPU 占比内容和结尾分隔线之间, 这一份报告就断开了 */
+    UART_Printf("================ CPU Usage =================\r\n%s"
+                "============================================\r\n", buf);
 
     osDelay(5000U);
   }
