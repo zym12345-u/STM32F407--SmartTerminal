@@ -1,9 +1,8 @@
-/**
-  ******************************************************************************
-  * @file    bsp_WifiStore.c
-  * @brief   WiFi 凭据 Flash 存储 —— 实现
-  ******************************************************************************
-  */
+/* bsp_WifiStore.c
+ * WiFi 凭据存储：内部 Flash sector11，单条 WifiCred_t，magic + 32 位加和校验。
+ * 硬件：0x080E0000 起 128KB，IROM 已裁到 448KB 避开程序区。
+ * 注意：擦除 128KB 期间 CPU 停 1~2s，必须先把 IWDG 窗口放宽到 4s。
+ */
 #include "bsp_WifiStore.h"
 
 #include "stm32f4xx_hal.h"
@@ -11,14 +10,26 @@
 #include <string.h>
 
 
-/* 结构体原始字节(不含 checksum 字段)的 32 位加和,用于识别擦除态/损坏数据 */
+/* ---------------------------------------------------------------------------
+ * Flash 记录布局(整个扇区只放一条，类型见 WifiNet.h 的 WifiCred_t)：
+ *   字段      宽度  偏移  含义
+ *   magic      4B    0     固定 0x57494649('WIFI')，擦除态为 0xFFFFFFFF
+ *   ssid      33B    4     WIFI_SSID_LEN+1，'\0' 结尾
+ *   pwd       65B    37    WIFI_PWD_LEN+1，'\0' 结尾
+ *   checksum   4B    102   前 102 字节的 32 位加和
+ *   合计 108B(尾部含 2B 对齐填充)；写 WifiStore_Save / 读 WifiStore_Load
+ * ------------------------------------------------------------------------- */
+/**
+  * 函    数：Wifi_CalcChecksum
+  * 参    数：c  WifiCred_t 指针，不能为空
+  * 返 回 值：前 102 字节的 32 位加和(最大约 26010)
+  */
 static uint32_t Wifi_CalcChecksum(const WifiCred_t *c)
 {
     const uint8_t *p = (const uint8_t *)c;
     uint32_t sum = 0U;
     uint32_t n;
-    /* 只累加 checksum 字段"之前"的字节,不含它自身 ——
-     * 否则算之前就得先把自己填进去,鸡生蛋问题 */
+    /* 只算 checksum 之前的字节，不能把自身算进去 */
     uint32_t bodyLen = (uint32_t)((const uint8_t *)&c->checksum - p);
 
     for (n = 0U; n < bodyLen; n++)
@@ -28,12 +39,15 @@ static uint32_t Wifi_CalcChecksum(const WifiCred_t *c)
     return sum;
 }
 
-/* 注意这里直接把 Flash 地址当结构体指针读 —— 内部 Flash 是"内存映射"的,
- * CPU 能像读 RAM 一样读它,不需要任何驱动函数。
- * 对比:外部 W25Q128 是 SPI Flash,必须走 bsp_W25Q128 的读接口 */
+/**
+  * 函    数：WifiStore_Load
+  * 参    数：out  输出缓冲，不能为空，先清零再填
+  * 返 回 值：1=有合法凭据，0=从未写过/擦除态/校验失败
+  */
+/* 内部 Flash 内存映射，可直接把地址当结构体指针读 */
 uint8_t WifiStore_Load(WifiCred_t *out)
 {
-    const WifiCred_t *stored = (const WifiCred_t *)WIFI_FLASH_BASE;
+    const WifiCred_t *stored = (const WifiCred_t *)WIFI_FLASH_BASE;   /* 0x080E0000: sector11 起始 */
 
     memset(out, 0, sizeof(*out));
 
@@ -50,6 +64,11 @@ uint8_t WifiStore_Load(WifiCred_t *out)
     return 1U;
 }
 
+/**
+  * 函    数：WifiStore_Save
+  * 参    数：in  待保存凭据，不能为空，ssid/pwd 超长部分截断
+  * 返 回 值：1=擦除+编程+回读全部成功，0=任一步失败
+  */
 uint8_t WifiStore_Save(const WifiCred_t *in)
 {
     FLASH_EraseInitTypeDef erase;
@@ -67,14 +86,9 @@ uint8_t WifiStore_Save(const WifiCred_t *in)
     strncpy(buf.ssid, in->ssid, WIFI_SSID_LEN);
     strncpy(buf.pwd,  in->pwd,  WIFI_PWD_LEN);
     buf.checksum = Wifi_CalcChecksum(&buf);
-    words = (uint32_t)((sizeof(buf) + 3U) / 4U);
+    words = (uint32_t)((sizeof(buf) + 3U) / 4U);   /* 108B -> 27 个 32 位字 */
 
-    /* ⚠️ 这是"擦除冻结"的落点,调用方见 WifiTask.c 的 DoJoinCmd()。
-     * V1.1.1: 擦除 128KB 扇区期间 CPU 取指停顿(typ 1s/max 2s), 全任务冻结,
-     * 1s 日常窗口必咬狗(真机已复现: 配网保存后 IWDG 复位)。
-     * 保存前放宽到 4s, 保存结束(无论成败)恢复 1s。
-     * 关键:此刻连喂狗的代码都执行不到,喂狗策略完全无效,
-     * 所以"放宽窗口"是这里唯一有效的手段 */
+    /* 擦除 128KB 期间 CPU 取指停顿 1~2s，全任务冻结，1s 窗口必然复位，先放宽到 4s */
     IWDG_SetReload(IWDG_RELOAD_FLASH_SAVE);
     HAL_FLASH_Unlock();
 
@@ -91,7 +105,7 @@ uint8_t WifiStore_Save(const WifiCred_t *in)
         dst = (volatile uint32_t *)WIFI_FLASH_BASE;
         for (i = 0U; i < words; i++)
         {
-            halSt = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+            halSt = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,          /* 每次编程 1 个 32 位字 */
                                       (uint32_t)(dst + i), src[i]);
             if (halSt != HAL_OK)
             {

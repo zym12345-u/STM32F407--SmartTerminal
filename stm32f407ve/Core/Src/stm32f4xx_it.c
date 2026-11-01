@@ -1,20 +1,7 @@
 /* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * @file    stm32f4xx_it.c
-  * @brief   Interrupt Service Routines.
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+/* stm32f4xx_it.c
+ * 异常与中断入口：内核异常，以及 EXTI/TIM4/USART3/CAN1_RX0 等外设中断。
+ */
 /* USER CODE END Header */
 
 /* Includes ------------------------------------------------------------------*/
@@ -22,9 +9,9 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "can.h"   /* hcan1 声明(CubeMX 生成) */
-#include "usart.h"   /* huart1 / hdma_usart1_tx */
-#include "bsp_RS485.h"  /* RS485_IdleISR, USART3 IDLE 中断处理 */
+#include "can.h"        /*hcan1*/
+#include "usart.h"      /*huart1、hdma_usart1_tx*/
+#include "bsp_RS485.h"  /*RS485_IdleISR*/
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,7 +49,7 @@ extern UART_HandleTypeDef huart2;
 extern TIM_HandleTypeDef htim4;
 
 /* USER CODE BEGIN EV */
-extern UART_HandleTypeDef huart1;   /* 板载 USB-TTL 所在串口(手写 USART1 中断用) */
+extern UART_HandleTypeDef huart1;   /*手写 USART1 中断用*/
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -89,9 +76,7 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-  /* 故障留痕(V1.2 黑屏定位): 轮询直发, 不依赖 tick/DMA/RTOS 任一层;
-   * 失败也无所谓, 反正进死循环。用于区分"挂死"与"崩进 Fault"——
-   * 两者都是黑屏无日志, 没这行就无法区分 */
+  /* 故障留痕：轮询直发，不依赖 tick/DMA/RTOS */
   {
     static const char msg[] = "\r\n[FATAL] HardFault!\r\n";
     (void)HAL_UART_Transmit(&huart1, (const uint8_t *)msg, (uint16_t)(sizeof(msg) - 1U), 0xFFFFU);
@@ -228,8 +213,7 @@ void TIM4_IRQHandler(void)
 void USART3_IRQHandler(void)
 {
   /* USER CODE BEGIN USART3_IRQn 0 */
-  /* IDLE 中断(一帧结束)需在 HAL_UART_IRQHandler 之前处理:
-   * HAL 只处理 RXNE/TXE/TC 等, 不处理 IDLE, 这里手动清标志并发任务通知 */
+  /* HAL 不处理 IDLE 标志，必须在这里先处理 */
   if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_IDLE) != RESET)
   {
     RS485_IdleISR();
@@ -243,39 +227,33 @@ void USART3_IRQHandler(void)
 
 /* USER CODE BEGIN 1 */
 /**
-  * @brief USART1 全局中断(板载 USB-TTL 命令口)
-  * @note  .ioc 中未勾选 USART1 NVIC,CubeMX 因此不会生成此处理函数;
-  *        这里在 USER CODE 区手写。若以后在 CubeMX 中使能了 USART1 全局中断
-  *        并重新生成代码,CubeMX 会再生成一个同名函数导致重复定义,
-  *        届时删除本手写函数即可。
+  * 函    数：USART1_IRQHandler
+  * 参    数：无
+  * 返 回 值：无
   */
+/* .ioc 未勾选 USART1 NVIC，此入口手写 */
 void USART1_IRQHandler(void)
 {
   HAL_UART_IRQHandler(&huart1);
 }
 
 /**
-  * @brief USART1 TX DMA 传输完成中断
-  * @note   DMA2 Stream7 对应 USART1_TX。HAL_DMA_IRQHandler 内部
-  *         会根据传输完成标志调用 HAL_UART_TxCpltCallback(在 usart.c 中)。
+  * 函    数：DMA2_Stream7_IRQHandler
+  * 参    数：无
+  * 返 回 值：无
   */
 void DMA2_Stream7_IRQHandler(void)
 {
-  HAL_DMA_IRQHandler(&hdma_usart1_tx);
+  HAL_DMA_IRQHandler(&hdma_usart1_tx);   /*Stream7 = USART1_TX，中断优先级 5*/
 }
 
 /**
-  * @brief CAN1 RX0 中断(接收 FIFO0 有挂起报文)
-  * @note  抢占优先级 = 5(.ioc 中配置, 见 HAL_NVIC_SetPriority(CAN1_RX0_IRQn, 5, 0))。
-  *        必须 >= 5 是因为回调里会调 xQueueSendToBackFromISR:
-  *        FreeRTOS 的 configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY = 5,
-  *        优先级数值小于 5 会触发断言(厂商例程写 0/0 是不能照抄的)。
-  * @note  本函数在 USER CODE 区手写: CubeMX 生成路径(Inc/Src)与工程实际结构
-  *        (Core/Inc、Core/Src)不一致, 生成产物需人工搬移。若以后 CubeMX 直接在
-  *        Core 下生成, 它会再产生同名函数导致重复定义, 届时删除本版本即可。
+  * 函    数：CAN1_RX0_IRQHandler
+  * 参    数：无
+  * 返 回 值：无
   */
 void CAN1_RX0_IRQHandler(void)
 {
-  HAL_CAN_IRQHandler(&hcan1);
+  HAL_CAN_IRQHandler(&hcan1);   /*优先级必须 5：回调里要调 FromISR，0/0 会触发断言*/
 }
 /* USER CODE END 1 */

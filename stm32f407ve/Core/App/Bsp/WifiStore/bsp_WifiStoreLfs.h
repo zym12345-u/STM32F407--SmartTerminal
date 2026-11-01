@@ -1,38 +1,33 @@
-/**
-  ******************************************************************************
-  * @file    bsp_WifiStoreLfs.h
-  * @brief   WiFi 凭据存储 V2 —— 从内部 Flash 迁到 W25Q128 上的 LittleFS
-  *
-  *          为什么迁:
-  *            1. 内部 Flash 的 sector11(0x080E0000)是"1MB 硅片按 512KB 降级打标"
-  *               的物理灰色地带,容量寄存器不担保,长期放凭据有风险;
-  *            2. 每次保存要擦 128KB 扇区,CPU 停滞 1~2s,必须放宽 IWDG 窗口,
-  *               全任务冻结,代价大;
-  *            3. LittleFS 自带磨损均衡 + 掉电安全,适合小数据频繁更新。
-  *
-  *          迁移策略(一次性):
-  *            开机 Load 时先看 /wifi.conf,没有再去读内部 Flash sector11;
-  *            读到合法凭据就写进 /wifi.conf 并把 sector11 清零(magic=0),
-  *            之后只走 LittleFS。整个过程只发生一次,用户无感。
-  *
-  *          文件格式: 二进制,直接存 WifiCred_t 结构(102B),与内部 Flash 相同,
-  *                    便于调试时直接对比。
-  ******************************************************************************
-  */
+/* bsp_WifiStoreLfs.h
+ * WiFi 凭据 V2：存 W25Q128 上 LittleFS 的 /wifi.conf，二进制单条 WifiCred_t。
+ * 硬件：SPI1 = PA5/PA6/PA7 + CS=PC13，经 bsp_lfs_port 访问。
+ * 注意：只把旧 sector11 迁移一次，成功即清 magic，之后只走 LittleFS。
+ */
 #ifndef __BSP_WIFI_STORE_LFS_H
 #define __BSP_WIFI_STORE_LFS_H
 
 #include <stdint.h>
 #include "WifiNet.h"
 
-/** 从 LittleFS 读取凭据:成功返回 1;不存在/校验失败返回 0(out 清零) */
+/**
+  * 函    数：WifiStoreLfs_Load
+  * 参    数：out  输出，不能为空，失败时清零
+  * 返 回 值：1=成功，0=不存在/校验失败
+  */
 uint8_t WifiStoreLfs_Load(WifiCred_t *out);
 
-/** 把凭据写入 LittleFS:成功返回 1,失败返回 0 */
+/**
+  * 函    数：WifiStoreLfs_Save
+  * 参    数：in  待保存凭据，不能为空
+  * 返 回 值：1=成功，0=失败
+  */
 uint8_t WifiStoreLfs_Save(const WifiCred_t *in);
 
-/** 一次性迁移:内部 Flash sector11 -> LittleFS /wifi.conf。
- *  返回 1 = 发生了一次迁移, 0 = 无需迁移(文件已存在或 sector11 为空) */
+/**
+  * 函    数：WifiStoreLfs_Migrate
+  * 参    数：无
+  * 返 回 值：1=本次发生迁移，0=无需迁移(文件已存在或 sector11 为空)
+  */
 uint8_t WifiStoreLfs_Migrate(void);
 
 #endif /* __BSP_WIFI_STORE_LFS_H */

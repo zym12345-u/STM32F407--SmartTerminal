@@ -1,29 +1,14 @@
 /* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * @file    gpio.c
-  * @brief   This file provides code for the configuration
-  *          of all used GPIO pins.
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+/* gpio.c
+ * 板载 LED（PC5/PB2）与按键（PA0/PA1）的 GPIO、EXTI 初始化。
+ */
 /* USER CODE END Header */
 
 /* Includes ------------------------------------------------------------------*/
 #include "gpio.h"
 
 /* USER CODE BEGIN 0 */
-/* 按键改为 KeyTask 10ms 轮询+积分消抖,不再使用 EXTI 回调/标志/信号量。
- * CubeMX 生成的 EXTI 硬件配置保留(引脚仍可正常读电平),回调留空即可。 */
+/* 按键由 KeyTask 10ms 轮询消抖，EXTI 回调留空 */
 /* USER CODE END 0 */
 
 /*----------------------------------------------------------------------------*/
@@ -93,7 +78,11 @@ void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 2 */
-/* 按键改为 KeyTask 轮询消抖,EXTI 回调不再承担任何工作,留空即可。 */
+/**
+  * 函    数：HAL_GPIO_EXTI_Callback
+  * 参    数：GPIO_Pin  触发中断的引脚掩码（未使用）
+  * 返 回 值：无
+  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   (void)GPIO_Pin;

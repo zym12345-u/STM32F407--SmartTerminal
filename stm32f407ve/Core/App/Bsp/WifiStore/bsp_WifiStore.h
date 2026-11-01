@@ -1,17 +1,8 @@
-/**
-  ******************************************************************************
-  * @file    bsp_WifiStore.h
-  * @brief   WiFi 凭据掉电存储:写入 STM32F407 内部 Flash 最后一个扇区
-  *
-  *          F407VET6 Flash 共 512KB,扇区 11 位于 0x080E0000、大小 128KB。
-  *          Keil 工程 IROM 已裁成 448KB(0x08000000~0x080DFFFF),程序不会
-  *          与本扇区冲突。整个扇区只存一个 WifiCred_t 结构。
-  *
-  *          注意:擦除 128KB 扇区期间 F4 内核会停滞约 1~2 秒(取指暂停),
-  *          全部任务冻结;因此保存动作安排在"连接成功后"执行,界面停在
-  *          Saving 状态,用户无感等待,保存完再进入走时。
-  ******************************************************************************
-  */
+/* bsp_WifiStore.h
+ * WiFi 凭据内部 Flash 存储：sector11 单条记录，magic 0x57494649 + 32 位加和校验。
+ * 硬件：0x080E0000 起 128KB，IROM 裁到 448KB 避开；记录 108B，checksum 在偏移 102。
+ * 注意：保存要整扇区擦 128KB，CPU 停 1~2s，必须放宽 IWDG 窗口。
+ */
 #ifndef __BSP_WIFI_STORE_H
 #define __BSP_WIFI_STORE_H
 
@@ -23,10 +14,18 @@
 #define WIFI_FLASH_BASE    0x080E0000U   /* sector 11 起始地址 */
 
 
-/* 读取凭据:有合法记录返回 1;从未写过/校验失败返回 0(out 内容清零) */
+/**
+  * 函    数：WifiStore_Load
+  * 参    数：out  输出，不能为空
+  * 返 回 值：1=有合法记录，0=从未写过/校验失败(内容清零)
+  */
 uint8_t WifiStore_Load(WifiCred_t *out);
 
-/* 擦除扇区并写入新凭据:成功返回 1,失败返回 0 */
+/**
+  * 函    数：WifiStore_Save
+  * 参    数：in  待保存凭据，不能为空
+  * 返 回 值：1=成功，0=失败
+  */
 uint8_t WifiStore_Save(const WifiCred_t *in);
 
 

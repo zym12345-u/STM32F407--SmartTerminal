@@ -1,24 +1,14 @@
-/**
-  ******************************************************************************
-  * @file    bsp_IWDG.h
-  * @brief   独立看门狗(IWDG)驱动 + 任务心跳监控
-  *
-  *          用法:
-  *            1. main 里调用 IWDG_Init() 启动看门狗(超时约 1s)
-  *            2. 各任务主循环里调用 Watchdog_Heartbeat(WDT_TASK_xxx) 上报存活
-  *            3. MonitorTask 周期检查所有任务心跳, 全部存活才喂狗
-  *            4. 任一任务卡死超时 => 不喂狗 => IWDG 复位系统
-  *
-  *          注意: IWDG 由 LSI(约 32kHz) 驱动, 一旦启动无法关闭,
-  *          必须持续喂狗否则系统复位。调试时可在 DEBUG 模式下暂停 IWDG。
-  ******************************************************************************
-  */
+/* bsp_IWDG.h
+ * IWDG 启动/喂狗/改窗口与任务心跳接口声明。
+ * 硬件：IWDG 由内部 LSI ≈32kHz 驱动，启动后无法关闭。
+ * 注意：喂狗只允许 MonitorTask；STORAGE 槽位 boot 后无常驻上报者，判死必须跳过。
+ */
 #ifndef __BSP_IWDG_H
 #define __BSP_IWDG_H
 
 #include <stdint.h>
 
-/* 任务 ID(用于心跳上报), 按位标志便于扩展 */
+/*任务 ID(心跳上报用)*/
 typedef enum {
     WDT_TASK_GUI      = 0,
     WDT_TASK_SENSOR   = 1,
@@ -28,31 +18,55 @@ typedef enum {
     WDT_TASK_LED      = 5,
     WDT_TASK_COMMAND  = 6,
     WDT_TASK_MONITOR  = 7,
-    WDT_TASK_STORAGE  = 8,   /* V1.2: W25Q128/LittleFS 存储访问(boot 阶段自测也记到此槽位) */
-    WDT_TASK_CAN      = 9,   /* V1.3: CAN 通信任务(常规任务槽, 不跳过检查) */
-    WDT_TASK_MAX      = 10
+    WDT_TASK_STORAGE  = 8,   /* W25Q128/LittleFS 存储槽位，仅 boot 自检时上报 */
+    WDT_TASK_CAN      = 9,   /* CAN 通信任务槽，参与判死 */
+    WDT_TASK_MAX      = 10   /* 槽位总数，s_lastBeat 按此长度分配，增删任务要同步改 */
 } WDT_TaskId_t;
 
-/** 初始化并启动 IWDG(超时约 1000ms), 启动后无法关闭 */
+/**
+  * 函    数：IWDG_Init
+  * 参    数：无
+  * 返 回 值：无
+  */
 void IWDG_Init(void);
 
-/** 喂狗(刷新计数器), 仅 MonitorTask 调用 */
+/**
+  * 函    数：IWDG_Refresh
+  * 参    数：无
+  * 返 回 值：无
+  */
 void IWDG_Refresh(void);
 
 /* 重装载档位: T = 256 * RLR / 32000(LSI) */
 #define IWDG_RELOAD_NORMAL      125U    /* ≈1s, 日常窗口 */
 #define IWDG_RELOAD_FLASH_SAVE  500U    /* ≈4s, 内部 Flash 擦除期间临时窗口(>max 2s) */
 
-/** 动态修改超时窗口(内部 Flash 擦除等长冻结操作前后配对调用) */
+/**
+  * 函    数：IWDG_SetReload
+  * 参    数：rlr  重装载值 1~4095；T ≈ 256*rlr/32000 s
+  * 返 回 值：无
+  */
 void IWDG_SetReload(uint16_t rlr);
 
-/** 任务上报心跳(在任务主循环里调用, 传入本任务 ID) */
+/**
+  * 函    数：Watchdog_Heartbeat
+  * 参    数：taskId  本任务 ID，越界忽略
+  * 返 回 值：无
+  */
 void Watchdog_Heartbeat(WDT_TaskId_t taskId);
 
-/** 检查所有任务心跳是否在超时窗口内有更新, 全部存活返回 1, 否则返回 0 */
+/**
+  * 函    数：Watchdog_CheckAllAlive
+  * 参    数：无
+  * 返 回 值：1=全部存活，0=有任务卡死(调用方不得喂狗)
+  */
 uint8_t Watchdog_CheckAllAlive(void);
 
-/** 获取最后一次心跳时间戳(用于诊断哪个任务卡死) */
+/**
+  * 函    数：Watchdog_GetLastBeat
+  * 参    数：taskId  任务 ID，越界返回 0
+  * 返 回 值：最后心跳 tick(1kHz，单位 ms)
+  */
 uint32_t Watchdog_GetLastBeat(WDT_TaskId_t taskId);
 
 #endif /* __BSP_IWDG_H */

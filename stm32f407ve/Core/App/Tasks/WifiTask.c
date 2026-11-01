@@ -1,30 +1,8 @@
-/**
-  ******************************************************************************
-  * @file    WifiTask.c
-  * @brief   WiFi 网络任务:屏幕配网 + SNTP 网络对时
-  *
-  *          两种取凭据途径(凭据保存在 W25Q128 的 LittleFS /wifi.conf):
-  *            A. 开机自动连:从 LittleFS 读凭据,连上后 SNTP 对时;
-  *            B. 屏幕配网:GuiTask 扫到热点、用户输密码,经命令队列提交,
-  *               连接成功后写入 LittleFS,下次开机走 A 自动连。
-  *
-  *          V1.2 起凭据不再放内部 Flash sector11(降级打标灰色地带,
-  *          擦 128KB 会冻结 CPU 1~2s),首次开机会自动把旧凭据迁过来。
-  *
-  *          队列(在 WifiTask_Create 中创建,早于任务首次运行):
-  *            GuiTask --WifiCmd_t-->  本任务  扫描/连接命令(元素约 100B,深 4)
-  *            本任务 --WifiEvent-->  GuiTask 扫描完成/连接结果(深 8)
-  *
-  *          运行中本地每秒走秒(公历进位+星期),每 30 分钟重新 SNTP 校准;
-  *          掉线自动重连已保存凭据。
-  *
-  *          ⚠️ 本任务是全工程最容易被看门狗咬死的地方:
-  *            AT+CWJAP 单次调用最多连续阻塞 20s,期间本任务回不到主循环,
-  *            调不到 Watchdog_Heartbeat(),只能靠 ESP8266_Cmd() 内部补报。
-  *            详见 WiFi_JoinAp() / DoJoinCmd() 里的注释。
-  *            (V1.2 起凭据保存走 LittleFS 不再冻结 CPU,不再是咬狗因素)
-  ******************************************************************************
-  */
+/* WifiTask.c
+ * WiFi 任务：扫描热点、配网、联网、SNTP 校时，结果写 g_wifiScan 与 g_clockData。
+ * 周期：未联网 200ms、已联网 1s 轮询 cmdQ；优先级 Normal，栈 3072 字节。
+ * 注意：AT+CWJAP 单次最长阻塞 20s，期间回不到主循环，喂狗只能靠 ESP8266_Cmd() 内部补报。
+ */
 #include "cmsis_os2.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -41,7 +19,7 @@
 #include <stdlib.h>
 
 
-/* NTP:时区 8=北京;3 个服务器依次尝试(与网盘 17-3 例程一致) */
+/* SNTP：时区 8=北京，3 个服务器依次尝试 */
 #define SNTP_CONFIG_CMD      "AT+CIPSNTPCFG=1,8,\"202.120.2.101\",\"time.nist.gov\",\"ntp.aliyun.com\"\r\n"
 
 #define WIFI_TASK_STACK_SIZE 3072U   /* 字节;s_resp/s_snap 均为 static,栈只放调用帧 */
@@ -50,7 +28,7 @@
 #define RECONNECT_PERIOD_MS  10000U  /* 掉线后自动重连间隔 */
 
 
-/* ====================== 任务间队列与共享状态 ====================== */
+/*任务间队列与共享状态*/
 static osMessageQueueId_t s_cmdQ;    /* GUI -> 任务 */
 static osMessageQueueId_t s_evtQ;    /* 任务 -> GUI */
 
@@ -67,8 +45,26 @@ static WifiCred_t s_cred;
 static uint8_t    s_haveCred = 0U;
 static uint8_t    s_connected = 0U;
 
+/*配网/联网状态机，g_wifiScan.status 迁移
+ * 状态             含义         进入条件                    超时
+ * WIFI_ST_IDLE     无凭据       无保存凭据或自动连失败       无
+ * WIFI_ST_SCANNING 扫描中       收到 WIFI_CMD_SCAN          CWLAP 20000ms×3
+ * WIFI_ST_SCAN_OK  扫描出热点   解析到至少 1 个热点        无
+ * WIFI_ST_SCAN_FAIL 扫描失败     AT 无响应/无 OK/busy 3 轮   无
+ * WIFI_ST_JOINING  联网中       收到 WIFI_CMD_JOIN          CWJAP 20000ms×3
+ * WIFI_ST_JOIN_OK  联网成功     CWJAP+SNTP 全成功           无，s_connected=1
+ * WIFI_ST_JOIN_FAIL 联网失败    任一步失败                  无，s_connected=0
+ * WIFI_ST_CONNECTED 已联网      上一次连接成功              每 30000ms 重新 SNTP
+ * 掉线：s_connected=0 且 s_haveCred=1 时，每 10000ms 用保存凭据重连一次。
+ */
 
-/* ============================ 队列 API ============================ */
+
+/*队列 API*/
+/**
+  * 函    数：Wifi_PostScan
+  * 参    数：无
+  * 返 回 值：无
+  */
 void Wifi_PostScan(void)
 {
     WifiCmd_t cmd;
@@ -76,8 +72,7 @@ void Wifi_PostScan(void)
     cmd.type = WIFI_CMD_SCAN;
     if (s_cmdQ != NULL)
     {
-        /* 超时 0 = 不阻塞:这是给 GuiTask 调用的界面线程,
-         * 队列满就直接丢弃,绝不能让界面卡在这里等 WifiTask */
+        /*超时 0：GuiTask 调用，队列满直接丢弃，不能卡界面*/
         (void)osMessageQueuePut(s_cmdQ, &cmd, 0U, 0U);
     }
     else
@@ -86,6 +81,11 @@ void Wifi_PostScan(void)
     }
 }
 
+/**
+  * 函    数：Wifi_PostJoin
+  * 参    数：ssid  热点名，最长 32 字节，超长截断；pwd  密码，最长 64 字节，开放网络传 ""
+  * 返 回 值：无
+  */
 void Wifi_PostJoin(const char *ssid, const char *pwd)
 {
     WifiCmd_t cmd;
@@ -109,8 +109,12 @@ void Wifi_PostJoin(const char *ssid, const char *pwd)
     }
 }
 
-/* GuiTask 每轮界面刷新时轮询一次:超时 0 不阻塞,取不到就继续刷界面。
- * 用轮询而不是阻塞等待,是因为 GUI 必须持续响应触摸和刷新 */
+/*超时 0 轮询：GUI 必须持续刷界面，不能阻塞等事件*/
+/**
+  * 函    数：Wifi_TryGetEvent
+  * 参    数：ev  输出缓冲，必须非 NULL
+  * 返 回 值：1=取到事件，0=队列空或参数非法
+  */
 uint8_t Wifi_TryGetEvent(WifiEvent_t *ev)
 {
     if ((s_evtQ != NULL) && (ev != NULL) &&
@@ -121,23 +125,43 @@ uint8_t Wifi_TryGetEvent(WifiEvent_t *ev)
     return 0U;
 }
 
+/**
+  * 函    数：Wifi_PostEvent
+  * 参    数：ev  事件码，WIFI_EV_SCAN_DONE / JOIN_OK / JOIN_FAIL
+  * 返 回 值：无
+  */
 static void Wifi_PostEvent(WifiEvent_t ev)
 {
     (void)osMessageQueuePut(s_evtQ, &ev, 0U, 0U);
 }
 
+/**
+  * 函    数：Wifi_SetStatus
+  * 参    数：st  目标状态，WIFI_ST_IDLE ~ WIFI_ST_CONNECTED
+  * 返 回 值：无
+  */
 static void Wifi_SetStatus(WifiStatus_t st)
 {
     g_wifiScan.status = (uint8_t)st;
 }
 
 
-/* ====================== 本地走秒(公历/闰年/星期) ====================== */
+/*本地走秒*/
+/**
+  * 函    数：IsLeapYear
+  * 参    数：year  公元年份，如 2026
+  * 返 回 值：1=闰年，0=平年
+  */
 static uint8_t IsLeapYear(uint16_t year)
 {
     return (((year % 4U == 0U) && (year % 100U != 0U)) || (year % 400U == 0U)) ? 1U : 0U;
 }
 
+/**
+  * 函    数：DaysInMonth
+  * 参    数：year  年份，仅 2 月闰年判断用；month  月份 1~12，越界会读越界
+  * 返 回 值：当月天数 28/29/30/31
+  */
 static uint8_t DaysInMonth(uint16_t year, uint8_t month)
 {
     static const uint8_t days[12] = {31U, 28U, 31U, 30U, 31U, 30U,
@@ -149,6 +173,11 @@ static uint8_t DaysInMonth(uint16_t year, uint8_t month)
     return days[month - 1U];
 }
 
+/**
+  * 函    数：Clock_TickOneSecond
+  * 参    数：t  待进位的时钟实体，调用方传栈上的 now
+  * 返 回 值：无
+  */
 static void Clock_TickOneSecond(ClockData_t *t)
 {
     t->sec++;
@@ -171,7 +200,12 @@ static void Clock_TickOneSecond(ClockData_t *t)
 }
 
 
-/* ====================== AT 连接/对时原语 ====================== */
+/*AT 连接与对时*/
+/**
+  * 函    数：WiFi_Ready
+  * 参    数：无
+  * 返 回 值：1=模块有响应，0=3 次探测均失败
+  */
 static uint8_t WiFi_Ready(void)
 {
     uint8_t i;
@@ -181,18 +215,23 @@ static uint8_t WiFi_Ready(void)
         {
             return 1U;
         }
-        osDelay(500U);
+        osDelay(500U);                     /* 探测间隔 500ms,3 次合计约 3s */
     }
     return 0U;
 }
 
+/**
+  * 函    数：WiFi_JoinAp
+  * 参    数：ssid  热点名，32 字节内；pwd  密码，64 字节内，开放网络传空串
+  * 返 回 值：1=连上，0=设模式失败或 3 次 CWJAP 均失败
+  */
 static uint8_t WiFi_JoinAp(const char *ssid, const char *pwd)
 {
     char joinCmd[128];
     uint8_t i;
 
-    (void)ESP8266_Cmd("ATE0\r\n", "OK", 1000U);
-    if (ESP8266_Cmd("AT+CWMODE=1\r\n", "OK", 3000U) == 0U)
+    (void)ESP8266_Cmd("ATE0\r\n", "OK", 1000U);                 /*关回显*/
+    if (ESP8266_Cmd("AT+CWMODE=1\r\n", "OK", 3000U) == 0U)   /* CWMODE=1:Station 模式 */
     {
         return 0U;
     }
@@ -200,20 +239,21 @@ static uint8_t WiFi_JoinAp(const char *ssid, const char *pwd)
     for (i = 0U; i < 3U; i++)
     {
         UART_Printf("[WIFI] joining %s (try %d)\r\n", ssid, (int)(i + 1U));
-        /* ⚠️ 这一行最多阻塞 20s:ESP8266_Cmd 要一直等到模块回 OK 或超时。
-         * 这 20s 是"一次调用连续阻塞",本任务完全回不到主循环,调不到
-         * Watchdog_Heartbeat();而判死线只有 3s。
-         * 所以 ESP8266_Cmd() 内部必须每 500ms 补报心跳,否则必被 IWDG 复位 */
+        /*等待联网：单次最长 20 秒，期间只能靠 ESP8266_Cmd() 每 500ms 补报心跳*/
         if (ESP8266_Cmd(joinCmd, "OK", 20000U) != 0U)
         {
             return 1U;
         }
-        osDelay(1000U);
+        osDelay(1000U);                    /* CWJAP 失败后间隔 1s 再重试 */
     }
     return 0U;
 }
 
-/* 配置 SNTP 并轮询等待有效网络时间,成功填充 now */
+/**
+  * 函    数：WiFi_WaitSync
+  * 参    数：now  输出时钟，调用方传入已清零的栈变量
+  * 返 回 值：1=对时成功，0=SNTP 配置失败/超时/模块掉线
+  */
 static uint8_t WiFi_WaitSync(ClockData_t *now)
 {
     ESP8266_Time_t net;
@@ -224,11 +264,7 @@ static uint8_t WiFi_WaitSync(ClockData_t *now)
         UART_Printf("[WIFI] SNTP config fail (need AT v1.6+)\r\n");
         return 0U;
     }
-    /* 注意这里的 20s 和 WiFi_JoinAp() 的 20s 不是一回事:
-     * 这里是 20 次 x osDelay(1s),每次都能回到主循环报心跳,天然安全;
-     * 但 ESP8266_FetchTime() 单次只有 ~0.1s,比喂狗节流门槛 500ms 还短,
-     * 若只做"循环内节流补报"会永远够不着门槛 → 整轮零心跳。
-     * 所以 ESP8266_Cmd() 除了节流,还必须有"入口必报" */
+    /*每轮 1s 回主循环可正常喂狗；FetchTime 单次约 0.1s，补报靠 ESP8266_Cmd 入口必报*/
     for (i = 0U; i < FIRST_SYNC_TRIES; i++)
     {
         osDelay(1000U);
@@ -258,7 +294,11 @@ static uint8_t WiFi_WaitSync(ClockData_t *now)
     return 0U;                 /* 一直 1970,对时超时 */
 }
 
-/* 完整链路:AT 就绪 -> 连接 -> SNTP 对时 */
+/**
+  * 函    数：WiFi_FullConnect
+  * 参    数：ssid  热点名；pwd  密码；now  输出时钟，仅对时成功时填充
+  * 返 回 值：1=三步全成功，0=任一步失败
+  */
 static uint8_t WiFi_FullConnect(const char *ssid, const char *pwd, ClockData_t *now)
 {
     if (WiFi_Ready() == 0U)
@@ -281,10 +321,15 @@ static uint8_t WiFi_FullConnect(const char *ssid, const char *pwd, ClockData_t *
 }
 
 
-/* ====================== CWLAP 扫描与解析(Top N) ====================== */
+/*CWLAP 扫描与解析*/
 static WifiAp_t s_top[WIFI_AP_MAX];
 static uint8_t  s_topN;
 
+/**
+  * 函    数：TopList_Insert
+  * 参    数：ssid  热点名，最长 32 字节；rssi  信号强度 dBm；sec  CWLAP 的 ecn，0=开放
+  * 返 回 值：无
+  */
 static void TopList_Insert(const char *ssid, int rssi, uint8_t sec)
 {
     uint8_t i;
@@ -333,6 +378,11 @@ static void TopList_Insert(const char *ssid, int rssi, uint8_t sec)
     }
 }
 
+/**
+  * 函    数：TopList_Sort
+  * 参    数：无，直接操作静态数组 s_top / s_topN
+  * 返 回 值：无
+  */
 /* 简单选择排序:信号从强到弱 */
 static void TopList_Sort(void)
 {
@@ -356,7 +406,11 @@ static void TopList_Sort(void)
     }
 }
 
-/* 打印应答快照开头若干字符(原始内容,帮助判断波特率/固件返回) */
+/**
+  * 函    数：DumpRespHead
+  * 参    数：tag  日志标签；n  应答总字节数，内部自动截到 79 字节
+  * 返 回 值：无
+  */
 static void DumpRespHead(const char *tag, uint16_t n)
 {
     char head[80];
@@ -366,6 +420,11 @@ static void DumpRespHead(const char *tag, uint16_t n)
     UART_Printf("[WIFI] %s, %d bytes: %s\r\n", tag, (int)n, head);
 }
 
+/**
+  * 函    数：DoScan
+  * 参    数：无
+  * 返 回 值：无，结果经 g_wifiScan 与 WIFI_EV_SCAN_DONE 发布
+  */
 static void DoScan(void)
 {
     char *p;
@@ -376,7 +435,7 @@ static void DoScan(void)
     s_topN = 0U;
     UART_Printf("[WIFI] scan start\r\n");
 
-    /* 模块没就绪时扫描也会失败;CWLAP 在已关联状态下同样可用 */
+    /*探测模块*/
     if (ESP8266_Cmd("AT\r\n", "OK", 1000U) == 0U)
     {
         n = ESP8266_CopyResponse(s_resp, (uint16_t)sizeof(s_resp));
@@ -390,11 +449,11 @@ static void DoScan(void)
         return;
     }
 
-    /* 保证处于 STA 模式(CWLAP 需要 WiFi 使能;模式字写入 Flash,仅一次) */
+    /*切 STA 模式：CWLAP 需要 WiFi 已使能，模式字只写一次 Flash*/
     (void)ESP8266_Cmd("ATE0\r\n", "OK", 1000U);
-    (void)ESP8266_Cmd("AT+CWMODE=1\r\n", "OK", 3000U);
+    (void)ESP8266_Cmd("AT+CWMODE=1\r\n", "OK", 3000U);      /* 1=Station;CWLAP 需 WiFi 已使能 */
 
-    /* 扫描耗时随热点数量 3~15s 不等;模块可能先回 busy s.../busy p...,重试 3 轮 */
+    /*扫描热点：耗时 3~15s，模块回 busy 时重试 3 轮*/
     for (attempt = 0U; attempt < 3U; attempt++)
     {
         if (ESP8266_Cmd("AT+CWLAP\r\n", "OK", 20000U) != 0U)
@@ -435,8 +494,7 @@ static void DoScan(void)
         got = sscanf(p, "+CWLAP:(%d,\"%32[^\"]\",%d,", &ecn, ssid, &rssi);
         if ((got == 3) && (ssid[0] != '\0'))
         {
-            /* 保留含中文等非 ASCII 字节的 SSID:已启用 simsun CJK 字体,
-             * 可正常显示中文名热点;SSID 字节原样透传给 AT+CWJAP,ESP8266 可连 */
+            /*SSID 原样透传给 AT+CWJAP，含中文也能显示与连接*/
             TopList_Insert(ssid, rssi, (uint8_t)ecn);
         }
         p += 8U;     /* 跳过 "+CWLAP:(" 继续找下一条 */
@@ -444,7 +502,7 @@ static void DoScan(void)
 
     TopList_Sort();
 
-    /* 发布结果(扫描已结束,GUI 收到事件后才读,无需临界区) */
+    /*发布结果：扫描已结束，GUI 收到事件后才读*/
     taskENTER_CRITICAL();
     g_wifiScan.count = s_topN;
     if (s_topN > 0U)
@@ -459,7 +517,12 @@ static void DoScan(void)
 }
 
 
-/* ====================== 屏幕提交的连接命令 ====================== */
+/*屏幕提交的连接命令*/
+/**
+  * 函    数：DoJoinCmd
+  * 参    数：cmd  命令体，ssid/pwd 为用户选定热点与密码
+  * 返 回 值：无，结果经 g_wifiScan.status 与 evtQ 发布
+  */
 static void DoJoinCmd(const WifiCmd_t *cmd)
 {
     ClockData_t now;
@@ -475,8 +538,7 @@ static void DoJoinCmd(const WifiCmd_t *cmd)
         return;
     }
 
-    /* V1.2: 凭据已迁到 LittleFS,保存只擦 4KB 块(busy 33ms),不再冻结 CPU,
-     * 也无需放宽 IWDG 窗口。 */
+    /*保存凭据只擦 4KB 块(busy 33ms)，不冻结 CPU，无需放宽 IWDG 窗口*/
     memset(&s_cred, 0, sizeof(s_cred));
     s_cred.magic = WIFI_FLASH_MAGIC;
     (void)strncpy(s_cred.ssid, cmd->ssid, WIFI_SSID_LEN);
@@ -497,7 +559,12 @@ static void DoJoinCmd(const WifiCmd_t *cmd)
 }
 
 
-/* ============================ 任务入口 ============================ */
+/*任务入口*/
+/**
+  * 函    数：StartWifiTask
+  * 参    数：argument  未使用，创建时传 NULL
+  * 返 回 值：无，死循环不返回
+  */
 void StartWifiTask(void *argument)
 {
     (void)argument;
@@ -511,7 +578,7 @@ void StartWifiTask(void *argument)
 
     osDelay(2000U);    /* 等模块上电稳定 + 避开开机 LVGL 首屏渲染 */
 
-    /* A. 开机:有保存凭据则自动连(先迁后读) */
+    /* A. 开机：有保存凭据则自动连(先迁后读) */
     (void)WifiStoreLfs_Migrate();
     if (WifiStoreLfs_Load(&s_cred) != 0U)
     {
@@ -543,13 +610,10 @@ void StartWifiTask(void *argument)
         WifiCmd_t   cmd;
         osStatus_t  st;
 
-        /* ⚠️ 别以为有这一句就安全:下面 DoScan()/DoJoinCmd() 一跑就是几秒到 20s,
-         * 这期间根本走不到这里。本任务的存活实际取决于 ESP8266_Cmd()
-         * 内部有没有做心跳注入,而不是这一句 */
+        /*下面 DoScan()/DoJoinCmd() 一跑几秒到 20s，此处走不到，存活靠 ESP8266_Cmd() 内部补报*/
         Watchdog_Heartbeat(WDT_TASK_WIFI);
 
-        /* 已连接时每秒醒一次走秒(顺带满足 3s 判死线);
-         * 未连接时 200ms 醒一次,好快速响应配网/重连命令 */
+        /*已连接 1s 醒一次走秒，未连接 200ms 醒一次以快速响应配网/重连*/
         st = osMessageQueueGet(s_cmdQ, &cmd, NULL, s_connected ? 1000U : 200U);
 
         if (st == osOK)
@@ -563,7 +627,7 @@ void StartWifiTask(void *argument)
                 DoJoinCmd(&cmd);
                 if (s_connected)
                 {
-                    /* DoJoinCmd 已发布 now,本地走秒基准从 ClockData 取当前值 */
+                    /*DoJoinCmd 已写 ClockData，走秒基准从当前值继续*/
                     ClockData_Get(&now);
                     lastResync = osKernelGetTickCount();
                 }
@@ -577,7 +641,7 @@ void StartWifiTask(void *argument)
             Clock_TickOneSecond(&now);
             ClockData_Set(&now);
 
-            /* 30 分钟重同步,校准本地漂移 */
+            /*30 分钟重同步，校准本地漂移*/
             if ((uint32_t)(osKernelGetTickCount() - lastResync) >= RESYNC_PERIOD_MS)
             {
                 ESP8266_Time_t net;
@@ -593,7 +657,7 @@ void StartWifiTask(void *argument)
         }
         else if (s_haveCred)
         {
-            /* B. 掉线/开机自动连失败:每 10s 用保存的凭据重试,不打扰用户 */
+            /* B. 掉线/自动连失败：每 10s 用保存凭据重试 */
             if ((uint32_t)(osKernelGetTickCount() - lastReconnect) >= RECONNECT_PERIOD_MS)
             {
                 lastReconnect = osKernelGetTickCount();
@@ -611,6 +675,11 @@ void StartWifiTask(void *argument)
 }
 
 
+/**
+  * 函    数：WifiTask_Create
+  * 参    数：无
+  * 返 回 值：无
+  */
 void WifiTask_Create(void)
 {
     static const osThreadAttr_t wifiTaskAttr = {
@@ -619,11 +688,9 @@ void WifiTask_Create(void)
         .priority = (osPriority_t)osPriorityNormal,
     };
 
-    /* 队列先于任务创建,GuiTask 任何时刻 Post 都安全。
-     * 队列从 FreeRTOS 堆分配(每个命令元素约 99B),堆不足会返回 NULL,
-     * 这里必须检查并打印,否则 GUI 的扫描命令会被静默丢弃 */
-    s_cmdQ = osMessageQueueNew(2U, sizeof(WifiCmd_t), NULL);
-    s_evtQ = osMessageQueueNew(8U, sizeof(WifiEvent_t), NULL);
+    /*队列必须先于任务创建；句柄来自 FreeRTOS 堆，堆不足返回 NULL，GUI 命令会被静默丢弃*/
+    s_cmdQ = osMessageQueueNew(2U, sizeof(WifiCmd_t), NULL);   /* 深 2:命令只是"请求",不做排队积压 */
+    s_evtQ = osMessageQueueNew(8U, sizeof(WifiEvent_t), NULL); /* 深 8:事件短时堆积也不丢 */
     UART_Printf("[WIFI] queues: cmdQ=%d evtQ=%d, free heap after create=%u bytes\r\n",
                 (int)(s_cmdQ != NULL), (int)(s_evtQ != NULL),
                 (unsigned int)xPortGetFreeHeapSize());

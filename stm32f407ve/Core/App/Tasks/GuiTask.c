@@ -1,35 +1,9 @@
 /* USER CODE BEGIN Header */
-/**
-  * @file    GuiTask.c
-  * @brief   LVGL GUI 任务:初始化 ILI9341 LCD(FSMC) + XPT2046 触摸(GPIO模拟SPI)
-  *          和 LVGL v8.3,现代化暗色主题界面。
-  *
-  *          视觉设计:
-  *            - 暗色渐变背景(#1a1a2e -> #0f172a),降低 320x240 小屏的视觉拥挤
-  *            - 传感器数据卡片化,左色条区分类型,大字号数值 + 小标签
-  *            - LED 控制按钮采用渐变填充 + 按下缩放动效(style transition)
-  *            - WiFi 配网页热点列表项圆角 + 信号强度色阶
-  *            - 密码输入面板从底部滑入(lv_anim translate_y)
-  *            - 屏幕切换使用 lv_scr_load_anim 淡入淡出
-  *
-  *          功能链路与原实现一致:
-  *            - 按钮事件通过 LEDQueue 投递给 LEDTask,与实体按键/串口命令统一
-  *            - 翻转前读引脚电平为真相,避免多方控制错位
-  *            - 传感器数据从 g_sensorData 读,时钟从 ClockData 读
-  *            - WiFi 配网走 WifiTask 的 cmdQ/evtQ 双向队列
-  *
-  *          屏幕方向:横屏 320x240。LVGL tick 由 FreeRTOS xTaskGetTickCount 提供。
-  *
-  *          与其它任务的配合:
-  *            - LEDTask:GUI 只往 LEDQueue 投消息,不直接操作 GPIO
-  *            - SensorTask:单向读全局 g_sensorData(在 LVGL 定时器里读,不阻塞)
-  *            - WifiTask:双向队列,GUI 发命令、定时器轮询收事件
-  *          本任务不阻塞等待任何东西(所有队列操作都是非阻塞),保证 5ms 一轮刷新。
-  *
-  * 硬件连接(魔女 STM32F407VET6 + 2.8寸屏):
-  *   LCD  ILI9341,FSMC Bank1 8080并口16bit,背光 PA15
-  *   触摸 XPT2046,GPIO 模拟 SPI:IRQ=PE4 CS=PD13 CLK=PE0 MOSI=PE2 MISO=PE3
-  */
+/* GuiTask.c
+ * LVGL 界面任务：ILI9341(FSMC) + XPT2046(GPIO 模拟 SPI) + LVGL v8.3，320×240 横屏暗色界面。
+ * 周期：正常 5ms 一轮 lv_timer_handler()，息屏 50ms 轮询触摸；优先级 Normal，栈 2560 字节。
+ * 注意：LVGL 单线程，所有 lv_* 只能在本任务及其定时器回调里调用。
+ */
 /* USER CODE END Header */
 
 #include "cmsis_os2.h"
@@ -46,7 +20,7 @@
 #include "SensorData.h"
 #include "ClockData.h"
 #include "WifiNet.h"
-#include "bsp_font_gbk.h"   /* V1.2: 中文改走外挂字库(内部 262KB 字库已关闭) */
+#include "bsp_font_gbk.h"   /*中文走外挂字库，内部 262KB 字库已关闭*/
 #include "usart.h"
 #include "PowerMgr.h"
 #include <stdio.h>
@@ -54,10 +28,7 @@
 /* LEDQueue 由 freertos.c 中 CubeMX 生成的代码创建 */
 extern osMessageQueueId_t LEDQueueHandle;
 
-/* ========================================================================
- *                         配色方案 (RGB565)
- *  深空蓝背景 + 浅色卡片(高对比度,确保 TFT 屏上文字清晰可读)
- * ======================================================================== */
+/*配色方案（RGB565）*/
 #define COLOR_BG_TOP        lv_color_hex(0x1e293b)   /* 背景渐变顶 */
 #define COLOR_BG_BOT        lv_color_hex(0x0f172a)   /* 背景渐变底 */
 #define COLOR_CARD          lv_color_hex(0xf1f5f9)   /* 卡片底色(近白,高对比) */
@@ -98,11 +69,14 @@ static uint8_t   s_wifiBusy;
 
 #define GUI_TASK_STACK_SIZE   2560U
 
-/* ======================================================================== */
+/*LED 命令投递*/
 
-/* 跨任务投递 LED 命令:队列里只传指针,不传结构体本身,省一次拷贝。
- * ⚠️ 内存约定:这里 pvPortMalloc,由 LEDTask 那边 vPortFree(见 LEDTask.c)。
- *    投递失败时必须自己释放,否则泄漏 —— 这是最容易漏的一处 */
+/*队列只传指针：这里 pvPortMalloc，LEDTask 负责 vPortFree，投递失败必须自己释放*/
+/**
+  * 函    数：GUI_LedPost
+  * 参    数：color  目标灯，LEDColor_Green / LEDColor_Blue；state  目标状态
+  * 返 回 值：无
+  */
 static void GUI_LedPost(LEDColor color, LEDState state)
 {
   LEDMessage *msg = pvPortMalloc(sizeof(LEDMessage));
@@ -118,10 +92,7 @@ static void GUI_LedPost(LEDColor color, LEDState state)
   }
 }
 
-/* ------------------------------------------------------------------------
- *  样式创建:背景、卡片、按钮
- *  LVGL v8.3 样式是可复用对象,挂到 obj 上即可,避免重复创建
- * ------------------------------------------------------------------------ */
+/*可复用样式对象*/
 
 static lv_style_t s_styleBg;        /* 全屏渐变背景 */
 static lv_style_t s_styleCard;      /* 传感器卡片 */
@@ -137,6 +108,11 @@ static lv_style_t s_styleSwBg;      /* 开关背景(关) */
 static lv_style_t s_styleSwIndOn;   /* 开关指示器(开) */
 static lv_style_t s_styleSwKnob;    /* 开关旋钮 */
 
+/**
+  * 函    数：GUI_InitStyles
+  * 参    数：无
+  * 返 回 值：无
+  */
 static void GUI_InitStyles(void)
 {
   /* 背景:纵向渐变 */
@@ -242,11 +218,12 @@ static void GUI_InitStyles(void)
   lv_style_set_radius(&s_styleSwKnob, 20);
 }
 
-/* ------------------------------------------------------------------------
- *  创建传感器卡片(左色条 + 数值 + 标签)
- *  w,h:卡片尺寸; color:左侧色条颜色; labelText:标签文字
- *  返回:数值 label 指针,供定时器刷新
- * ------------------------------------------------------------------------ */
+/*传感器卡片*/
+/**
+  * 函    数：GUI_CreateSensorCard
+  * 参    数：parent 父容器；x/y 坐标 px；w/h 尺寸 px；accent 色条颜色；labelText 标签；initVal 初值
+  * 返 回 值：数值 label 指针，供 1s 定时器刷新
+  */
 static lv_obj_t *GUI_CreateSensorCard(lv_obj_t *parent, int16_t x, int16_t y,
                                       int16_t w, int16_t h,
                                       lv_color_t accent,
@@ -263,7 +240,7 @@ static lv_obj_t *GUI_CreateSensorCard(lv_obj_t *parent, int16_t x, int16_t y,
   lv_obj_remove_style_all(bar);
   lv_obj_add_style(bar, &s_styleAccentBar, 0);
   lv_obj_set_style_bg_color(bar, accent, 0);
-  lv_obj_set_size(bar, 4, h - 8);
+  lv_obj_set_size(bar, 4, h - 8);                    /* 4px 宽色条,上下各留 4px */
   lv_obj_set_pos(bar, 4, 4);
 
   /* 数值(大) */
@@ -281,9 +258,12 @@ static lv_obj_t *GUI_CreateSensorCard(lv_obj_t *parent, int16_t x, int16_t y,
   return val;
 }
 
-/* ------------------------------------------------------------------------
- *  创建顶部状态栏:WiFi 图标 + 时钟
- * ------------------------------------------------------------------------ */
+/*状态栏*/
+/**
+  * 函    数：GUI_CreateStatusBar
+  * 参    数：scr  目标屏幕，主屏对象
+  * 返 回 值：无
+  */
 static void GUI_CreateStatusBar(lv_obj_t *scr)
 {
   /* 底部细线分隔 */
@@ -306,35 +286,42 @@ static void GUI_CreateStatusBar(lv_obj_t *scr)
   lv_obj_align(labelClock, LV_ALIGN_TOP_RIGHT, -8, 5);
 }
 
-/* LED 开关切换回调:switch 状态改变时发送 LED 控制消息 */
+/**
+  * 函    数：LedSwitchEventCb
+  * 参    数：event  LVGL 事件对象，user_data 存的是 LEDColor
+  * 返 回 值：无
+  */
 static void LedSwitchEventCb(lv_event_t *event)
 {
   lv_obj_t *sw = lv_event_get_target(event);
   uint32_t color = (uint32_t)lv_obj_get_user_data(sw);
   bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
 
-  /* 板载 LED 低电平点亮:switch 开(checked)=LED 亮=引脚输出低 */
+  /*板载 LED 低电平点亮：CHECKED=亮*/
   LEDState target = on ? LEDState_On : LEDState_Off;
   GUI_LedPost((LEDColor)color, target);
 }
 
-/* 创建 LED 控制:无框透明容器 + 左侧彩色标签 + 右侧开关
- * 开关打开时指示器显示对应颜色(绿/蓝),无需额外边框标识 */
+/**
+  * 函    数：GUI_CreateLedCard
+  * 参    数：parent 父对象；x/y 坐标 px；w/h 尺寸 px；onColor 开态指示色；color 灯枚举，存 user_data
+  * 返 回 值：容器 card 指针
+  */
 static lv_obj_t *GUI_CreateLedCard(lv_obj_t *parent, int16_t x, int16_t y,
                                     int16_t w, int16_t h,
                                     lv_color_t onColor,
                                     LEDColor color)
 {
-  /* 透明容器(无边框无背景,直接显示在深色屏幕背景上) */
+  /*透明容器*/
   lv_obj_t *card = lv_obj_create(parent);
   lv_obj_remove_style_all(card);
   lv_obj_set_size(card, w, h);
   lv_obj_set_pos(card, x, y);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
-  /* 右侧开关(开态颜色区分绿/蓝,无需文字标签) */
+  /*右侧开关*/
   lv_obj_t *sw = lv_switch_create(card);
-  lv_obj_set_size(sw, 44, 22);
+  lv_obj_set_size(sw, 44, 22);                       /* 44×22 开关,容器内居中 */
   lv_obj_center(sw);
   lv_obj_set_user_data(sw, (void *)(uint32_t)color);
 
@@ -348,7 +335,7 @@ static lv_obj_t *GUI_CreateLedCard(lv_obj_t *parent, int16_t x, int16_t y,
   lv_obj_set_style_bg_opa(sw, LV_OPA_COVER, LV_PART_INDICATOR | LV_STATE_CHECKED);
   lv_obj_set_style_radius(sw, 20, LV_PART_INDICATOR | LV_STATE_CHECKED);
 
-  /* 根据当前引脚电平设置开关初始状态 */
+  /*按引脚电平设初始状态，以引脚为真相*/
   GPIO_PinState pin;
   if (color == LEDColor_Green)
     pin = HAL_GPIO_ReadPin(led_green_GPIO_Port, led_green_Pin);
@@ -362,9 +349,12 @@ static lv_obj_t *GUI_CreateLedCard(lv_obj_t *parent, int16_t x, int16_t y,
   return card;
 }
 
-/* ------------------------------------------------------------------------
- *  创建两个 LED 控制卡片(参考 App 开关样式)
- * ------------------------------------------------------------------------ */
+/*LED 开关卡片*/
+/**
+  * 函    数：GUI_CreateButtons
+  * 参    数：scr  主屏对象
+  * 返 回 值：无
+  */
 static void GUI_CreateButtons(lv_obj_t *scr)
 {
   /* LED 开关竖向排列在传感器框右下角 */
@@ -374,11 +364,14 @@ static void GUI_CreateButtons(lv_obj_t *scr)
                     COLOR_ACCENT_BLUE, LEDColor_Blue);
 }
 
-/* ------------------------------------------------------------------------
- *  创建 WiFi 入口按钮(缩小,不占整行)
- * ------------------------------------------------------------------------ */
+/*WiFi 入口*/
 static void WifiEntryEventCb(lv_event_t *event);   /* 前向声明 */
 
+/**
+  * 函    数：GUI_CreateWifiEntry
+  * 参    数：scr  主屏对象
+  * 返 回 值：无
+  */
 static void GUI_CreateWifiEntry(lv_obj_t *scr)
 {
   lv_obj_t *btn = lv_btn_create(scr);
@@ -394,9 +387,12 @@ static void GUI_CreateWifiEntry(lv_obj_t *scr)
   lv_obj_center(lbl);
 }
 
-/* ------------------------------------------------------------------------
- *  主屏创建
- * ------------------------------------------------------------------------ */
+/*主屏*/
+/**
+  * 函    数：GUI_CreateMainScreen
+  * 参    数：无，内部用 lv_scr_act() 取当前屏
+  * 返 回 值：无
+  */
 static void GUI_CreateMainScreen(void)
 {
   lv_obj_t *scr = lv_scr_act();
@@ -415,7 +411,7 @@ static void GUI_CreateMainScreen(void)
   lv_obj_set_style_radius(sensorBox, 12, 0);
   lv_obj_set_style_pad_all(sensorBox, 6, 0);
   lv_obj_set_style_pad_row(sensorBox, 4, 0);
-  lv_obj_set_size(sensorBox, 304, 104);
+  lv_obj_set_size(sensorBox, 304, 104);              /* 屏宽 320,左右各留 8px 边距 */
   lv_obj_set_pos(sensorBox, 8, 28);
   lv_obj_set_scroll_dir(sensorBox, LV_DIR_VER);
 
@@ -430,9 +426,12 @@ static void GUI_CreateMainScreen(void)
   GUI_CreateWifiEntry(scr);
 }
 
-/* ------------------------------------------------------------------------
- *  传感器刷新定时器(每 1s)
- * ------------------------------------------------------------------------ */
+/*传感器刷新*/
+/**
+  * 函    数：SensorRefreshTimerCb
+  * 参    数：timer  定时器句柄，未使用
+  * 返 回 值：无
+  */
 static void SensorRefreshTimerCb(lv_timer_t *timer)
 {
   (void)timer;
@@ -485,20 +484,39 @@ static void SensorRefreshTimerCb(lv_timer_t *timer)
   }
 }
 
-/* =========================================================================
- *                         WiFi 屏幕配网界面
- * ========================================================================= */
+/*WiFi 屏幕配网界面*/
+
+/*配网界面状态机，由当前页 + s_wifiBusy + evtQ 事件驱动
+ * 状态     进入条件          动作                                       超时
+ * 主屏     点击 WiFi Setup   清 evtQ、busy=1、切页、Wifi_PostScan()      无
+ * 扫描中   busy=1            SCAN_DONE 后 busy=0，按 status 建列表或报错 CWLAP 20000ms×3
+ * 选网     点击热点          sec=0 直接 JOIN，否则弹密码面板            无
+ * 连接中   busy=1            发 JOIN，面板隐藏                          CWJAP 20000ms×3
+ * 连接成功 JOIN_OK           提示 Connected!，1.5s 后回主屏              1500ms
+ * 连接失败 JOIN_FAIL         隐藏密码面板，提示检查密码                 无
+ * 退出     Back 或返回定时器 淡入切回主屏，页面对象保留复用              250ms
+ * 界面不设超时，等待时长由 WifiTask 的 CWLAP/CWJAP 超时决定，最终必有事件回。
+ */
 
 static void ApItemEventCb(lv_event_t *event);
 static void WifiPwdHideReady(lv_anim_t *a);
 
-/* 动画执行回调包装:lv_obj_set_style_translate_y 需要 3 个参数(obj,value,selector),
- * 而 lv_anim_exec_xcb_t 只传 2 个(var,value),用包装器固定 selector=0 避免垃圾值 */
+/* 动画执行回调包装:固定 selector=0 */
+/**
+  * 函    数：AnimSetTranslateY
+  * 参    数：var  动画目标对象；v  当前动画值 px
+  * 返 回 值：无
+  */
 static void AnimSetTranslateY(void *var, int32_t v)
 {
     lv_obj_set_style_translate_y((lv_obj_t *)var, v, 0);
 }
 
+/**
+  * 函    数：WifiList_Refresh
+  * 参    数：无
+  * 返 回 值：无
+  */
 static void WifiList_Refresh(void)
 {
     uint8_t i;
@@ -540,7 +558,7 @@ static void WifiList_Refresh(void)
         lbl = lv_obj_get_child(btn, 0);
         if (lbl != NULL)
         {
-            lv_obj_set_width(lbl, 280);
+            lv_obj_set_width(lbl, 280);                    /* 限宽 280,超长 SSID 省略号截断 */
             lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
             lv_obj_set_style_text_color(lbl, COLOR_TEXT, 0);
             lv_obj_set_style_text_font(lbl, BSP_Font_Gbk16(), 0);
@@ -548,12 +566,22 @@ static void WifiList_Refresh(void)
     }
 }
 
+/**
+  * 函    数：WifiReturnTimerCb
+  * 参    数：timer  一次性定时器句柄，进入即删除
+  * 返 回 值：无
+  */
 static void WifiReturnTimerCb(lv_timer_t *timer)
 {
     lv_timer_del(timer);
     lv_scr_load_anim(s_mainScr, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
 }
 
+/**
+  * 函    数：WifiSubmitJoin
+  * 参    数：pwd  用户输入密码，开放网络传 ""
+  * 返 回 值：无
+  */
 static void WifiSubmitJoin(const char *pwd)
 {
     s_wifiBusy = 1U;
@@ -563,6 +591,11 @@ static void WifiSubmitJoin(const char *pwd)
     Wifi_PostJoin(s_selSsid, pwd);
 }
 
+/**
+  * 函    数：ApItemEventCb
+  * 参    数：event  LVGL 事件对象，user_data 为 aps 下标
+  * 返 回 值：无
+  */
 static void ApItemEventCb(lv_event_t *event)
 {
     lv_obj_t *btn = lv_event_get_target(event);
@@ -590,17 +623,22 @@ static void ApItemEventCb(lv_event_t *event)
     lv_keyboard_set_textarea(s_kb, s_pwdTa);
 
     /* 密码面板从底部滑入 */
-    lv_obj_set_style_translate_y(s_pwdPanel, 240, 0);
+    lv_obj_set_style_translate_y(s_pwdPanel, 240, 0);   /* 屏高 240,先移到屏外再滑入 */
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, s_pwdPanel);
     lv_anim_set_exec_cb(&a, AnimSetTranslateY);
     lv_anim_set_values(&a, 240, 0);
-    lv_anim_set_time(&a, 280);
+    lv_anim_set_time(&a, 280);          /* 滑入 280ms */
     lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
     lv_anim_start(&a);
 }
 
+/**
+  * 函    数：WifiRescanCb
+  * 参    数：event  未使用
+  * 返 回 值：无
+  */
 static void WifiRescanCb(lv_event_t *event)
 {
     (void)event;
@@ -614,6 +652,11 @@ static void WifiRescanCb(lv_event_t *event)
     Wifi_PostScan();
 }
 
+/**
+  * 函    数：WifiBackCb
+  * 参    数：event  未使用
+  * 返 回 值：无
+  */
 static void WifiBackCb(lv_event_t *event)
 {
     (void)event;
@@ -621,6 +664,11 @@ static void WifiBackCb(lv_event_t *event)
     lv_scr_load_anim(s_mainScr, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
 }
 
+/**
+  * 函    数：WifiPwdOkCb
+  * 参    数：event  未使用
+  * 返 回 值：无
+  */
 static void WifiPwdOkCb(lv_event_t *event)
 {
     const char *pwd;
@@ -629,6 +677,11 @@ static void WifiPwdOkCb(lv_event_t *event)
     WifiSubmitJoin((pwd != NULL) ? pwd : "");
 }
 
+/**
+  * 函    数：WifiPwdCancelCb
+  * 参    数：event  未使用
+  * 返 回 值：无
+  */
 static void WifiPwdCancelCb(lv_event_t *event)
 {
     (void)event;
@@ -639,12 +692,17 @@ static void WifiPwdCancelCb(lv_event_t *event)
     lv_anim_set_var(&a, s_pwdPanel);
     lv_anim_set_exec_cb(&a, AnimSetTranslateY);
     lv_anim_set_values(&a, 0, 240);
-    lv_anim_set_time(&a, 220);
+    lv_anim_set_time(&a, 220);          /* 滑出 220ms */
     lv_anim_set_path_cb(&a, lv_anim_path_ease_in);
     lv_anim_set_ready_cb(&a, WifiPwdHideReady);
     lv_anim_start(&a);
 }
 
+/**
+  * 函    数：WifiPwdHideReady
+  * 参    数：a  动画描述，未使用
+  * 返 回 值：无
+  */
 static void WifiPwdHideReady(lv_anim_t *a)
 {
     (void)a;
@@ -652,10 +710,12 @@ static void WifiPwdHideReady(lv_anim_t *a)
     lv_obj_set_style_translate_y(s_pwdPanel, 0, 0);  /* 复位 translate,下次滑入从 0 开始 */
 }
 
-/* 100ms 轮询一次 WifiTask 的事件队列。
- * ⚠️ 不在 WiFi 页时直接 return,事件不会被取走,会一直堆在 evtQ 里。
- *    所以进入 WiFi 页时(WifiEntryEventCb)必须先把陈旧事件清空,
- *    否则一进去就收到上一次的 SCAN_DONE/JOIN_OK,界面状态就乱了 */
+/**
+  * 函    数：WifiEventTimerCb
+  * 参    数：timer  未使用
+  * 返 回 值：无
+  */
+/*不在配网页时事件不取走，会一直堆在 evtQ，故进页时必须先清陈旧事件*/
 static void WifiEventTimerCb(lv_timer_t *timer)
 {
     WifiEvent_t ev;
@@ -687,7 +747,7 @@ static void WifiEventTimerCb(lv_timer_t *timer)
             s_wifiBusy = 0U;
             lv_obj_clear_state(s_btnRescan, LV_STATE_DISABLED);
             lv_label_set_text(s_lblWifiStatus, "Connected!");
-            (void)lv_timer_create(WifiReturnTimerCb, 1500U, NULL);
+            (void)lv_timer_create(WifiReturnTimerCb, 1500U, NULL);   /* 成功提示停留 1.5s */
         }
         else if (ev == WIFI_EV_JOIN_FAIL)
         {
@@ -699,6 +759,11 @@ static void WifiEventTimerCb(lv_timer_t *timer)
     }
 }
 
+/**
+  * 函    数：WifiEntryEventCb
+  * 参    数：event  未使用
+  * 返 回 值：无
+  */
 static void WifiEntryEventCb(lv_event_t *event)
 {
     WifiEvent_t stale;
@@ -717,9 +782,12 @@ static void WifiEntryEventCb(lv_event_t *event)
     Wifi_PostScan();
 }
 
-/* ------------------------------------------------------------------------
- *  创建 WiFi 配网页
- * ------------------------------------------------------------------------ */
+/*创建 WiFi 配网页*/
+/**
+  * 函    数：GUI_CreateWifiScreen
+  * 参    数：无
+  * 返 回 值：无
+  */
 static void GUI_CreateWifiScreen(void)
 {
     lv_obj_t *lblTitle;
@@ -744,7 +812,7 @@ static void GUI_CreateWifiScreen(void)
 
     /* 热点列表 */
     s_apList = lv_list_create(s_wifiScr);
-    lv_obj_set_size(s_apList, 308, 168);
+    lv_obj_set_size(s_apList, 308, 168);             /* 308×168:底部留给 Rescan/Back 按钮 */
     lv_obj_set_pos(s_apList, 6, 28);
     lv_obj_set_style_bg_opa(s_apList, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(s_apList, COLOR_CARD, 0);
@@ -835,8 +903,13 @@ static void GUI_CreateWifiScreen(void)
     lv_obj_set_style_bg_color(s_kb, COLOR_BG_BOT, 0);
 }
 
-/* ======================================================================== */
+/*任务入口*/
 
+/**
+  * 函    数：StartGuiTask
+  * 参    数：argument  未使用，创建时传 NULL
+  * 返 回 值：无，死循环不返回
+  */
 void StartGuiTask(void *argument)
 {
   (void)argument;
@@ -863,43 +936,52 @@ void StartGuiTask(void *argument)
   GUI_CreateMainScreen();
   GUI_CreateWifiScreen();
 
-  /* LVGL 定时器不是硬件定时器,而是挂在 lv_timer_handler() 上的软件回调,
-   * 只有主循环跑到 handler 时才会被执行 */
+  /* LVGL 定时器挂在 lv_timer_handler() 上，只有主循环跑到它才执行 */
   /* 传感器刷新:1s */
-  lv_timer_create(SensorRefreshTimerCb, 1000, NULL);
+  lv_timer_create(SensorRefreshTimerCb, 1000, NULL);   /* 1s 刷新,与 CAN/Modbus 传感器帧同频 */
 
   /* WiFi 配网事件轮询:100ms */
-  lv_timer_create(WifiEventTimerCb, 100, NULL);
+  lv_timer_create(WifiEventTimerCb, 100, NULL);        /* 100ms 轮询 evtQ,非阻塞 */
 
   UART_Printf("[GUI] modern UI created, entering loop\r\n");
 
   PowerMgr_Init();
 
-  /* LVGL 是"单线程轮询"模型:必须周期性调用 lv_timer_handler(),
-   * 它内部才会去跑定时器回调、重绘界面、读触摸。这个周期决定流畅度:
-   *   正常 → 5ms 一轮,动画和触摸都跟手
-   *   息屏 → 跳过 handler,只轮询触摸,省掉无谓的重绘开销 */
+  /* lv_timer_handler 的调用周期决定流畅度：正常 5ms，息屏跳过*/
+
+  /**
+   * 主循环双状态，由 PowerMgr_IsSleeping() 选分支
+   * 状态     含义    动作                                       周期/超时
+   * 正常显示 背光开  PowerMgr_Process() + lv_timer_handler()    5ms 一轮，30000ms 无操作转息屏
+   * 息屏     背光关  只查 XPT2046_IsPressed()，有触摸则 Wakeup  50ms 轮询，无超时，必须人为唤醒
+   * 两个分支入口都先 Watchdog_Heartbeat(WDT_TASK_GUI)。
+   */
   for(;;)
   {
-    /* 每 5ms 就报一次,远快于 3s 判死线 —— GUI 这条心跳是全工程最稳的 */
+    /*每轮上报，远快于 3s 判死线*/
     Watchdog_Heartbeat(WDT_TASK_GUI);
 
     if (PowerMgr_IsSleeping() != 0U)
     {
-      /* 息屏:不再刷新界面,只查触摸用于唤醒 */
+      /*息屏：只查触摸唤醒*/
       if (XPT2046_IsPressed() != 0U)
         PowerMgr_Wakeup();
-      osDelay(POWERMGR_SLEEP_POLL_MS);
+      osDelay(POWERMGR_SLEEP_POLL_MS);     /* 息屏:50ms 轮询一次触摸,配合 tickless idle 省电 */
     }
     else
     {
       PowerMgr_Process();
       lv_timer_handler();
-      osDelay(5);
+      osDelay(5);                          /* 5ms 一轮:动画与触摸响应的流畅度基准 */
     }
   }
 }
 
+/**
+  * 函    数：GuiTask_Create
+  * 参    数：无
+  * 返 回 值：无
+  */
 void GuiTask_Create(void)
 {
   static const osThreadAttr_t guiTaskAttr = {

@@ -1,18 +1,7 @@
-/**
-  ******************************************************************************
-  * @file    SensorTask.c
-  * @brief   传感器采集任务:周期读取 BH1750(光照) 与 DHT11(温湿度),
-  *          结果写入全局共享结构体 g_sensorData,供 GuiTask 显示。
-  *
-  *          硬件:
-  *            BH1750 -> 硬件 I2C1 (PB6=SCL, PB7=SDA)
-  *            DHT11  -> 单总线 PC1
-  *
-  *          采样策略:
-  *            DHT11 要求采样间隔 ≥ 1s,本任务周期 2s;
-  *            BH1750 连续模式下可随时读取。
-  ******************************************************************************
-  */
+/* SensorTask.c
+ * 传感器采集：每 2s 读 BH1750(光照, I2C1 PB6/PB7) 与 DHT11(温湿度, 单总线 PC1)，
+ * 结果写入 g_sensorData，供 GUI/Modbus/CAN 读取。
+ */
 #include "cmsis_os2.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -23,18 +12,18 @@
 #include "usart.h"
 
 
-/* 全局共享传感器数据 */
+/*全局共享传感器数据，SensorTask 写，其余读*/
 SensorData_t g_sensorData = {0};
 
 
-/* CMSIS-RTOS2 的 stack_size 单位是字节(cmsis_os2.c 中 /sizeof(StackType_t) 转字):
- * 1024 字节 = 256 字。printf 浮点格式化栈开销较大,是否够用由 StatsTask 的
- * StackMin 列监控,水位过低时再加大 */
+/*stack_size 单位是字节：1024 字节＝256 字，StackMin 水位过低时再加*/
 #define SENSOR_TASK_STACK_SIZE   1024U
 
 
 /**
-  * @brief  传感器采集任务入口
+  * 函    数：StartSensorTask
+  * 参    数：argument  未使用，任务参数
+  * 返 回 值：无
   */
 void StartSensorTask(void *argument)
 {
@@ -44,10 +33,10 @@ void StartSensorTask(void *argument)
   DHT11_Data_t  env;
   BH1750_Status_t stLight;
   DHT11_Status_t  stEnv;
-  int tInt, tDec, hInt, hDec;   /* printf 整数/小数拆分(避免 %f) */
-  TickType_t lastWakeTime;      /* vTaskDelayUntil 的周期基准点 */
+  int tInt, tDec, hInt, hDec;   /*整数/小数拆分，避免 %f*/
+  TickType_t lastWakeTime;      /*绝对周期基准*/
 
-  /* 1. 初始化两个传感器 */
+  /*初始化传感器*/
   if (BH1750_Init() == BH1750_OK)
     UART_Printf("[SENSOR] BH1750 init ok\r\n");
   else
@@ -56,15 +45,12 @@ void StartSensorTask(void *argument)
   DHT11_Init();
   UART_Printf("[SENSOR] DHT11 init ok\r\n");
 
-  /* 2. 周期采集。
-   * 用 vTaskDelayUntil 而非 vTaskDelay/osDelay:后者的延时从"任务被唤醒"
-   * 开始计时,本任务每次采集+打印的执行时间会累加进周期,造成周期漂移;
-   * vTaskDelayUntil 以固定的绝对唤醒时刻为基准,周期恒为 2000ms */
+  /*vTaskDelayUntil 以绝对时刻为基准，周期恒为 2s 不漂移*/
   lastWakeTime = xTaskGetTickCount();
   for (;;)
   {
     Watchdog_Heartbeat(WDT_TASK_SENSOR);
-    /* ---- 光照 BH1750 ---- */
+    /*光照 BH1750*/
     stLight = BH1750_Read(&light);
     if (stLight == BH1750_OK)
     {
@@ -73,15 +59,11 @@ void StartSensorTask(void *argument)
     }
     else
     {
-      g_sensorData.light_valid = 0;
+      g_sensorData.light_valid = 0;   /*置 0，Modbus/CAN 据此回 0xFFFF*/
     }
 
-    /* ---- 温湿度 DHT11 ----
-     * 单总线读 40 位是 us 级时序敏感操作(超时窗口 70~100us),读取期间临时把
-     * 本任务提到 Realtime(高于 CommandTask High1/KEYTask High),避免被任务级
-     * 抢占导致 T:err;只挡任务切换,不影响 UART/DMA 等中断响应。整个读取约 5ms */
-    /* Realtime 期间连 MonitorTask 都抢不过本任务,但整段只有约 5ms,
-     * 远小于 3s 判死线,喂狗不受影响 */
+    /*温湿度 DHT11*/
+    /*读 40 位是 us 级时序，读期间提到 Realtime 防任务抢占，约 5ms，不挡中断*/
     osThreadSetPriority(osThreadGetId(), osPriorityRealtime);
     stEnv = DHT11_Read(&env);
     osThreadSetPriority(osThreadGetId(), osPriorityNormal);
@@ -93,10 +75,10 @@ void StartSensorTask(void *argument)
     }
     else
     {
-      g_sensorData.temp_valid  = 0;
+      g_sensorData.temp_valid  = 0;   /*温湿度共用同一有效位*/
     }
 
-    /* 调试:串口打印一次(避免 %f 浮点格式化,拆成整数+小数,省栈省 CPU) */
+    /*拆整数+小数打印，避免 %f 的栈开销*/
     tInt = (int)g_sensorData.temperature;
     tDec = (int)((g_sensorData.temperature - tInt) * 10.0f);
     if (tDec < 0) tDec = -tDec;
@@ -110,15 +92,16 @@ void StartSensorTask(void *argument)
            g_sensorData.temp_valid  ? "ok" : "err",
            g_sensorData.light_valid ? "ok" : "err");
 
-    /* 阻塞到下一个绝对唤醒时刻:实际采样间隔严格 2000ms,
-     * DHT11 最小间隔 1s 也因此得到保证 */
+    /*阻塞到下一个绝对时刻，采样间隔严格 2000ms，满足 DHT11 ≥1s*/
     vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(2000U));
   }
 }
 
 
 /**
-  * @brief  创建传感器采集任务(供 freertos.c 调用)
+  * 函    数：SensorTask_Create
+  * 参    数：无
+  * 返 回 值：无，句柄不保存
   */
 void SensorTask_Create(void)
 {

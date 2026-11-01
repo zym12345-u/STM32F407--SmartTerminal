@@ -1,19 +1,8 @@
-/**
-  ******************************************************************************
-  * @file    bsp_WifiStoreLfs.c
- * @brief   WiFi 凭据的 LittleFS 存储实现(V1.2 M5)
-  *
- *          与旧方案(内部 Flash sector11)的对比:
- *            旧: 擦除 128KB 扇区, CPU 停 1~2s, 必须 IWDG_SetReload(500) 放宽窗口;
- *            新: LittleFS 只动 1~2 个 4KB 块(busy 约 33ms), RTOS 正常运行,
- *                不必碰 IWDG 窗口, 且自带磨损均衡与掉电恢复
-  *
- *          调用时机: 只在 WifiTask 启动阶段执行一次, 且必须在 LittleFS 挂载之后。
- *                    注意 LFS_Port_Handle() 恒返回 &s_lfs(永不为 NULL),
- *                    所以这里的 NULL 检查挡不住"未挂载"——未挂载时是
- *                    lfs_file_open 直接失败, 迁移同样静默跳过
-  ******************************************************************************
-  */
+/* bsp_WifiStoreLfs.c
+ * WiFi 凭据存 LittleFS /wifi.conf：本地组帧后整块写入并 sync，校验算法与旧 Flash 方案一致。
+ * 硬件：SPI1 = PA5/PA6/PA7 + CS=PC13，经 bsp_lfs_port 访问 W25Q128。
+ * 注意：写前后各报一次 WIFI 心跳，LittleFS 整理可能接近秒级，判死线 3s。
+ */
 #include "bsp_WifiStoreLfs.h"
 #include "bsp_WifiStore.h"
 #include "bsp_lfs_port.h"
@@ -22,9 +11,13 @@
 
 #include <string.h>
 
-#define WIFI_LFS_PATH    "/wifi.conf"
+#define WIFI_LFS_PATH    "/wifi.conf"      /* LittleFS 内的凭据文件路径(只此一份) */
 
-/* 校验和算法与 bsp_WifiStore.c 保持一致, 便于迁移时交叉比对 */
+/**
+  * 函    数：WifiLfs_CalcChecksum
+  * 参    数：c  WifiCred_t 指针，不能为空
+  * 返 回 值：前 102 字节的 32 位加和(最大约 26010)
+  */
 static uint32_t WifiLfs_CalcChecksum(const WifiCred_t *c)
 {
     const uint8_t *p = (const uint8_t *)c;
@@ -39,6 +32,11 @@ static uint32_t WifiLfs_CalcChecksum(const WifiCred_t *c)
     return sum;
 }
 
+/**
+  * 函    数：WifiStoreLfs_Load
+  * 参    数：out  输出缓冲，不能为空，失败时清零
+  * 返 回 值：1=有合法凭据，0=文件不存在/长度不符/magic 或校验失败
+  */
 uint8_t WifiStoreLfs_Load(WifiCred_t *out)
 {
     lfs_t      *lfs = LFS_Port_Handle();
@@ -52,13 +50,13 @@ uint8_t WifiStoreLfs_Load(WifiCred_t *out)
         return 0U;
     }
 
-    err = lfs_file_open(lfs, &file, WIFI_LFS_PATH, LFS_O_RDONLY);
+    err = lfs_file_open(lfs, &file, WIFI_LFS_PATH, LFS_O_RDONLY);   /* 只读打开 */
     if (err != LFS_ERR_OK)
     {
-        return 0U;                   /* 文件不存在或读取失败(首次开机属正常) */
+        return 0U;                   /* 文件不存在或读取失败 */
     }
 
-    n = lfs_file_read(lfs, &file, out, sizeof(*out));
+    n = lfs_file_read(lfs, &file, out, sizeof(*out));   /* 必须读满整个结构才算有效 */
     (void)lfs_file_close(lfs, &file);
 
     if (n != (lfs_ssize_t)sizeof(*out))
@@ -79,6 +77,11 @@ uint8_t WifiStoreLfs_Load(WifiCred_t *out)
     return 1U;
 }
 
+/**
+  * 函    数：WifiStoreLfs_Save
+  * 参    数：in  待保存凭据，不能为空，ssid/pwd 超长部分截断
+  * 返 回 值：1=打开/写入/写满长度/sync 全部成功，0=任一步失败
+  */
 uint8_t WifiStoreLfs_Save(const WifiCred_t *in)
 {
     lfs_t      *lfs = LFS_Port_Handle();
@@ -91,8 +94,7 @@ uint8_t WifiStoreLfs_Save(const WifiCred_t *in)
         return 0U;
     }
 
-    /* 先在本地缓冲里填好 magic 与校验和, 再整块写入 ——
-     * 避免直接写 out 导致写一半被打断留下脏数据 */
+    /* 先在本地缓冲里填好 magic 与校验和，避免写一半被打断留下脏数据 */
     WifiCred_t buf;
     memset(&buf, 0, sizeof(buf));
     buf.magic = WIFI_FLASH_MAGIC;
@@ -100,12 +102,11 @@ uint8_t WifiStoreLfs_Save(const WifiCred_t *in)
     strncpy(buf.pwd,  in->pwd,  WIFI_PWD_LEN);
     buf.checksum = WifiLfs_CalcChecksum(&buf);
 
-    /* 心跳保险: LittleFS 的 erase+prog 可能跨多个 4KB 块, 加上元数据更新,
-     * 最坏情况可能接近秒级。WiFi 任务判死线 3s, 这里入口报一次。 */
+    /* 只动 1~2 个 4KB 块，busy 约 33ms，不必放宽 IWDG；入口先报一次心跳 */
     Watchdog_Heartbeat(WDT_TASK_WIFI);
 
     err = lfs_file_open(lfs, &file, WIFI_LFS_PATH,
-                        LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+                        LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);   /* 截断重写, 只保留一条 */
     if (err != LFS_ERR_OK)
     {
         UART_Printf("[WIFI] lfs save open fail err=%d\r\n", err);
@@ -124,7 +125,7 @@ uint8_t WifiStoreLfs_Save(const WifiCred_t *in)
     err = lfs_file_sync(lfs, &file);
     (void)lfs_file_close(lfs, &file);
 
-    Watchdog_Heartbeat(WDT_TASK_WIFI);    /* 写完再报一次 */
+    Watchdog_Heartbeat(WDT_TASK_WIFI);    /* 写完再报一次: 判死线 3s, 覆盖整段写耗时 */
 
     if (err != LFS_ERR_OK)
     {
@@ -136,6 +137,11 @@ uint8_t WifiStoreLfs_Save(const WifiCred_t *in)
     return 1U;
 }
 
+/**
+  * 函    数：WifiStoreLfs_Migrate
+  * 参    数：无
+  * 返 回 值：1=本次确实迁移了一条，0=无需迁移(LFS 已有/旧区为空/写失败)
+  */
 uint8_t WifiStoreLfs_Migrate(void)
 {
     WifiCred_t legacy;
@@ -165,7 +171,7 @@ uint8_t WifiStoreLfs_Migrate(void)
     {
         WifiCred_t blank;
         memset(&blank, 0, sizeof(blank));
-        if (WifiStore_Save(&blank) != 0U)
+        if (WifiStore_Save(&blank) != 0U)     /* 全 0 写入: magic=0, 下次不再迁移 */
         {
             UART_Printf("[WIFI] migrate: legacy sector11 cleared\r\n");
         }

@@ -1,20 +1,8 @@
 /* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+/* main.c
+ * 应用入口：初始化 HAL/时钟/外设和 FreeRTOS，然后启动调度器。
+ * 注意：App 被 BootLoader 搬到 0x08010000，所以进 main 前必须改 VTOR。
+ */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
@@ -58,7 +46,6 @@ void MX_FREERTOS_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
 /* USER CODE END 0 */
 
 /**
@@ -69,14 +56,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-  /* V2.0：本工程固件已从 0x08000000 平移到 0x0800C000（0x08000000 起归 BootLoader）。
-   * Cortex-M 的异常/中断入口由 SCB->VTOR 决定，而 SystemInit 里默认写的是
-   * FLASH_BASE(0x08000000)——那是 BootLoader 的向量表；若不在此纠正，本工程所有
-   * 中断都会按 BootLoader 的表分发，直接跳进它的 Default_Handler 死循环。
-   * 放在 main() 最开头、HAL_Init 之前，是因为 HAL_Init 会启动时基中断。
-   * 不直接改 system_stm32f4xx.c 的 VECT_TAB_OFFSET：那个文件由 CubeMX 生成，
-   * 重新生成时会被覆盖；USER CODE 区不会被覆盖。 */
-  SCB->VTOR = 0x0800C000UL;
+  SCB->VTOR = 0x08010000UL;   /*不设 VTOR，所有中断会按 BootLoader 的向量表分发*/
   __DSB();
   __ISB();
   /* USER CODE END 1 */
@@ -103,10 +83,7 @@ int main(void)
   MX_USART3_UART_Init();   /* RS485 物理层(PB10/PB11);USART2 由 ESP8266 自初始化 */
   MX_CAN1_Init();          /* CAN1(PB8/PB9 AF9); 位时序由 bsp_CAN.c 的 CAN_BspInit 覆写 */
   /* USER CODE BEGIN 2 */
-  /* 板载 LED 为低电平点亮(灌电流):输出 RESET 亮、SET 灭。
-   * MX_GPIO_Init 后引脚默认 RESET(灯亮),调度器启动前先熄灭两灯,
-   * 使物理初始状态与各任务中的 LEDState_Off 保持一致(参考官方流水灯例程)。 */
-  HAL_GPIO_WritePin(led_green_GPIO_Port, led_green_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(led_green_GPIO_Port, led_green_Pin, GPIO_PIN_SET);   /*灯低电平点亮，启动前统一置灭*/
   HAL_GPIO_WritePin(led_blue_GPIO_Port,  led_blue_Pin,  GPIO_PIN_SET);
   /* USER CODE END 2 */
 
@@ -208,7 +185,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
@@ -227,8 +203,6 @@ void Error_Handler(void)
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

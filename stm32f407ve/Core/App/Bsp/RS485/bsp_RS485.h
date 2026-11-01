@@ -1,28 +1,8 @@
-/**
-  ******************************************************************************
-  * @file    bsp_RS485.h
-  * @brief   板载 RS485 收发器驱动(USART3 接口, 硬件自动收发方向)
-  *
-  *          硬件连接(2026-10 调整):
-  *            板载 RS485 电路出厂默认跳线到 USART3(PB10/PB11),
-  *            本工程直接使用出厂默认接线(无需杜邦线跳接):
-  *              PB10 = USART3_TX -> RS485 电路 RX
-  *              PB11 = USART3_RX <- RS485 电路 TX
-  *            ESP8266 已改到 USART2(PA2/PA3),两者互不冲突。
-  *            RS485 收发器为硬件自动方向控制(厂商例程发送时未操作任何
-  *            方向引脚), 无需 DE/RE 引脚; 若某些批次需要手动方向控制,
-  *            打开 RS485_MANUAL_DE 宏并在 RS485_DE_Set 中补上引脚
-  *
-  *          说明:
-  *            1. 复用 CubeMX 生成的 huart3(usart.c), 本驱动内重新配置波特率
-  *            2. RX: 单字节中断 -> usart.c 的 HAL_UART_RxCpltCallback 中
-  *               USART3 分支调用 RS485_RxByteISR() -> 单生产者/单消费者环形缓冲
-  *            3. TX: 任务上下文轮询发送(响应帧最长 256B @9600 ≈ 267ms,
-  *               只阻塞本任务, 不影响其它任务); 发送完毕后清空自发自收的回环字节
-  *            4. 半双工特性: 发送时本板 RX 会收到自己发出的字节(自发自收),
-  *               调用方无需关心, RS485_Send 内部已处理
-  ******************************************************************************
-  */
+/* bsp_RS485.h
+ * RS485 驱动接口：初始化、收发、缓冲清空、IDLE 中断与任务通知。
+ * 硬件：USART3 = PB10(TX)/PB11(RX)，AF7；板载收发器硬件自动方向，无 DE/RE 引脚。
+ * 注意：只允许 ModbusTask 单任务串行调用；RS485_SetNotifyTask 必须先于 RS485_EnableIdleIT。
+ */
 #ifndef __BSP_RS485_H
 #define __BSP_RS485_H
 
@@ -30,71 +10,91 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-/* 手动方向控制开关: 本板 RS485 为硬件自动方向, 默认关闭。
- * 若实测发现发送后总线被拉死(收不到主站下一帧), 说明该批次收发器
- * 需要手动 DE, 打开此宏并实现 RS485_DE_Set 的引脚操作 */
-#define RS485_MANUAL_DE         0
+/*手动方向开关：本板硬件自动方向，默认关闭；若换批次后发送完总线被拉死，打开此宏并在 .c 补 DE 引脚*/
+#define RS485_MANUAL_DE         0       /* 0 = 硬件自动方向(本板默认); 1 = 手动 DE，引脚见 .c */
 
-/* 默认通信参数(与常见 Modbus 设备出厂值一致, 可按主站软件调整) */
-#define RS485_BAUDRATE          9600U
+#define RS485_BAUDRATE          9600U   /* 单位 bit/s，与常见 Modbus 从站出厂值一致，可按主站调整 */
 
-/* 接收环形缓冲大小: Modbus 一帧最长 256 字节, 缓冲留一帧余量 */
-#define RS485_RX_BUF_SIZE       256U
+/*Modbus 一帧最长 256 字节*/
+#define RS485_RX_BUF_SIZE       256U    /* 单位 byte；实际可缓存 255，留 1 字节用于区分空/满 */
 
 
-/* ====================== 对外接口 ====================== */
+/*对外接口*/
 
 /**
-  * @brief  初始化 RS485(重配 huart3 波特率, 清空环形缓冲, 启动接收中断)
-  * @note   依赖 usart.c 中 MX_USART3_UART_Init 已完成首次初始化
+  * 函    数：RS485_Init
+  * 参    数：无
+  * 返 回 值：无
+  * 注意事项：依赖 usart.c 中 MX_USART3_UART_Init 已完成首次初始化
   */
 void RS485_Init(void);
 
 /**
-  * @brief  查询接收环形缓冲中的字节数
-  * @retval 当前缓冲的待读字节数
+  * 函    数：RS485_RxCount
+  * 参    数：无
+  * 返 回 值：当前缓冲待读字节数，范围 0~255
   */
 uint16_t RS485_RxCount(void);
 
 /**
-  * @brief  从接收环形缓冲读出一个字节
-  * @param  byte  输出参数, 存放读出的字节
-  * @retval 1-读到; 0-缓冲空
+  * 函    数：RS485_ReadByte
+  * 参    数：byte  输出参数，存放读出的字节
+  * 返 回 值：1 = 读到，0 = 缓冲空
   */
 uint8_t RS485_ReadByte(uint8_t *byte);
 
 /**
-  * @brief  清空接收环形缓冲(发送前/后调用, 丢弃自发自收回环与历史噪声)
+  * 函    数：RS485_RxFlush
+  * 参    数：无
+  * 返 回 值：无
+  * 注意事项：发送前/后调用，丢弃自发自收回环与历史噪声
   */
 void RS485_RxFlush(void);
 
 /**
-  * @brief  阻塞发送一帧(任务上下文调用, 内部处理方向/回环)
-  * @param  data  待发送数据
-  * @param  len   字节数
+  * 函    数：RS485_Send
+  * 参    数：data  待发送数据
+  * 参    数：len  字节数，范围 1~256
+  * 返 回 值：无
+  * 注意事项：仅任务上下文调用，内部处理方向与回环
   */
 void RS485_Send(const uint8_t *data, uint16_t len);
 
-/* 仅供 usart.c 的 HAL_UART_RxCpltCallback(USART3 分支)调用: 把 ISR 收到的
- * 字节推入环形缓冲。ISR 上下文, 内部不调用任何 RTOS API */
+/**
+  * 函    数：RS485_RxByteISR
+  * 参    数：byte  本次收到的字节
+  * 返 回 值：无
+  * 注意事项：仅供 usart.c 的 HAL_UART_RxCpltCallback 调用；ISR 上下文，不调 RTOS API
+  */
 void RS485_RxByteISR(uint8_t byte);
 
-/* HAL_UART_Receive_IT 的接收缓冲(在 bsp_RS485.c 定义)。
- * usart.c 的回调必须读这个变量才能拿到实际收到的字节 */
+/*HAL 单字节接收缓冲，在 bsp_RS485.c 定义；回调必须读它*/
 extern uint8_t s_rxByte;
 
-/* ====================== 空闲中断 + 任务通知 ======================
- * ModbusTask 阻塞在 xTaskNotifyWait 上, USART3 IDLE 中断(一帧结束)
- * 时通过 vTaskNotifyFromISR 唤醒, 替代原来的 10ms 轮询 */
+/*IDLE 中断唤醒 ModbusTask，替代 10ms 轮询*/
 
-/** 注册 ModbusTask 句柄, IDLE 中断里向它发通知 */
+/**
+  * 函    数：RS485_SetNotifyTask
+  * 参    数：task  目标任务句柄
+  * 返 回 值：无
+  * 注意事项：必须先于 RS485_EnableIdleIT 调用
+  */
 void RS485_SetNotifyTask(TaskHandle_t task);
 
-/** 使能 USART3 IDLE 中断(在 RS485_Init 之后、任务通知注册之后调用) */
+/**
+  * 函    数：RS485_EnableIdleIT
+  * 参    数：无
+  * 返 回 值：无
+  * 注意事项：在 RS485_Init 与任务通知注册之后调用
+  */
 void RS485_EnableIdleIT(void);
 
-/** USART3 IDLE 中断服务(在 stm32f4xx_it.c 的 USART3_IRQHandler 里调用)。
- *  清 IDLE 标志并向 ModbusTask 发通知; ISR 上下文 */
+/**
+  * 函    数：RS485_IdleISR
+  * 参    数：无
+  * 返 回 值：无
+  * 注意事项：ISR 上下文，在 stm32f4xx_it.c 的 USART3_IRQHandler 里调用
+  */
 void RS485_IdleISR(void);
 
 
