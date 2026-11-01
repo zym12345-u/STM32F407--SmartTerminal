@@ -21,10 +21,29 @@ static CanStats_t         s_stats;          /* rx 由 ISR 写，tx 由 CanTask �
 /*内部工具*/
 
 /**
-  * 功    能：按目标波特率算出位时序写进 hcan1.Init（APB1 = 42MHz 为基准）
+  * 功    能：按目标波特率算出位时序，写进 hcan1.Init（APB1 = 42MHz 为基准）
   * 参    数：baud  目标波特率，单位 bit/s，仅支持 1M/500K/250K/125K
-  * 返 回 值：0 = 已写入，1 = 不支持，hcan1.Init 保持原值
-  * 补    充：仅 CAN_BspInit 调用；APB1 = 42MHz，预分频按此计算
+  * 返 回 值：0 = 已写入；1 = 不支持该波特率，hcan1.Init 保持原值
+  * 补    充：仅 CAN_BspInit 调用。
+  *
+  * ── 下面这几个寄存器到底在干嘛（看视频容易漏掉的部分）──
+  *
+  * CAN 总线上一个「位」不是简单的高低电平，而是被切成若干「时间份额 TQ」。
+  * TQ 有多长，由 Prescaler 决定：
+  *     TQ = Prescaler / APB1时钟        例：500K 档 → 6 / 42MHz = 142.86ns
+  * 一个位 = 1 个同步段 + BS1 + BS2 个 TQ：
+  *     位时间 = (1 + BS1 + BS2) × TQ    例：1+11+2 = 14 TQ = 2us → 500Kbps
+  *
+  *   Prescaler       分频器，把 42MHz 压成 TQ 的长度
+  *   TimeSeg1 = BS1  相位缓冲段1，位于采样点【之前】
+  *   TimeSeg2 = BS2  相位缓冲段2，位于采样点【之后】，用来吸收各节点间的时钟偏差
+  *   SyncJumpWidth   重同步时一次最多能调整几个 TQ，补偿晶振误差用。这里取 1TQ 最保守。
+  *
+  * 采样点 = (1 + BS1) / (1 + BS1 + BS2)
+  *   500K 档 = 12/14 = 85.7%。这个位置很关键：太靠前抗干扰差，太靠后留给
+  *   误差补偿的余量不够。CiA（CAN 应用层标准组织）推荐 87.5%，85.7% 是常用的折中。
+  *
+  * 一句话记忆：Prescaler 管「一个 TQ 多长」，BS1/BS2 管「一个位切成几段、采样点在哪」。
   */
 static uint8_t CAN_ApplyBaudrate(uint32_t baud)
 {
@@ -106,17 +125,29 @@ uint8_t CAN_BspInit(void)
     UART_Printf("[CAN] nvic prio=%u (must >=5)\r\n",
                 (unsigned)NVIC_GetPriority(CAN1_RX0_IRQn));
 
-    /*过滤器：32 位掩码模式，掩码全 0 = 全通*/
+    /* ── 过滤器在干嘛：决定「哪些帧能进 FIFO」，被拦掉的帧硬件直接丢弃，CPU 根本不知道 ──
+     *
+     * 工作原理是「ID 与 mask 逐位比较」：
+     *   mask 的某一位 = 1 → 这一位必须和 ID 完全一致才算通过
+     *   mask 的某一位 = 0 → 这一位不关心（0/1 都放行）
+     * 所以 mask 全 0 = 全通（本工程默认），mask 全 1 = 精确匹配一个 ID。
+     *
+     * STM32 的寄存器排布有个坑：标准 ID（11 位）在 32 位过滤器寄存器里
+     * 是存在【最高 11 位】(bit31~21) 的，低 5 位留给扩展帧的标志位。
+     * 所以填标准 ID 时必须左移 5 位：
+     *     FilterIdHigh = (stdId & 0x7FF) << 5
+     * 这就是下面 CAN_FilterSet 里那个 << 5 的由来，忘了移就会「明明填对了却收不到」。
+     */
     filter.FilterBank           = 0U;                        /* 过滤组 0；CAN1 可用 0~13，CAN2 用 14~27 */
-    filter.FilterMode           = CAN_FILTERMODE_IDMASK;
-    filter.FilterScale          = CAN_FILTERSCALE_32BIT;     /* 32 位模式：一次比较完整的 11/29 位 ID */
+    filter.FilterMode           = CAN_FILTERMODE_IDMASK;     /* 掩码模式（另一种 IDLIST 是精确列表） */
+    filter.FilterScale          = CAN_FILTERSCALE_32BIT;     /* 32 位模式：一次放下完整 ID + 掩码 */
     filter.FilterIdHigh         = 0x0000U;
     filter.FilterIdLow          = 0x0000U;
     filter.FilterMaskIdHigh     = 0x0000U;
     filter.FilterMaskIdLow      = 0x0000U;                   /* 掩码全 0 = 所有位都不比较，即全通 */
     filter.FilterFIFOAssignment = CAN_RX_FIFO0;              /* 挂 FIFO0，对应 RxFifo0MsgPendingCallback */
     filter.FilterActivation     = ENABLE;
-    filter.SlaveStartFilterBank = 14U;                       /* CAN2 起始过滤组固定为 14 */
+    filter.SlaveStartFilterBank = 14U;                       /* CAN2 起始过滤组固定为 14，CAN1 用不到 */
 
     if (HAL_CAN_ConfigFilter(&hcan1, &filter) != HAL_OK)
     {
@@ -206,8 +237,26 @@ uint8_t CAN_TxPop(CanMsg_t *msg, uint32_t timeoutMs)
   * 功    能：真正写进硬件邮箱、发到总线上。ide=0 走标准帧；dlc 超过 8 按 8 截断
   * 参    数：msg  待发送帧；ide=0 标准帧，ide!=0 扩展帧；dlc 超过 8 按 8 处理
   * 返 回 值：0 = 已进邮箱，1 = 3 个邮箱全满本帧丢弃，2 = 参数非法或 HAL 发送失败
-  * 补    充：仅供 CanTask 调用；tx_total/tx_drop/tx_error 只在这里写
-  *            tx_total / tx_drop / tx_error 三个计数只在这里写
+  * 补    充：仅供 CanTask 调用；tx_total / tx_drop / tx_error 三个计数只在这里写。
+  *
+  * ── 为什么发送要绕两级（TX 队列 → 硬件邮箱）──
+  *
+  *   TX 队列  ：软件队列，8 帧。任务把帧丢进去就返回，不等发送完成。
+  *   硬件邮箱 ：CAN 外设自带 3 个，是真正的发送缓冲，帧写进去硬件才往总线上推。
+  *
+  * 分两级的理由：500Kbps 下发一帧 8 字节要 200us 上下，任务不可能站在那等。
+  * 队列负责「接住」突发流量并让任务立刻回去干活，邮箱负责「真正发出去」。
+  * 邮箱只有 3 个，满了就丢（返回 1），这是设计上的取舍 —— 宁可丢也不阻塞。
+  *
+  * ── 顺带说清 ACK：这是理解「为什么没接总线就一直重传」的关键 ──
+  *
+  * 一帧发出去后，接收方会在 ACK 槽里回一个【显性】位，表示「我收到了」。
+  * 总线上只要有【任意一个】节点回了 ACK，发送方就认为成功。
+  * 如果没有任何节点回（比如分析仪没接、总线断了），发送方判定「ACK 错误」，
+  * 自动重传，而且每错一次 TEC +8。
+  * 一帧 TEC +8，96 就是警告、128 变被动、256 直接 bus-off ——
+  * 所以调试时常见「拔掉分析仪跑一会儿，板子自己下线了」，这不是 bug，是协议在自保。
+  * 这也是 CAN_HB_PERIOD_MS 的注释里提醒「调试期可以临时改大到 5000」的原因。
   */
 uint8_t CAN_TxPump(const CanMsg_t *msg)
 {
@@ -329,8 +378,24 @@ uint8_t CAN_FilterSet(uint32_t stdId, uint32_t mask)
   * 参    数：无
   * 返 回 值：无，结果写入 s_stats.tec / s_stats.rec / s_stats.state
   * 补    充：仅供 CanTask 周期调用；判定顺序 BOFF > EPVF > EWGF，写反会误报
-  *            判定顺序必须是 BOFF > EPVF > EWGF，写反会误报（已 bus-off 却报 warning）
-  *            由 CanTask 每秒调一次
+  *            （已 bus-off 却报 warning）。由 CanTask 每秒调一次。
+  *
+  * ── TEC / REC 是什么，那几个阈值 96/128/256 为什么这么定 ──
+  *
+  * TEC = 发送错误计数，REC = 接收错误计数，都由硬件自动加减：
+  *   发送出错 TEC +8、发送成功 TEC -1；接收出错 REC +1、接收成功 REC -1。
+  *   直觉是「错得越多涨得越快，只有连续正确才慢慢降回来」。
+  *
+  * 硬件按 TEC/REC 把节点分成四个状态：
+  *   错误主动（< 96）      正常状态，能正常收发，出错时发主动错误帧去打断别人。
+  *   错误警告（≥ 96）      只是提醒，行为不变，通常说明线路开始有干扰了。
+  *   错误被动（≥ 128）     出错时只能发被动错误帧，打不断别人；而且发送时
+  *                        只能发隐性 —— 等于自动放弃仲裁权，影响很大。
+  *   总线关闭（TEC ≥ 256） 节点主动下线，停止一切收发。恢复要检测到 128 次
+  *                        「连续 11 个隐性位」，或者断电重启。这就是 AutoBusOff 要开的原因。
+  *
+  * 一句话记忆：96 警告 / 128 被动 / 256 下线，全由 TEC 主导。
+  * 所以「总线没人 ACK」是最容易把节点打到 bus-off 的场景 —— 每个无 ACK 的帧 TEC 就 +8。
   */
 void CAN_UpdateBusState(void)
 {
