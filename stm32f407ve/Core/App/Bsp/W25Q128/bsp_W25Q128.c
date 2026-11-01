@@ -2,6 +2,39 @@
  * W25Q128 SPI Flash 驱动：初始化与 ID 校验、读数据、4KB 扇区擦除、256B 页编程、BUSY 等待、自测。
  * 硬件：SPI1 = PA5/PA6/PA7，CS = PC13；容量 16MB，最小擦除单位 4KB。
  * 注意：一次最多写 256 字节且不能跨页；擦除和写入前必须先发写使能；>= 0x00A00000 字库区一律拒绝擦写。
+ *
+ * ══════ SPI 的基础（理解后面每条命令怎么发都靠这段）══════
+ *
+ * ── 四根线，各管一件事 ──
+ *   SCK   时钟，【永远由主机产生】—— 这点决定了后面那个「哑元」的写法
+ *   MOSI  主机发、从机收
+ *   MISO  主机收、从机发
+ *   CS    片选，低电平有效，拉低表示「我要跟这个从机说话了」
+ *
+ * ── 全双工：为什么「读」的时候还得「发」 ──
+ *   SPI 每来一个时钟，主机和从机【同时】各移出一位、各收一位。
+ *   时钟只有主机能给，所以主机如果只想着收、不发东西，就【没有时钟】，从机也不会吐数据。
+ *   于是读的时候要发一个占位字节（本文件用 0xFF，叫「哑元/dummy」），
+ *   目的不是传数据，而是把时钟「摇」出来。这就是 W25Q_SpiByte 那个 tx 参数的含义。
+ *
+ * ── CPOL / CPHA：两个参数决定四种时序 ──
+ *   CPOL 决定【空闲时时钟是高还是低】：0 = 空闲低，1 = 空闲高
+ *   CPHA 决定【在哪个边沿采样】：0 = 第一个边沿采，1 = 第二个边沿采
+ *   两者组合就是常说的 Mode 0~3。W25Q128 支持 Mode 0 和 Mode 3
+ *   （大多数 SPI Flash 都这样，因为它们在两个边沿都能稳定工作）。
+ *   主从两端的模式必须一致，不一致的表现是「读回来全是 0xFF 或全 0」，很像没接线。
+ *
+ * ── CS 为什么必须「一帧拉一次」 ──
+ *   W25Q 的每条命令都要求 CS 用「高 → 低 → ... → 高」完整包住命令码 + 地址 + 数据。
+ *   如果中途不拉高，从机会一直以为还在同一条命令里，后面的数据全被当成上一条的续传。
+ *   本文件里用 W25Q_CS_LOW()/HIGH() 一对一对地包，就是为了这个。
+ *
+ * ── Flash 的擦写规则（和 RAM/EEPROM 完全不同，必须记住）──
+ *   1) Flash 只能把 1 写成 0，不能把 0 写回 1 —— 所以【写之前必须先擦】，
+ *      擦除是把整片区域恢复成全 0xFF。
+ *   2) 最小擦除单位是【扇区 4KB】，不是字节。想改一个字节，也得先擦整个 4KB 扇区。
+ *   3) 单次写入最多【一页 256 字节】且不能跨页，跨页会在页内回绕、覆盖掉页首已写的数据。
+ *   4) 擦写期间芯片 BUSY，必须等它自己完成，这个等待就是 W25Q128_WaitReady。
  */
 #include "bsp_W25Q128.h"
 #include "bsp_IWDG.h"       /* Watchdog_Heartbeat */
@@ -366,19 +399,38 @@ uint8_t W25Q128_Init(void)
     HAL_GPIO_Init(GPIOA, &gpio);
     UART_Printf("[W25Q] init: gpio ok\r\n");      /* 分段留痕：定位卡在哪一步 */
 
-    /*Mode 3、8bit、MSB、软件 NSS；APB2 84MHz / 8 = 10.5MHz*/
+    /* 下面每一条的选择理由都写清楚了，看完就知道 Mode 3 是怎么拼出来的 */
     __HAL_RCC_SPI1_CLK_ENABLE();
     s_hspi1.Instance               = SPI1;
-    s_hspi1.Init.Mode              = SPI_MODE_MASTER;
-    s_hspi1.Init.Direction         = SPI_DIRECTION_2LINES;
+    s_hspi1.Init.Mode              = SPI_MODE_MASTER;       /* 主机：时钟由我们产生 */
+    s_hspi1.Init.Direction         = SPI_DIRECTION_2LINES;  /* 全双工，MOSI/MISO 各占一根 */
+
+    /* 8 位一帧。Flash 的命令码、地址、数据都按字节组织，用 8 位最自然。
+     * 设成 16 位的话发命令码时会把两个字节捆成一帧，时序就对不上了。 */
     s_hspi1.Init.DataSize          = SPI_DATASIZE_8BIT;
+
+    /* ↓ 这两行合起来 = Mode 3（W25Q128 支持 Mode 0 和 Mode 3）
+     *   CPOL = HIGH  → 空闲时 SCK 保持高电平
+     *   CPHA = 2EDGE → 在第二个边沿（上升沿）采样
+     * 主从两端必须一致，不一致的典型症状是「读回来全 0xFF 或全 0」，很像没接线。 */
     s_hspi1.Init.CLKPolarity       = SPI_POLARITY_HIGH;
     s_hspi1.Init.CLKPhase          = SPI_PHASE_2EDGE;
+
+    /* 软件 NSS：不用外设自动生成片选，改由代码手动拉 PC13。
+     * 因为一条 Flash 命令是「命令码 + 地址 + 数据」多段组成的，
+     * 必须用一次 CS 低电平把它们全包住；硬件自动 NSS 每发一帧就抬一次，做不到。 */
     s_hspi1.Init.NSS               = SPI_NSS_SOFT;
-    s_hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;   /* APB2 84MHz / 8 = 10.5MHz，链路通后再提速 */
+
+    /* APB2 84MHz / 8 = 10.5MHz。W25Q128 最高能到 104MHz，
+     * 这里刻意压慢，是为了先把链路调通；确认稳定后再逐档提速排查。 */
+    s_hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
+
+    /* MSB 先行。SPI 协议本身没规定顺序，由器件决定：
+     * Flash 的命令码是按高位在前定义的，发反了整条命令都认不出来。 */
     s_hspi1.Init.FirstBit          = SPI_FIRSTBIT_MSB;
-    s_hspi1.Init.TIMode            = SPI_TIMODE_DISABLE;
-    s_hspi1.Init.CRCCalculation    = SPI_CRCCALCULATION_DISABLE;
+
+    s_hspi1.Init.TIMode            = SPI_TIMODE_DISABLE;    /* TI 的另一种帧格式，这里不用 */
+    s_hspi1.Init.CRCCalculation    = SPI_CRCCALCULATION_DISABLE;  /* CRC 由 Flash 命令层自己做，链路层不用 */
     if (HAL_SPI_Init(&s_hspi1) != HAL_OK)
     {
         UART_Printf("[W25Q] HAL_SPI_Init failed\r\n");
