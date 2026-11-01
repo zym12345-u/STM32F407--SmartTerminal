@@ -56,7 +56,26 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-  SCB->VTOR = 0x08010000UL;   /*不设 VTOR，所有中断会按 BootLoader 的向量表分发*/
+  /* ── 第一件事就是重定向向量表，不能等 ──
+   *
+   * VTOR(Vector Table Offset Register) 存的是「中断向量表放在哪」。
+   * 向量表就是一张地址表：第 0 项是初始栈顶，第 1 项是复位入口，
+   * 后面依次是 NMI、HardFault、SysTick、各个外设中断的处理函数地址。
+   * 内核响应中断时，就是拿中断号去 VTOR 指向的表里查地址跳过去。
+   *
+   * 复位后 VTOR 默认是 0x08000000 —— 那是 BootLoader 的向量表。
+   * 而本 App 被搬到了 0x08010000 开始执行，所以：
+   *   不改 VTOR → 中断一来，内核还是去 0x08000000 查表 →
+   *               跳到 BootLoader 里的处理函数 → 轻则行为不对，重则直接跑飞。
+   *
+   * 必须放在 main 的最开头，是因为只要有一个中断（哪怕 SysTick）先开了就来不及了。
+   */
+  SCB->VTOR = 0x08010000UL;
+
+  /* 两条内存屏障，作用是「保证上面那行真的生效了再往下走」：
+   *   DSB(Data Sync Barrier)      ：等所有内存访问都完成，确保 VTOR 的写已经落到寄存器
+   *   ISB(Instruction Sync Barrier)：清空流水线，让后面的指令用新的配置重新取指
+   * 改 VTOR / 改控制寄存器这类操作，后面跟这两条是标准做法，省了偶尔会踩到「改了没生效」。 */
   __DSB();
   __ISB();
   /* USER CODE END 1 */
