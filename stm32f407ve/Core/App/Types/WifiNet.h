@@ -1,93 +1,102 @@
-/**
-  ******************************************************************************
-  * @file    WifiNet.h
-  * @brief   屏幕配网:GuiTask 与 WifiTask 之间的命令/事件/数据定义
-  *
-  *          通信模型(两条单向队列,均由 WifiTask_Create 创建):
-  *            GuiTask --WifiCmd_t-->  WifiTask   请求扫描 / 提交密码连接
-  *            WifiTask --WifiEvent--> GuiTask   扫描完成 / 连接成功失败
-  *          热点列表内容较大(8 个 AP),不走队列:WifiTask 扫描后写入
-  *          g_wifiScan,GUI 收到 SCAN_DONE 事件后直接读(单写单读,事件同步)。
-  ******************************************************************************
-  */
+/* WifiNet.h
+ * 屏幕配网：GuiTask 与 WifiTask 之间的命令、事件与共享数据定义，含掉电保存的凭据与热点列表结构。
+ */
+/*两条单向队列由 WifiTask_Create 创建：GuiTask 发 WifiCmd_t，WifiTask 回 WifiEvent_t*/
+/*热点列表 8 个 AP 较大不走队列：WifiTask 扫描后写 g_wifiScan，GUI 收到 SCAN_DONE 后直接读(单写单读靠事件同步)*/
 #ifndef __WIFI_NET_H
 #define __WIFI_NET_H
 
 #include <stdint.h>
 
 
-#define WIFI_SSID_LEN   32U    /* 802.11 SSID 最长 32 字节,+1 收尾 */
-#define WIFI_PWD_LEN    64U    /* WPA2 预共享密钥最长 63 字节,+1 收尾 */
-#define WIFI_AP_MAX     8U     /* 屏幕列表最多显示的热点数(按信号取前 N) */
+/* 长度均为字符/条目个数，编译期常量，决定 WifiCred_t/WifiCmd_t/WifiAp_t 的数组长度 */
+#define WIFI_SSID_LEN   32U    /* SSID 最长 32 字节，+1 收尾 */
+#define WIFI_PWD_LEN    64U    /* WPA2 预共享密钥最长 63 字节，+1 收尾 */
+#define WIFI_AP_MAX     8U     /* 列表最多显示的热点数(按信号取前 N) */
 
 
-/* 掉电保存到 STM32 内部 Flash 的 WiFi 凭据 */
+/* 掉电保存到内部 Flash 的 WiFi 凭据 */
 typedef struct
 {
-    uint32_t magic;                 /* WIFI_FLASH_MAGIC,判定是否写过凭据 */
-    char     ssid[WIFI_SSID_LEN + 1U];
-    char     pwd[WIFI_PWD_LEN + 1U];
-    uint32_t checksum;              /* 其余字段的简单加和校验 */
+    uint32_t magic;                 /* WIFI_FLASH_MAGIC，判定是否写过凭据；保存流程写，开机比对 */
+    char     ssid[WIFI_SSID_LEN + 1U];   /* 热点名 0~32 字符；保存流程写，开机连接读 */
+    char     pwd[WIFI_PWD_LEN + 1U];     /* 密码 0~63 字符(WPA2 上限)；保存流程写，开机连接读 */
+    uint32_t checksum;              /* 其余字段的简单加和，防损坏；保存流程写，读取时校验 */
 } WifiCred_t;
 
 /* 扫描到的单个热点 */
 typedef struct
 {
-    char    ssid[WIFI_SSID_LEN + 1U];
-    int8_t  rssi;                   /* dBm,如 -55;越大越好 */
-    uint8_t sec;                    /* CWLAP ecn:0=开放,其余=加密 */
+    char    ssid[WIFI_SSID_LEN + 1U];   /* 热点名 0~32 字符；WifiTask 扫描后写，GuiTask 读 */
+    int8_t  rssi;                       /* 信号强度 dBm，-127~0，越大越好；WifiTask 写，GuiTask 排序/显示 */
+    uint8_t sec;                        /* 加密类型 CWLAP ecn，0=开放 1~5=各类加密；WifiTask 写，GuiTask 读 */
 } WifiAp_t;
 
-/* WifiTask 当前状态(配网页状态文字用) */
+/* WifiTask 状态 0~7，配网页状态文字用；WifiTask 写 g_wifiScan.status，GuiTask 读 */
 typedef enum
 {
-    WIFI_ST_IDLE = 0,       /* 空闲,等待命令 */
+    WIFI_ST_IDLE = 0,       /* 空闲，等命令 */
     WIFI_ST_SCANNING,       /* 正在扫描 */
-    WIFI_ST_SCAN_OK,        /* 扫描完成,列表有效 */
+    WIFI_ST_SCAN_OK,        /* 扫描完成，列表有效 */
     WIFI_ST_SCAN_FAIL,      /* 扫描失败 */
-    WIFI_ST_JOINING,        /* 正在用提交的密码连接+对时 */
+    WIFI_ST_JOINING,        /* 正用提交的密码连接并对时 */
     WIFI_ST_JOIN_OK,        /* 连接并对时成功 */
     WIFI_ST_JOIN_FAIL,      /* 连接失败 */
-    WIFI_ST_CONNECTED       /* 已联网(开机自动连上或配网后运行中) */
+    WIFI_ST_CONNECTED       /* 已联网(开机自动连上或配网后) */
 } WifiStatus_t;
 
-/* 扫描结果共享区:WifiTask 写,GuiTask 在收到事件后读 */
+/* 扫描结果共享区：WifiTask 写，GuiTask 收到事件后读 */
 typedef struct
 {
-    volatile uint8_t status;        /* WifiStatus_t */
-    volatile uint8_t count;         /* aps 中有效条目数 */
-    WifiAp_t         aps[WIFI_AP_MAX];
+    volatile uint8_t status;        /* WifiStatus_t 0~7；WifiTask 写，GuiTask 读 */
+    volatile uint8_t count;         /* aps 有效条目数 0~WIFI_AP_MAX；WifiTask 写，GuiTask 读 */
+    WifiAp_t         aps[WIFI_AP_MAX];   /* 扫描结果，下标 0~(count-1) 有效；WifiTask 写，GuiTask 读 */
 } WifiScanState_t;
 
 extern WifiScanState_t g_wifiScan;
 
 
-/* GUI -> WifiTask 命令 */
+/* 命令码 1~2；GuiTask 填并投队列，WifiTask 读 */
 #define WIFI_CMD_SCAN   1U
 #define WIFI_CMD_JOIN   2U
 typedef struct
 {
-    uint8_t type;                       /* WIFI_CMD_xxx */
-    char    ssid[WIFI_SSID_LEN + 1U];   /* JOIN 时有效 */
-    char    pwd[WIFI_PWD_LEN + 1U];
+    uint8_t type;                       /* 1=SCAN 2=JOIN；GuiTask 写，WifiTask 读 */
+    char    ssid[WIFI_SSID_LEN + 1U];   /* 目标热点名 0~32 字符，仅 JOIN 有效；GuiTask 写，WifiTask 读 */
+    char    pwd[WIFI_PWD_LEN + 1U];     /* 密码 0~63 字符，仅 JOIN 有效；GuiTask 写，WifiTask 读 */
 } WifiCmd_t;
 
-/* WifiTask -> GUI 事件 */
+/* 事件 1~3；WifiTask 填并投队列，GuiTask 在 LVGL 定时器里轮询 */
 typedef enum
 {
-    WIFI_EV_SCAN_DONE = 1,  /* 扫描结束(成功或失败,读 g_wifiScan.status) */
-    WIFI_EV_JOIN_OK,        /* 提交的密码连接+对时成功 */
+    WIFI_EV_SCAN_DONE = 1,  /* 扫描结束，成败看 g_wifiScan.status */
+    WIFI_EV_JOIN_OK,        /* 连接并对时成功 */
     WIFI_EV_JOIN_FAIL       /* 连接失败/超时 */
 } WifiEvent_t;
 
 
-/* GuiTask 调用:请求扫描周围热点(非阻塞,结果由事件通知) */
+/*非阻塞，可在 GUI 事件回调里直接调用，队列满静默丢弃*/
+/**
+  * 函    数：Wifi_PostScan
+  * 参    数：无
+  * 返 回 值：无
+  */
 void Wifi_PostScan(void);
 
-/* GuiTask 调用:提交选中的 SSID 与密码发起连接(非阻塞) */
+/*非阻塞；字符串在函数内拷入命令结构体，调用方缓冲可立即释放*/
+/**
+  * 函    数：Wifi_PostJoin
+  * 参    数：ssid  热点名 0~32 字符，不可为 NULL；pwd  密码 0~63 字符，开放热点传空串
+  * 返 回 值：无
+  */
 void Wifi_PostJoin(const char *ssid, const char *pwd);
 
-/* GuiTask 在 LVGL 定时器里非阻塞轮询事件:1=取到一个事件 */
+/*0 tick 超时，绝不阻塞 GUI；事件队列长度由 WifiTask_Create 决定*/
+/**
+  * 函    数：Wifi_TryGetEvent
+  * 参    数：ev  输出事件，取到时写入 1~3，不可为 NULL
+  * 返 回 值：1=取到一个事件，0=当前无事件
+  */
 uint8_t Wifi_TryGetEvent(WifiEvent_t *ev);
 
 

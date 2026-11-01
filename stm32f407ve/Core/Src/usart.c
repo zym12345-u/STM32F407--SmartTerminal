@@ -1,21 +1,7 @@
 /* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * @file    usart.c
-  * @brief   This file provides code for the configuration
-  *          of the USART instances.
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+/* usart.c
+ * USART1/USART2/USART3 的 HAL 初始化，以及 USART1 的 DMA 发送和 printf 重定向。
+ */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "usart.h"
@@ -23,27 +9,18 @@
 /* USER CODE BEGIN 0 */
 #include "FreeRTOS.h"
 #include "cmsis_os.h"
-#include "bsp_RS485.h"   /* s_rxByte + RS485_RxByteISR, USART3 回调需要 */
+#include "bsp_RS485.h"   /*s_rxByte 与 RS485_RxByteISR*/
 
-/* CommandQueue 由 freertos.c 中 CubeMX 生成的代码定义/创建(ISR 生产者向其投递字节) */
-extern osMessageQueueId_t CommandQueueHandle;
+extern osMessageQueueId_t CommandQueueHandle;   /*ISR 向队列投递命令字节*/
 
-/* ===== USART1 TX DMA 相关 =====
- * DMA2 Stream7 Channel4 = USART1_TX(STM32F407 参考手册 Table 43)。
- * 任务上下文日志统一走 UART_Printf(static 缓冲 + DMA,整帧原子);
- * fputc 仅供 BSP 初始化遗留 printf 使用(互斥锁 + 轮询单字节,不碰 DMA)。 */
-DMA_HandleTypeDef hdma_usart1_tx;
+DMA_HandleTypeDef hdma_usart1_tx;   /*USART1_TX 固定走 DMA2 Stream7 Channel4*/
 
-/* 发送路径:
- *   - UART_Printf(任务上下文热路径): static 缓冲 + DMA,持锁等整帧发完
- *   - fputc(仅 BSP 初始化等遗留 printf): 互斥锁 + 轮询单字节
- * 两路共用一把互斥锁保证不交错;只有 UART_Printf 用 DMA 和完成信号量 */
-static volatile uint8_t  uart1DmaBusy = 0U;          /* DMA 是否正在发送 */
+static volatile uint8_t  uart1DmaBusy = 0U;   /*DMA 正在发送*/
 
-static osSemaphoreId_t uart1TxDoneSem;   /* DMA 发送完成信号量 */
-static osMutexId_t     uart1PrintfMutex; /* 多任务 printf 串行化互斥锁 */
+/* DMA 完成信号量 + 两路发送共用的锁 */
+static osSemaphoreId_t uart1TxDoneSem;
+static osMutexId_t     uart1PrintfMutex;
 
-/* DMA 初始化(在 MX_USART1_UART_Init 末尾 USER CODE 区调用) */
 static void UART1_DMA_Init(void);
 /* USER CODE END 0 */
 
@@ -164,9 +141,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN USART1_MspInit 1 */
-  /* .ioc 未勾选 USART1 全局中断,这里手写使能(命令接收走板载 USB-TTL)。
-   * 优先级 5 = configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY,允许在中断里调队列 API */
-  HAL_NVIC_SetPriority(USART1_IRQn, 5, 0);
+  HAL_NVIC_SetPriority(USART1_IRQn, 5, 0);   /*优先级 5 才能在 ISR 里调队列 API*/
   HAL_NVIC_EnableIRQ(USART1_IRQn);
   /* USER CODE END USART1_MspInit 1 */
   }
@@ -290,25 +265,23 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 }
 
 /* USER CODE BEGIN 1 */
-/* printf 重定向到 USART1(板载 USB-TTL,串口助手 115200 可见)。
- * 工程用 AC5 标准库(未开 MicroLIB),必须关闭半主机:
- * 否则标准库 printf 会执行 BKPT 0xAB 半主机指令,真机上直接 HardFault。
- *
- * 发送路径(任务上下文热路径请用 UART_Printf):
- *   RTOS 运行时 fputc = 互斥锁 + 轮询单字节,仅供 BSP 初始化等遗留 printf;
- *   不使用 DMA,避免其完成回调污染 UART_Printf 的完成信号量。 */
+/* AC5 不关半主机，printf 里的 BKPT 0xAB 在真机上直接 HardFault */
 #include <stdio.h>
 #pragma import(__use_no_semihosting)
 struct __FILE { int handle; };
 FILE __stdout;
 void _sys_exit(int x) { (void)x; }
 
-/* DMA 初始化: USART1_TX -> DMA2 Stream7 Channel4 */
+/**
+  * 函    数：UART1_DMA_Init
+  * 参    数：无
+  * 返 回 值：无
+  */
 static void UART1_DMA_Init(void)
 {
   __HAL_RCC_DMA2_CLK_ENABLE();
 
-  hdma_usart1_tx.Instance                 = DMA2_Stream7;
+  hdma_usart1_tx.Instance                 = DMA2_Stream7;   /*Channel4 = USART1_TX*/
   hdma_usart1_tx.Init.Channel             = DMA_CHANNEL_4;
   hdma_usart1_tx.Init.Direction           = DMA_MEMORY_TO_PERIPH;
   hdma_usart1_tx.Init.PeriphInc           = DMA_PINC_DISABLE;
@@ -320,33 +293,40 @@ static void UART1_DMA_Init(void)
   hdma_usart1_tx.Init.FIFOMode            = DMA_FIFOMODE_DISABLE;
   (void)HAL_DMA_Init(&hdma_usart1_tx);
 
-  /* 把 DMA 句柄挂到 huart1, HAL_UART_Transmit_DMA 会用到 */
   __HAL_LINKDMA(&huart1, hdmatx, hdma_usart1_tx);
 
-  /* DMA 中断优先级 = configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY(5),
-   * 允许在 ISR 里调用 osSemaphoreRelease */
-  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 5U, 0U);
+  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 5U, 0U);   /*5 = 最大 syscall 优先级，ISR 里才能 release 信号量*/
   HAL_NVIC_EnableIRQ(DMA2_Stream7_IRQn);
 
-  /* 创建信号量(初值 0,DMA 完成时 release)和互斥锁 */
+  /* 信号量初值 0，DMA 完成时 release */
   if (uart1TxDoneSem == NULL)
     uart1TxDoneSem = osSemaphoreNew(1U, 0U, NULL);
   if (uart1PrintfMutex == NULL)
     uart1PrintfMutex = osMutexNew(NULL);
 }
 
+/**
+  * 函    数：_ttywrch
+  * 参    数：ch  待输出字符（0~255）
+  * 返 回 值：无
+  */
 void _ttywrch(int ch)
 {
-  /* 转发到 fputc 的 DMA 发送路径 */
   (void)fputc(ch, &__stdout);
 }
 
+/**
+  * 函    数：fputc
+  * 参    数：ch  待发送字符（0~255）
+  * 参    数：f  标准库文件指针，未使用
+  * 返 回 值：int  原样返回 ch
+  */
 int fputc(int ch, FILE *f)
 {
   (void)f;
   uint8_t c = (uint8_t)ch;
 
-  /* RTOS 未启动(main 初始化阶段):单线程,直接轮询发送 */
+  /* 内核未启动时无并发，直接轮询 */
   if (osKernelGetState() != osKernelRunning ||
       uart1PrintfMutex == NULL || uart1TxDoneSem == NULL)
   {
@@ -354,18 +334,19 @@ int fputc(int ch, FILE *f)
     return ch;
   }
 
-  /* RTOS 已运行:运行时热路径统一走 UART_Printf(DMA)。fputc 仅为 BSP 初始化
-   * 等遗留 printf 服务,这里用互斥锁 + 轮询单字节发送,刻意不碰 DMA/busy/信号量:
-   * 否则 fputc 的 DMA 完成回调会往完成信号量里多放一个计数,导致后续
-   * UART_Printf 的"等本次 DMA 完成"提前返回,在 DMA 还在读缓冲时就重写了
-   * 共享发送缓冲,线上出现整块重复/字节撕裂 */
+  /* fputc 不能走 DMA：多放一个完成计数会让 UART_Printf 提前复用缓冲，线上出现重复字节 */
   (void)osMutexAcquire(uart1PrintfMutex, osWaitForever);
   (void)HAL_UART_Transmit(&huart1, &c, 1U, 0xFFFFU);
   (void)osMutexRelease(uart1PrintfMutex);
   return ch;
 }
 
-/* DMA 发送完成回调: 清标志 + 释放信号量唤醒等待整帧发完的 UART_Printf */
+/**
+  * 函    数：HAL_UART_TxCpltCallback
+  * 参    数：huart  触发回调的串口句柄（只处理 USART1）
+  * 返 回 值：无
+  */
+/* 在 DMA2_Stream7 中断里执行，属中断上下文 */
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart->Instance == USART1)
@@ -376,20 +357,13 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
   }
 }
 
-/* ===== 整消息原子 printf(任务上下文使用) =====
- * fputc 路径按字节加锁、每个 '\n' 放锁,一次含多行的 printf(如 vTaskList 报告)
- * 会被其他任务的 printf 从字节/缓冲级别穿插。UART_Printf 把"格式化→启动DMA→
- * 等DMA发完"全程放在同一把互斥锁内,保证整条消息在线上连续不被打断。
- * 格式化缓冲为 static(同一时刻只有锁持有者使用),不占调用者栈。 */
+/* 整条消息原子输出：格式化、启动 DMA、等发完都持有同一把锁，避免多任务日志穿插 */
 #include <stdarg.h>
 #include <string.h>
 #define UART1_PRINTF_BUF_SIZE  640U
 static char uart1PrintfBuf[UART1_PRINTF_BUF_SIZE];
 
-/* ===== 诊断成帧(临时):每条消息加 <B序号>...<E校验> 头尾 =====
- * 曾用序号+XOR 给线上每一帧盖戳,实测 110 帧序号连续、校验全对,
- * 证明串口助手中的"交错/重复"是 PC 录制侧重排,单片机发送无损。
- * 默认关闭;需要再次取证时改为 1。 */
+/* 曾用它确认串口线上无交错，PC 录制侧重排所致，正常保持 0 */
 #define UART_DIAG_FRAME         0
 #if UART_DIAG_FRAME
 #define UART1_WIRE_BUF_SIZE     (UART1_PRINTF_BUF_SIZE + 16U)
@@ -397,15 +371,18 @@ static uint8_t  uart1WireBuf[UART1_WIRE_BUF_SIZE];
 static uint32_t uart1MsgSeq = 0U;
 #endif
 
+/**
+  * 函    数：UART_Printf
+  * 参    数：fmt  格式串，同 printf
+  * 参    数：...  可变参数
+  * 返 回 值：无
+  */
 void UART_Printf(const char *fmt, ...)
 {
   va_list ap;
   int len;
 
-  /* ===== 分支 A: RTOS 未启动(main 初始化阶段) =====
-   * 单线程无并发, 直接格式化 + 轮询发送, 不取锁。
-   * 顺序必须是"先判内核状态、后决定是否取锁": 内核未运行时 osMutexAcquire
-   * 不可用(调度器未起 / 句柄为 NULL), 在这条路径上取锁会直接挂死。 */
+  /* 内核未启动时不能取锁，句柄为空会直接挂死 */
   if (osKernelGetState() != osKernelRunning ||
       uart1PrintfMutex == NULL || uart1TxDoneSem == NULL)
   {
@@ -422,16 +399,9 @@ void UART_Printf(const char *fmt, ...)
     return;
   }
 
-  /* ===== 分支 B: RTOS 已启动 =====
-   * 【先取锁, 再格式化】。uart1PrintfBuf 是静态共享缓冲: 若把格式化留在锁外,
-   * 高优先级任务可以在本任务 vsnprintf 之后、取锁之前抢占并覆盖这块缓冲,
-   * 本任务随后发出去的就是对方的内容 —— 日志张冠李戴或半截杂交。
-   * 这与本文件 uart1WireBuf 是同一个道理(那处注释早就写明"绝不能在锁外
-   * 组装"), 但 uart1PrintfBuf 此前一直没遵守, 是真实的内存竞争, 不是显示问题。 */
+  /* 必须先取锁再格式化：静态缓冲在锁外会被高优先级任务覆盖 */
   (void)osMutexAcquire(uart1PrintfMutex, osWaitForever);
 
-  /* 默认发裸载荷;诊断成帧在互斥锁内组装(uart1WireBuf 也是静态共享资源,
-   * 绝不能在锁外组装,否则会被高优先级任务在取锁前重写) */
   uint8_t *txData = (uint8_t *)uart1PrintfBuf;
   uint16_t txLen  = 0U;
 
@@ -439,9 +409,7 @@ void UART_Printf(const char *fmt, ...)
   len = vsnprintf(uart1PrintfBuf, sizeof(uart1PrintfBuf), fmt, ap);
   va_end(ap);
 
-  /* 单一出口: 下面不再出现 return, 保证任何路径都走到末尾的 Release。
-   * 锁内提前 return 会漏放锁, 其它任务将永久阻塞在 UART_Printf 上 ——
-   * 这比日志穿插严重得多, 等于把串口打成一个死锁。 */
+  /* 锁内不提前 return，漏放锁会让其它任务永久阻塞 */
   if (len > 0)
   {
     if (len >= (int)sizeof(uart1PrintfBuf))
@@ -465,20 +433,17 @@ void UART_Printf(const char *fmt, ...)
     }
 #endif
 
-    /* 防御:排空可能遗留的完成信号量计数(历史 fputc DMA 路径曾留下多余计数,
-     * 会让下面的等待提前返回),确保随后的 acquire 等到的一定是本次 DMA 的 TC */
+    /* 排空遗留计数，确保等到的一定是本次 DMA 的 TC */
     while (osSemaphoreAcquire(uart1TxDoneSem, 0U) == osOK) { ; }
 
-    /* 等上一条 DMA 真正发完(正常情况下 UART_Printf 返回时已等完,busy 恒为 0) */
+    /* 等上一条 DMA 真正发完 */
     if (uart1DmaBusy)
       (void)osSemaphoreAcquire(uart1TxDoneSem, osWaitForever);
 
     uart1DmaBusy = 1U;
     if (HAL_UART_Transmit_DMA(&huart1, txData, txLen) == HAL_OK)
     {
-      /* 等发送真正结束。信号量只作"完成唤醒",最终以硬件为准:DMA 剩余计数为 0
-       * 且 UART 移位完成(TC)才放行——即使信号量存在任何多余计数,也绝不可能在
-       * DMA 还读 uart1PrintfBuf 时提前返回去复用该缓冲(此前线上撕裂的根因) */
+      /* 以 DMA 计数清零 + TC 为准，信号量多计数也不会提前复用缓冲 */
       for (;;)
       {
         (void)osSemaphoreAcquire(uart1TxDoneSem, osWaitForever);
@@ -495,29 +460,37 @@ void UART_Printf(const char *fmt, ...)
   (void)osMutexRelease(uart1PrintfMutex);
 }
 
-/* 单字节中断接收(参考 P3_QueueDemo/usart.c):
- * 每收到 1 字节, 在接收完成回调里分发, 然后立即重新挂起下一次接收。
- * USART1 = 板载 USB-TTL(PA9/PA10): 字节投递 CommandQueue(命令任务消费);
- * USART3 = PB10/PB11: RS485 物理层, 字节交给 RS485 环形缓冲
- *          (bsp_RS485.c), 不再进 CommandQueue; 命令任务只启动 USART1。
- * USART2 = PA2/PA3: ESP8266 WiFi, 由 bsp_ESP8266.c 直接接管中断(读寄存器),
- *          不走本文件的 HAL 回调。 */
-static uint8_t rxData1;
-/* USART3 的接收缓冲 s_rxByte 定义在 bsp_RS485.c, 此处不重复定义,
- * 回调里直接读它(否则两个变量不一致会导致收到的全是 0) */
+/* 单字节中断接收：USART1 字节进 CommandQueue，USART3 字节进 RS485 环形缓冲 */
+static uint8_t rxData1;   /*USART1 接收缓冲*/
+/* USART3 必须用 bsp_RS485.c 的 s_rxByte，另建变量会导致收到的全是 0 */
 
-extern void RS485_RxByteISR(uint8_t byte);   /* bsp_RS485.c: RS485 接收环形缓冲 */
+extern void RS485_RxByteISR(uint8_t byte);   /*RS485 接收环形缓冲*/
 
+/**
+  * 函    数：UART1_Receive_Start
+  * 参    数：无
+  * 返 回 值：无
+  */
 void UART1_Receive_Start(void)
 {
   HAL_UART_Receive_IT(&huart1, &rxData1, 1);
 }
 
+/**
+  * 函    数：UART3_Receive_Start
+  * 参    数：无
+  * 返 回 值：无
+  */
 void UART3_Receive_Start(void)
 {
   HAL_UART_Receive_IT(&huart3, &s_rxByte, 1);
 }
 
+/**
+  * 函    数：HAL_UART_RxCpltCallback
+  * 参    数：huart  触发回调的串口句柄
+  * 返 回 值：无
+  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if(huart->Instance == USART1)
@@ -527,9 +500,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   }
   else if(huart->Instance == USART3)
   {
-    /* USART3 = RS485 物理层: 字节进 RS485 环形缓冲(重新挂接收在 ISR 内完成)。
-     * 必须读 s_rxByte(bsp_RS485.c), 那才是 HAL 实际写入的接收缓冲 */
-    RS485_RxByteISR(s_rxByte);
+    RS485_RxByteISR(s_rxByte);   /*必须读 s_rxByte，那才是 HAL 写入的缓冲*/
   }
 }
 /* USER CODE END 1 */

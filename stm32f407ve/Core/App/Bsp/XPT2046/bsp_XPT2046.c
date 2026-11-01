@@ -1,48 +1,50 @@
-#include "bsp_XPT2046.h"            // 头文件
-/* #include "bsp_W25Q128.h" -- W25Q128 removed, fixed touch calibration used */
-#include "string.h"                 // C语言的标准字符串库,用于字符串、内存处理
-#include "stdio.h"                  // C语言的标准输入输出库,用于 printf 等函数
+/* bsp_XPT2046.c
+ * XPT2046 四线电阻触摸驱动：GPIO 模拟 SPI 发控制字、读 12 位 ADC，按校准系数换算成屏幕坐标。
+ * 硬件：CS=PD13 CLK=PE0 MOSI=PE2 MISO=PE3 IRQ=PE4；全部软件翻转，不走硬件 SPI。
+ * 注意：校准系数与显示方向强绑定，竖屏、横屏各一套，改方向必须重新校准。
+ */
+#include "bsp_XPT2046.h"
+/* #include "bsp_W25Q128.h" -- 外部 Flash 已裁剪，校准值改为固定系数 */
+#include "string.h"                 // memset
+#include "stdio.h"                  // printf
 
 
 
 
-/******************************* 触摸相关的静态数据 ***************************/
 typedef    struct                   // 触摸数据结构体
 {
-    uint8_t EN;                     // 触摸开关, 0_关闭, 1_开; 关闭时停止响应上层的触摸调用,需要时可关闭,以节省芯片资源
+    uint8_t EN;                     // 触摸开关，0=关闭后不响应上层调用，1=开启
 
-    uint16_t lcdX;                  // 当前读到的 LCD 坐标值(
-    uint16_t lcdY;
+    uint16_t lcdX;                  // 换算后的 LCD 坐标 X
+    uint16_t lcdY;                  // 换算后的 LCD 坐标 Y
 
-    uint16_t adcX;                  // 触摸屏读取的原始 X 通道 ADC 值(滤波后的平均值)
-    uint16_t adcY;
+    uint16_t adcX;                  // X 通道原始 ADC 值(4 次采样去极值后的平均)
+    uint16_t adcY;                  // Y 通道原始 ADC 值
 
-    uint16_t lcdWidth;              // 用于记录 LCD 实际的屏幕宽度; 由 XPT2046_Init 传入
-    uint16_t lcdHeight;             // 用于记录 LCD 实际的屏幕高度; 由 XPT2046_Init 传入
+    uint16_t lcdWidth;              // 屏宽，由 XPT2046_Init 传入
+    uint16_t lcdHeight;             // 屏高，由 XPT2046_Init 传入
 
-    float xfac;                     // ADC 与 LCD 坐标的换算系数,  xfac=(float)(20-320)/(t1x-t2x);
+    float xfac;                     // 换算系数，xfac=(像素差)/(ADC 差)，单位 像素/计数，可为负
     float yfac;
-    short xoff;                     // 坐标的偏移值, xoff=(320-xfac*(t1x+t2x))/2;
+    short xoff;                     // 零点偏移，xoff=(屏宽-xfac*(adcX1+adcX2))/2
     short yoff;
 
-    uint8_t  dir;                   // 显示方向, 0-竖屏, 1_横屏
-    uint32_t dataAddr;              // 校准数据在外部 FLASH 中的存放地址
+    uint8_t  dir;                   // 显示方向，0=竖屏，1=横屏
+    uint32_t dataAddr;              // 校准数据原存放地址(外部 Flash 已裁剪，现未使用)
 } xXPT2046_TypeDey;
 
-static xXPT2046_TypeDey xXPT2046;   // 用于存放 XPT2046 的各类信息,全局变量只在本文件使用(不需 extern)
+static xXPT2046_TypeDey xXPT2046;   // 本文件私有的触摸状态
 
 
 
 
-/******************************* 宏定义 ***************************/
-#define XPT2046_CHANNEL_X   0x90         // X通道,测量通道Y+的电压值
-#define XPT2046_CHANNEL_Y   0xD0         // Y通道,测量通道X+的电压值
+/*宏定义*/
+#define XPT2046_CHANNEL_X   0x90         // 测 X+ 通道(Y 方向)，控制字 bit7~5=001
+#define XPT2046_CHANNEL_Y   0xD0         // 测 Y+ 通道(X 方向)，控制字 bit7~5=101
 
-/* ADC 有效值范围: XPT2046 为 12 位 ADC(0~4095),
- * 正常触摸按下时 X/Y 通常落在 200~3900 之间;
- * 超出此范围视为通信异常(MISO 断线/从机无响应),丢弃该次采样 */
-#define XPT2046_ADC_MIN     50
-#define XPT2046_ADC_MAX     4050
+/* 12 位 ADC 有效区间：正常按压落在 200~3900 内，超出 50~4050 视为断线或无回应，整次采样丢弃 */
+#define XPT2046_ADC_MIN     50           // 下限，MISO 断线时读数恒 0
+#define XPT2046_ADC_MAX     4050         // 上限，从机无响应时可能读到 4095
 
 #define  IRQ_READ           ( XPT2046_IRQ_GPIO -> IDR & XPT2046_IRQ_PIN )                  // 触摸信号读脚,空闲高电平,按下低电平
 #define  CS_HIGH            ( XPT2046_CS_GPIO  -> BSRR  = XPT2046_CS_PIN )
@@ -56,40 +58,46 @@ static xXPT2046_TypeDey xXPT2046;   // 用于存放 XPT2046 的各类信息,全�
 
 
 
-/******************************* 触摸相关底层函数 ***************************/
-static void      delayUS(uint32_t ulCount);       // 微秒延时函数, 为保证移植性, 不使用外部定时器
-static void      sendCMD(uint8_t cmd);            // 向触摸发送命令
-static uint16_t  receiveData(void);               // 获取测量值
-static int16_t   readADC_X(void);                 // 获取X轴ADC值
-static int16_t   readADC_Y(void);                 // 获取Y轴ADC值
-static uint8_t   readAdcXY(void);                 // 获取X与Y的ADC值并滤波,得到的数据放到全局结构体变量 xXPT2046 中
+/*底层函数*/
+static void      delayUS(uint32_t ulCount);       // 软件空循环微秒延时
+static void      sendCMD(uint8_t cmd);            // 发 8 位控制字
+static uint16_t  receiveData(void);               // 读 12 位 ADC
+static int16_t   readADC_X(void);                 // 读屏幕 X 方向 ADC
+static int16_t   readADC_Y(void);                 // 读屏幕 Y 方向 ADC
+static uint8_t   readAdcXY(void);                 // 采样并滤波，结果存入 xXPT2046
 
 
 
 
-// 粗略US级延时,纯软件延时,不依赖外部定时器和中断
+/**
+  * 函    数：delayUS
+  * 参    数：us  延时的微秒数，常用 1(位间隔)、5(转换等待)、800000(校准停留)
+  * 返 回 值：无
+  */
 static void delayUS(uint32_t us)
 {
     for (uint32_t i = 0; i < us; i++)
     {
-        uint8_t uc = 12;     //参数设为12,大约延时1微秒
-        while (uc --);       //约1微秒
+        uint8_t uc = 12;     // 12 次自减在 168MHz 下约 1us，换主频或优化等级需重新标定
+        while (uc --);
     }
 }
 
 
 
-// 写入控制命令
-// Cmd 为 0x90_通道Y+的选择控制字, 0xd0_通道X+的选择控制字
-// XPT2046 时钟要求 CLK 在时钟低电平时发送串行数据,见芯片手册时序介绍
-// 注意:发送完控制字后,接着读取数据,需要先片选,在同一次片选内完成(CS 一直保持低电平)
+/**
+  * 函    数：sendCMD
+  * 参    数：cmd  控制字，0x90=选 Y+ 通道，0xD0=选 X+ 通道(12 位、单端、内部参考)
+  * 返 回 值：无
+  */
 static void sendCMD(uint8_t cmd)
 {
+    /* 本函数不碰 CS：发命令和收数据必须在同一次片选内完成，中途拉高 CS 本次转换作废 */
     for (uint8_t i = 0; i < 8; i++)
     {
-        ((cmd >> (7 - i)) & 0x01) ? MOSI_1 : MOSI_0; // 逐位发送
+        ((cmd >> (7 - i)) & 0x01) ? MOSI_1 : MOSI_0;  // 在 CLK 低电平期间摆好数据
         delayUS(1);
-        CLK_HIGH  ;
+        CLK_HIGH  ;                                   // 上升沿由芯片锁存
         delayUS(1);
         CLK_LOW   ;
     }
@@ -97,13 +105,17 @@ static void sendCMD(uint8_t cmd)
 
 
 
-// 获取测量数据(在执行 sendCMD 命令之后执行);
-// 本函数用于获取测量值
+/**
+  * 函    数：receiveData
+  * 参    数：无(通道已由上一次 sendCMD 选好)
+  * 返 回 值：12 位 ADC 原始值，0~4095(未触摸时读数无意义)
+  */
 static uint16_t receiveData(void)
 {
     uint16_t usBuf = 0;
 
-    CLK_HIGH;              // 给一个时钟脉冲,等待 BUSY 拉低,这个时间是芯片在发控制字后内部 AD 转换,需要约 6US
+    /* 空打一个时钟并等待，芯片内部完成一次转换约需 6us */
+    CLK_HIGH;
     delayUS(5);
     CLK_LOW ;
     delayUS(5);
@@ -113,7 +125,7 @@ static uint16_t receiveData(void)
         usBuf = usBuf << 1;
         CLK_HIGH;
         delayUS(1);
-        usBuf |= MISO ;    // 逐位接收
+        usBuf |= MISO ;    // 逐位拼装，先收到的为最高位
         CLK_LOW;
         delayUS(1);
     }
@@ -123,79 +135,84 @@ static uint16_t receiveData(void)
 
 
 
-// 选择一个模拟通道,启动 ADC 转换并返回 ADC 测量值
-// 0x90 :通道Y+的选择控制字
-// 0xd0 :通道X+的选择控制字
+/**
+  * 函    数：readADC_X
+  * 参    数：无
+  * 返 回 值：屏幕 X 方向的 12 位 ADC 原始值，0~4095
+  */
 static int16_t readADC_X(void)
 {
-    if (xXPT2046.dir == 0)    sendCMD(XPT2046_CHANNEL_Y);
+    if (xXPT2046.dir == 0)    sendCMD(XPT2046_CHANNEL_Y);  // 竖屏 X 方向走 Y+ 通道，交叉由电阻屏走线决定
     if (xXPT2046.dir == 1)    sendCMD(XPT2046_CHANNEL_X);
     return  receiveData();
 }
 
 
 
+/**
+  * 函    数：readADC_Y
+  * 参    数：无
+  * 返 回 值：屏幕 Y 方向的 12 位 ADC 原始值，0~4095
+  */
 static int16_t readADC_Y(void)
 {
-    if (xXPT2046.dir == 0)    sendCMD(XPT2046_CHANNEL_X);
+    if (xXPT2046.dir == 0)    sendCMD(XPT2046_CHANNEL_X);  // 竖屏 Y 方向走 X+ 通道
     if (xXPT2046.dir == 1)    sendCMD(XPT2046_CHANNEL_Y);
     return  receiveData();
 }
 
 
 
-/******************************************************************************
- * 函数名称 readAdcXY
- * 功  能: 获取触摸按下时 X、Y 的 ADC 值并滤波处理
- * 入  参: 无
- * 返 回: 1  获取成功,已把数据放到全局结构体中
- *          0  失败
- ******************************************************************************/
+/**
+  * 函    数：readAdcXY
+  * 参    数：无
+  * 返 回 值：1=成功，结果存入 xXPT2046.adcX/adcY；0=无按压或 ADC 越界
+  */
 static uint8_t readAdcXY()
 {
     static uint8_t  cnt = 0;
     static uint16_t xSum = 0, ySum = 0;
-    static int16_t  xyArray [2] [10] = {{0}, {0}};    // 临时多维数组,用于存放 X、Y 的 10 次测量
-    int32_t  xMin, xMax, yMin, yMax;                  // 存储测量中的最大值、最小值;用于去掉最大值去掉最小值求平均值
+    static int16_t  xyArray [2] [10] = {{0}, {0}};    // X/Y 两组采样缓存，按 10 组预留，实际只用前 4 组
+    int32_t  xMin, xMax, yMin, yMax;                  // 极值，用于去掉最大最小后求平均
 
     cnt = 0;
     xSum = 0;
     ySum = 0;
-    memset(xyArray, 0, 20);
+    memset(xyArray, 0, 20);                           // 只清前 20 字节，后面只用前 cnt 组，不影响结果
     xMin = 0;
     xMax = 0;
     yMin = 0;
     yMax = 0;
 
-    while ((IRQ_READ == 0) && (cnt < 4))              // 多笔采样; 当触摸 TP_INT_IN 信号为低(屏幕有按下), 且 cnt<10
+    /*采样：IRQ 低电平表示有按压，最多采 4 组*/
+    while ((IRQ_READ == 0) && (cnt < 4))              // 改采样上限时后面 >>1 的除数要同步改
     {
         xyArray[0] [cnt] = readADC_X();
         xyArray[1] [cnt] = readADC_Y();
         cnt ++;
     }
 
-    // 求平均值滤波
-    xMax = xMin = xyArray [0] [0];                              // 首先取出最大值、最小值
+    /*求极值*/
+    xMax = xMin = xyArray [0] [0];
     yMax = yMin = xyArray [1] [0];
     for (uint8_t i = 1; i < cnt; i++)
     {
-        if (xyArray[0] [i] < xMin)    xMin = xyArray[0] [i];   // 求 x 的 10 次测量最小 ADC 值
-        if (xyArray[0] [i] > xMax)    xMax = xyArray[0] [i];   // 求 x 的 10 次测量最大 ADC 值
+        if (xyArray[0] [i] < xMin)    xMin = xyArray[0] [i];   // X 最小值
+        if (xyArray[0] [i] > xMax)    xMax = xyArray[0] [i];   // X 最大值
 
-        if (xyArray[1] [i] < yMin)    yMin = xyArray[1] [i];   // 求 y 的 10 次测量最小 ADC 值
-        if (xyArray[1] [i] > yMax)    yMax = xyArray[1] [i];   // 求 y 的 10 次测量最大 ADC 值
+        if (xyArray[1] [i] < yMin)    yMin = xyArray[1] [i];   // Y 最小值
+        if (xyArray[1] [i] > yMax)    yMax = xyArray[1] [i];   // Y 最大值
     }
-    // 去掉最大值、最小值之后求平均值
+    /*去极值求平均：4 次采样去掉 2 个极值后除 2*/
     for (uint8_t i = 0; i < cnt; i++)
     {
         xSum = xSum + xyArray[0][i];
         ySum = ySum + xyArray[1][i];
     }
-    xXPT2046.adcX = (xSum - xMin - xMax) >> 1;  // 去掉最大值、最小值之后,除 2
-    xXPT2046.adcY = (ySum - yMin - yMax) >> 1;  // 去掉最大值、最小值之后,除 2
+    xXPT2046.adcX = (xSum - xMin - xMax) >> 1;  // 除数固定为 2，采样不足 4 次时结果会偏小
+    xXPT2046.adcY = (ySum - yMin - yMax) >> 1;
 
-    /* ADC 范围校验: MISO 断线时读到 0,从机无响应时可能为 0 或 4095,
-     * 这些情况都视为无效触摸,避免返回错误坐标 */
+    /*范围校验：断线或从机无响应时读数贴 0 或 4095，直接判为无效触摸*/
     if (cnt == 0 ||
         xXPT2046.adcX < XPT2046_ADC_MIN || xXPT2046.adcX > XPT2046_ADC_MAX ||
         xXPT2046.adcY < XPT2046_ADC_MIN || xXPT2046.adcY > XPT2046_ADC_MAX)
@@ -208,141 +225,130 @@ static uint8_t readAdcXY()
 
 
 
-// 把已读的电压值换算成对应的 LCD 坐标值
+/**
+  * 函    数：adcXYToLcdXY
+  * 参    数：无(读 xXPT2046.adcX/adcY，写 lcdX/lcdY)
+  * 返 回 值：无
+  */
 static void adcXYToLcdXY(void)
 {
     static int16_t lcdX = 0;
     static int16_t lcdY = 0;
-    // 线性换算关系
-    lcdX = xXPT2046.adcX * xXPT2046.xfac + xXPT2046.xoff ;
+    /*线性换算：lcd = adc * fac + off*/
+    lcdX = xXPT2046.adcX * xXPT2046.xfac + xXPT2046.xoff ;   // ADC 计数 -> 像素
     lcdY = xXPT2046.adcY * xXPT2046.yfac + xXPT2046.yoff ;
-    // 限制取值范围
-    if (lcdX < 0)  lcdX = 0;
+    /*限幅*/
+    if (lcdX < 0)  lcdX = 0;                                  // 靠屏幕左/上边缘时算出的负值夹到 0
     if (lcdX > xXPT2046.lcdWidth)  lcdX = xXPT2046.lcdWidth;
     if (lcdY < 0)  lcdY = 0;
-    if (lcdY > xXPT2046.lcdHeight)  lcdY = xXPT2046.lcdHeight;
-    // 转换完成, 把临时值转存到结构体中, 供随时调用
+    if (lcdY > xXPT2046.lcdHeight)  lcdY = xXPT2046.lcdHeight;  // 上限是宽/高本身，边界会多出 1 像素
     xXPT2046.lcdX = lcdX;
     xXPT2046.lcdY = lcdY;
 }
 
 
 
-/******************************************************************************
- * 函数名称 writeDcorrectingData
- * 功  能: 写入校准参数
- * 入  参 float xfac   x轴换算系数
- *          float yfac   y轴换算系数
- *          short xoff   x轴偏移参数
- *          short yoff   y轴偏移参数
- * 返 回: 0_写入成功, 非0_写入失败
- ******************************************************************************/
-
-
-
-/******************************************************************************
- * 函数名称 XPT2046_Init
- * 功  能: 初始化
- * 入  参 uint16_t lcdWidth     LCD屏幕宽度
- *          uint16_t lcdHeight    LCD屏幕高度
- *          uint8_t dir           显示方向    0-竖屏 3-横屏 5-反向竖屏, 6-反向横屏
- * 返 回:
- ******************************************************************************/
-/* W25Q128 removed: calibration now kept in RAM only */
+/**
+  * 函    数：writeCorrectingData
+  * 参    数：xfac/yfac  像素每 ADC 计数的换算系数；xoff/yoff  零点偏移，单位像素
+  * 返 回 值：固定 0
+  */
 static uint8_t writeCorrectingData(float xfac, float yfac, short xoff, short yoff)
 {
-    xXPT2046.xfac = xfac; xXPT2046.yfac = yfac;
+    xXPT2046.xfac = xfac; xXPT2046.yfac = yfac;   // 只写 RAM，掉电丢失，重启回到 Init 里的固定系数
     xXPT2046.xoff = xoff; xXPT2046.yoff = yoff;
     return 0;
 }
 
 
+/**
+  * 函    数：XPT2046_Init
+  * 参    数：lcdWidth/lcdHeight  LCD 像素尺寸；dir  0=竖屏，1=横屏
+  * 返 回 值：无
+  */
 void XPT2046_Init(uint16_t lcdWidth, uint16_t lcdHeight, uint8_t dir)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    xXPT2046.dataAddr  = 0x00A00000 - 100 ;                      // 校准数据的存放 W25Q128 地址; 0x00A00000 为字库开始地址,校准数据存放在其前面几页
+    xXPT2046.dataAddr  = 0x00A00000 - 100 ;                      // 校准数据原存放地址(外部 Flash 已裁剪，现未使用)
 
     xXPT2046.lcdWidth  = lcdWidth;
     xXPT2046.lcdHeight = lcdHeight;
     xXPT2046.dir = dir;
 
 #ifdef USE_HAL_DRIVER                                           // HAL库版本
-    // 使能 GPIO 端口时钟
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIOBEN | RCC_AHB1ENR_GPIOCEN | RCC_AHB1ENR_GPIODEN | RCC_AHB1ENR_GPIOEEN ;  // 使能 GPIOA、B、C、D、E 时钟
+    /*时钟*/
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIOBEN | RCC_AHB1ENR_GPIOCEN | RCC_AHB1ENR_GPIODEN | RCC_AHB1ENR_GPIOEEN ;
 
-    /// 初始化 CS 引脚
-    GPIO_InitStruct.Pin   = XPT2046_CS_PIN;                      // 设置引脚
-    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;                 // 推挽输出模式,不带上拉
-    GPIO_InitStruct.Pull  = GPIO_PULLUP;                         // 内部上拉电阻使能
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;           // 引脚翻转速率,高速
-    HAL_GPIO_Init(XPT2046_CS_GPIO, &GPIO_InitStruct);            // 初始化引脚
+    /*CS = PD13，推挽输出，低电平选中*/
+    GPIO_InitStruct.Pin   = XPT2046_CS_PIN;
+    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull  = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    HAL_GPIO_Init(XPT2046_CS_GPIO, &GPIO_InitStruct);
 
-    CS_HIGH;                                                     // 拉高片选信号,停止通信
+    CS_HIGH;                                                     // 空闲拉高，停止通信
 
-    GPIO_InitStruct.Pin   = XPT2046_CLK_PIN;                     // CLK
+    GPIO_InitStruct.Pin   = XPT2046_CLK_PIN;                     // CLK = PE0
     HAL_GPIO_Init(XPT2046_CLK_GPIO, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin   = XPT2046_MOSI_PIN;                    // MOSI
+    GPIO_InitStruct.Pin   = XPT2046_MOSI_PIN;                    // MOSI = PE2
     HAL_GPIO_Init(XPT2046_MOSI_GPIO, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin   = XPT2046_MISO_PIN;                    // MISO
-    GPIO_InitStruct.Mode  = GPIO_MODE_INPUT;                     // 输入模式
+    GPIO_InitStruct.Pin   = XPT2046_MISO_PIN;                    // MISO = PE3，单独设成输入
+    GPIO_InitStruct.Mode  = GPIO_MODE_INPUT;
     HAL_GPIO_Init(XPT2046_MISO_GPIO, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin  = XPT2046_IRQ_PIN;                      // IRQ 信号引脚
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;                      // 输入模式,该信号只作指示用,不使用中断
+    GPIO_InitStruct.Pin  = XPT2046_IRQ_PIN;                      // IRQ = PE4
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;                      // 只查询电平，不开外部中断
     HAL_GPIO_Init(XPT2046_IRQ_GPIO, &GPIO_InitStruct);
 #endif
 
 #ifdef USE_STDPERIPH_DRIVER                                      // 标准库版本
-    // 使能时钟
+    /*时钟*/
     RCC_AHB1PeriphClockCmd(XPT2046_IRQ_PORT_CLK, ENABLE);
     RCC_AHB1PeriphClockCmd(XPT2046_CS_PORT_CLK, ENABLE);
     RCC_AHB1PeriphClockCmd(XPT2046_CLK_PORT_CLK, ENABLE);
     RCC_AHB1PeriphClockCmd(XPT2046_MOSI_PORT_CLK, ENABLE);
     RCC_AHB1PeriphClockCmd(XPT2046_MISO_PORT_CLK, ENABLE);
-    // 配置CS为推挽输出模式
-    GPIO_InitStruct.GPIO_Pin   = XPT2046_CS_PIN;                 // 选择要控制的GPIO引脚
-    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_OUT;                  // 输出模式,普通模式
-    GPIO_InitStruct.GPIO_OType = GPIO_OType_PP;                  // 推挽输出,不带上拉
-    GPIO_InitStruct.GPIO_PuPd  = GPIO_PuPd_UP;                   // 上拉电阻,输出模式
-    GPIO_InitStruct.GPIO_Speed = GPIO_Speed_2MHz;                // 翻转速率,2MHz
-    GPIO_Init(XPT2046_CS_GPIO, &GPIO_InitStruct);                // 调用库函数,使用以上参数初始化GPIO
-    CS_HIGH;                                                     // 拉高片选信号,停止通信
+    /*CS = PD13*/
+    GPIO_InitStruct.GPIO_Pin   = XPT2046_CS_PIN;
+    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_OUT;
+    GPIO_InitStruct.GPIO_OType = GPIO_OType_PP;
+    GPIO_InitStruct.GPIO_PuPd  = GPIO_PuPd_UP;
+    GPIO_InitStruct.GPIO_Speed = GPIO_Speed_2MHz;
+    GPIO_Init(XPT2046_CS_GPIO, &GPIO_InitStruct);
+    CS_HIGH;                                                     // 空闲拉高
     // CLK
-    GPIO_InitStruct.GPIO_Pin   = XPT2046_CLK_PIN;                // CLK
+    GPIO_InitStruct.GPIO_Pin   = XPT2046_CLK_PIN;
     GPIO_Init(XPT2046_CLK_GPIO, &GPIO_InitStruct);
     // MOSI
-    GPIO_InitStruct.GPIO_Pin   = XPT2046_MOSI_PIN;               // MOSI
+    GPIO_InitStruct.GPIO_Pin   = XPT2046_MOSI_PIN;
     GPIO_Init(XPT2046_MOSI_GPIO, &GPIO_InitStruct);
-    // MISO, 输入模式
+    // MISO
     GPIO_InitStruct.GPIO_Pin   = XPT2046_MISO_PIN;
-    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_IN;                   // MISO, 输入模式
+    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_IN;
     GPIO_Init(XPT2046_MISO_GPIO, &GPIO_InitStruct);
-    // IRQ
+    // IRQ，只查询电平，不开中断
     GPIO_InitStruct.GPIO_Pin  = XPT2046_IRQ_PIN;
-    GPIO_InitStruct.GPIO_Mode = GPIO_Mode_IN;                    // 输入模式,该信号只作指示用,不使用中断
+    GPIO_InitStruct.GPIO_Mode = GPIO_Mode_IN;
     GPIO_Init(XPT2046_IRQ_GPIO, &GPIO_InitStruct);
 #endif
 
-    CLK_LOW ;                                                    // XPT2046 时钟要求 CLK 在时钟低电平时发送串行数据,见芯片手册时序介绍
-    MOSI_0;                                                      // XPT2046 要求 MOSI 时钟低电平
-    CS_LOW;                                                      // 拉低片选信号,使 XTP2046 开始通信
+    CLK_LOW ;                                                    // 空闲低电平，数据在低电平期间切换
+    MOSI_0;                                                      // MOSI 空闲为低
+    CS_LOW;                                                      // 拉低片选，开始通信
 
-    // 通过读取标志位, 判断是否已经校准
-    /* W25Q128 removed: fixed calibration coefficients kept in RAM.
-       portrait(dir=0): 0.0675/0.091/-18/-19;
-       landscape(dir=1): X轴ADC反向,斜率必须为负(实测2026-10): -0.09184/0.077956/338/-45 */
+    /*校准系数：外部 Flash 已裁剪，两种方向各用一组固定值*/
     if (xXPT2046.dir == 0)
     {
-        xXPT2046.xfac = 0.0675f; xXPT2046.yfac = 0.091f;
-        xXPT2046.xoff = -18;      xXPT2046.yoff = -19;
+        xXPT2046.xfac = 0.0675f; xXPT2046.yfac = 0.091f;       // 屏宽 240/有效行程 3555 计数，屏高 320/3516 计数
+        xXPT2046.xoff = -18;      xXPT2046.yoff = -19;         // 有效行程略超 0~4095，往负方向拉回
     }
     else
     {
-        xXPT2046.xfac = -0.09184f; xXPT2046.yfac = 0.077956f;
-        xXPT2046.xoff = 338;       xXPT2046.yoff = -45;
+        xXPT2046.xfac = -0.09184f; xXPT2046.yfac = 0.077956f;  // 横屏 X 轴 ADC 递增方向与像素相反，斜率必须为负
+        xXPT2046.xoff = 338;       xXPT2046.yoff = -45;        // 旋转后有效行程起点变了，靠偏移对齐
     }
 
     XPT2046_Cmd(ENABLE);                                         // 打开触摸屏
@@ -350,17 +356,14 @@ void XPT2046_Init(uint16_t lcdWidth, uint16_t lcdHeight, uint8_t dir)
 
 
 
-/******************************************************************************
- * 函数名称 XPT2046_ReCalibration
- * 功  能: 重新校准触摸屏,
- *          原例程校准完成后数据存到外部 FLASH, 掉电下次有效
- * 入  参 无
- * 返 回: 0_校准成功
- *          1_校准失败
- ******************************************************************************/
+/**
+  * 函    数：XPT2046_ReCalibration
+  * 参    数：无
+  * 返 回 值：0=校准完成(随后软复位，新系数生效)
+  */
 uint8_t  XPT2046_ReCalibration(void)
 {
-    uint16_t pixelOff = 30;   // 偏移像素,用于画十字
+    uint16_t pixelOff = 30;   // 十字离边框 30 像素，手指按上去不被边框挡住
     uint16_t adcX1, adcX2, adcX3, adcX4, adcY1, adcY2, adcY3, adcY4; // 记录校准过程中的测量值
     float xfac = 0;
     float yfac = 0;
@@ -383,87 +386,87 @@ uint8_t  XPT2046_ReCalibration(void)
     crossY = pixelOff;
     xXPT2046.adcX = 0;
     xXPT2046.adcY = 0;
-    XPT2046_Cmd(ENABLE);                                              // 打开触摸屏(开始)
+    XPT2046_Cmd(ENABLE);                                              // 打开触摸屏
     LCD_Cross(crossX, crossY, 20, YELLOW);                            // 画十字
     while ((readAdcXY() == 0) || (xXPT2046.adcX == 0));               // 等待按下
-    XPT2046_Cmd(DISABLE);                                             // 关闭触摸屏(停止)
-    adcX1 = xXPT2046 .adcX;                                           // 记录读取到的 adc 值
-    adcY1 = xXPT2046.adcY;                                            // 记录读取到的 adc 值
+    XPT2046_Cmd(DISABLE);                                             // 关闭触摸屏
+    adcX1 = xXPT2046 .adcX;                                           // 记录 ADC 值
+    adcY1 = xXPT2046.adcY;
     LCD_Cross(crossX, crossY, 20, BLACK);                             // 抹去十字
     sprintf(strTemp, "X:%d", adcX1);
-    LCD_String(crossX - 12, crossY - 16, strTemp, 12, YELLOW, BLACK); // 显示
+    LCD_String(crossX - 12, crossY - 16, strTemp, 12, YELLOW, BLACK); // 显示读数
     sprintf(strTemp, "Y:%d", adcY1);
-    LCD_String(crossX - 12, crossY, strTemp, 12, YELLOW, BLACK);      // 显示
-    delayUS(800000);
+    LCD_String(crossX - 12, crossY, strTemp, 12, YELLOW, BLACK);
+    delayUS(800000);                                                  // 停留 0.8s，看清读数再移向下一点
 
     // 右上角
     crossX = lcdWidth - pixelOff;
     crossY = pixelOff;
     xXPT2046.adcX = 0;
     xXPT2046.adcY = 0;
-    XPT2046_Cmd(ENABLE);                                              // 打开触摸屏(开始)
+    XPT2046_Cmd(ENABLE);                                              // 打开触摸屏
     LCD_Cross(crossX, crossY, 20, YELLOW);                            // 画十字
     while ((readAdcXY() == 0) || (xXPT2046.adcX == 0));               // 等待按下
-    XPT2046_Cmd(DISABLE);                                             // 关闭触摸屏(停止)
-    adcX2 = xXPT2046 .adcX;                                           // 记录读取到的 adc 值
-    adcY2 = xXPT2046.adcY;                                            // 记录读取到的 adc 值
+    XPT2046_Cmd(DISABLE);                                             // 关闭触摸屏
+    adcX2 = xXPT2046 .adcX;                                           // 记录 ADC 值
+    adcY2 = xXPT2046.adcY;
     LCD_Cross(crossX, crossY, 20, BLACK);                             // 抹去十字
     sprintf(strTemp, "X:%d", adcX2);
-    LCD_String(crossX - 12, crossY - 16, strTemp, 12, YELLOW, BLACK); // 显示
+    LCD_String(crossX - 12, crossY - 16, strTemp, 12, YELLOW, BLACK); // 显示读数
     sprintf(strTemp, "Y:%d", adcY2);
-    LCD_String(crossX - 12, crossY, strTemp, 12, YELLOW, BLACK);      // 显示
-    delayUS(800000);
+    LCD_String(crossX - 12, crossY, strTemp, 12, YELLOW, BLACK);
+    delayUS(800000);                                                  // 停留 0.8s
 
     // 左下角
     crossX = pixelOff;
     crossY = lcdHeight - pixelOff;
     xXPT2046.adcX = 0;
     xXPT2046.adcY = 0;
-    XPT2046_Cmd(ENABLE);                                              // 打开触摸屏(开始)
+    XPT2046_Cmd(ENABLE);                                              // 打开触摸屏
     LCD_Cross(crossX, crossY, 20, YELLOW);                            // 画十字
     while ((readAdcXY() == 0) || (xXPT2046.adcX == 0));               // 等待按下
-    XPT2046_Cmd(DISABLE);                                             // 关闭触摸屏(停止)
-    adcX3 = xXPT2046 .adcX;                                           // 记录读取到的 adc 值
-    adcY3 = xXPT2046.adcY;                                            // 记录读取到的 adc 值
+    XPT2046_Cmd(DISABLE);                                             // 关闭触摸屏
+    adcX3 = xXPT2046 .adcX;                                           // 记录 ADC 值
+    adcY3 = xXPT2046.adcY;
     LCD_Cross(crossX, crossY, 20, BLACK);                             // 抹去十字
     sprintf(strTemp, "X:%d", adcX3);
-    LCD_String(crossX - 12, crossY - 16, strTemp, 12, YELLOW, BLACK); // 显示
+    LCD_String(crossX - 12, crossY - 16, strTemp, 12, YELLOW, BLACK); // 显示读数
     sprintf(strTemp, "Y:%d", adcY3);
-    LCD_String(crossX - 12, crossY, strTemp, 12, YELLOW, BLACK);      // 显示
-    delayUS(800000);
+    LCD_String(crossX - 12, crossY, strTemp, 12, YELLOW, BLACK);
+    delayUS(800000);                                                  // 停留 0.8s
 
     // 右下角
     crossX = lcdWidth - pixelOff;
     crossY = lcdHeight - pixelOff;
     xXPT2046.adcX = 0;
     xXPT2046.adcY = 0;
-    XPT2046_Cmd(ENABLE);                                              // 打开触摸屏(开始)
+    XPT2046_Cmd(ENABLE);                                              // 打开触摸屏
     LCD_Cross(crossX, crossY, 20, YELLOW);                            // 画十字
     while ((readAdcXY() == 0) || (xXPT2046.adcX == 0));               // 等待按下
-    XPT2046_Cmd(DISABLE);                                             // 关闭触摸屏(停止)
-    adcX4 = xXPT2046 .adcX;                                           // 记录读取到的 adc 值
-    adcY4 = xXPT2046.adcY;                                            // 记录读取到的 adc 值
+    XPT2046_Cmd(DISABLE);                                             // 关闭触摸屏
+    adcX4 = xXPT2046 .adcX;                                           // 记录 ADC 值
+    adcY4 = xXPT2046.adcY;
     LCD_Cross(crossX, crossY, 20, BLACK);                             // 抹去十字
     sprintf(strTemp, "X:%d", adcX4);
-    LCD_String(crossX - 12, crossY - 16, strTemp, 12, YELLOW, BLACK); // 显示
+    LCD_String(crossX - 12, crossY - 16, strTemp, 12, YELLOW, BLACK); // 显示读数
     sprintf(strTemp, "Y:%d", adcY4);
-    LCD_String(crossX - 12, crossY, strTemp, 12, YELLOW, BLACK);      // 显示
-    delayUS(400000);
+    LCD_String(crossX - 12, crossY, strTemp, 12, YELLOW, BLACK);
+    delayUS(400000);                                                  // 最后一点只停 0.4s，随后算系数并复位
 
-    //timeCNT=0;
-    // 取 adcX、adcY 的平均值; 两组测量平均值, 用于对角线上的十字坐标计算
+    /*对角两点取平均，抵消单点误差*/
     adcX1 = (adcX1 + adcX3) / 2;
     adcX2 = (adcX2 + adcX4) / 2;
 
     adcY1 = (adcY1 + adcY2) / 2;
     adcY2 = (adcY3 + adcY4) / 2;
 
-    xfac = (float)(pixelOff - (lcdWidth - pixelOff)) / (adcX1 - adcX2);   // 计算屏幕与 LCD 坐标的换算系数,  xfac=(float)(20-320)/(t1x-t2x);
+    /*系数 = 像素差/ADC 差，偏移让两端对齐*/
+    xfac = (float)(pixelOff - (lcdWidth - pixelOff)) / (adcX1 - adcX2);
     yfac = (float)(pixelOff - (lcdHeight - pixelOff)) / (adcY1 - adcY2);
-    xoff = (lcdWidth - xfac * (adcX1 + adcX2)) / 2;                       // 计算坐标的偏移值, xoff=(320-xfac*(t1x+t2x))/2;
+    xoff = (lcdWidth - xfac * (adcX1 + adcX2)) / 2;
     yoff = (lcdHeight - yfac * (adcY1 + adcY2)) / 2;
 
-    // 写入参数(W25Q 已裁剪:只保存到 RAM)
+    /*写回 RAM(外部 Flash 已裁剪)*/
     writeCorrectingData(xfac, yfac, xoff, yoff);
 
     xXPT2046.xfac = xfac;
@@ -479,15 +482,11 @@ uint8_t  XPT2046_ReCalibration(void)
 
 
 
-/******************************************************************************
- * 函数名称 XPT2046_Cmd
- * 功  能: 触摸屏开关
- *          用于单片机比较忙时, 内部使用触摸屏的状态函数, 人为关闭以节省触摸芯片资源
- *          退出该状态, 只需再次调用 XPT2046_TouchHandler();
- * 入  参 0_关闭触摸屏检测,以节省资源
- *          1_打开触摸屏
- * 返 回:
- ******************************************************************************/
+/**
+  * 函    数：XPT2046_Cmd
+  * 参    数：status  0=关闭触摸检测，非 0=开启
+  * 返 回 值：无
+  */
 void XPT2046_Cmd(uint8_t status)
 {
     if (status != 0)
@@ -502,38 +501,34 @@ void XPT2046_Cmd(uint8_t status)
 
 
 
-/******************************************************************************
- * 函数名称 XPT2046_IsPressed
- * 功  能: 判断触摸屏是否被按下
- * 入  参 无
- * 返 回: 0-未按下、1-已按下
- ******************************************************************************/
+/**
+  * 函    数：XPT2046_IsPressed
+  * 参    数：无
+  * 返 回 值：0=未按下，1=按下(坐标同时更新到 lcdX/lcdY)
+  */
 uint8_t XPT2046_IsPressed(void)
 {
     static uint8_t status = 0;
 
-    if (xXPT2046.EN == 0)             // 触摸开关关闭; 初始化后默认是开启的; 若手动关闭过,则出现某些情况下触摸没反应是正常的
+    if (xXPT2046.EN == 0)             // 开关关闭时直接当未按下
         return 0;
 
-    status = IRQ_READ ? 0 : 1 ;       // 空闲时为高电平,按下时为低电平
-    if (status == 1)                  // 有触摸按下
+    status = IRQ_READ ? 0 : 1 ;       // 空闲高电平，按下低电平
+    if (status == 1)
     {
-        if (readAdcXY() == 0)         // 获取 XPT2046 的触摸位置(电压值)
-            return 0;                 // ADC 范围校验失败(MISO 断线等),丢弃
-        adcXYToLcdXY();               // 换算成显示坐标的值; 换算后的 XY 值可以通过函数 XPT2046_GetX()、XPT2046_GetY() 获取;
+        if (readAdcXY() == 0)         // 断线或越界，丢弃本次
+            return 0;
+        adcXYToLcdXY();               // 换算成屏幕坐标
         uint16_t x1 = xXPT2046.lcdX;
         uint16_t y1 = xXPT2046.lcdY;
 
-        if (readAdcXY() == 0)         // 第二次采样校验失败也丢弃
+        if (readAdcXY() == 0)
             return 0;
-        adcXYToLcdXY();               // 换算成显示坐标的值; 换算后的 XY 值可以通过函数 XPT2046_GetX()、XPT2046_GetY() 获取;
+        adcXYToLcdXY();
         uint16_t x2 = xXPT2046.lcdX;
         uint16_t y2 = xXPT2046.lcdY;
 
-        // 两次测量差值(像素)
-        // 阈值取 10:电阻屏轻按/按下沿抖动通常 4~8px,阈值 3 会把正常按压
-        // 误判为"未按下",导致上层 LVGL 看到 press/release 闪烁、点击丢失;
-        // 10 仍可滤掉真正的野点(跳变几十~上百像素)
+        // 两次采样差超过 10 像素判为野点；阈值取 3 会把轻按抖动(4~8px)误判成松手
         uint8_t x, y;
         if (x1 > x2)
             x = x1 - x2;
@@ -553,17 +548,16 @@ uint8_t XPT2046_IsPressed(void)
         xXPT2046.lcdY = (y1 + y2) >> 1;
     }
 
-    return  status ;      // 返回:0-未按下、1-已按下
+    return  status ;      // 0=未按下，1=按下
 }
 
 
 
-/******************************************************************************
- * 函数名称 XPT2046_GetX
- * 功  能: 获取触摸位置的横坐标值 (X)
- * 入  参 无
- * 返 回: 横坐标值 (X)
- ******************************************************************************/
+/**
+  * 函    数：XPT2046_GetX
+  * 参    数：无
+  * 返 回 值：触摸点横坐标(X)，单位像素
+  */
 uint16_t  XPT2046_GetX(void)
 {
     return xXPT2046.lcdX;
@@ -571,12 +565,11 @@ uint16_t  XPT2046_GetX(void)
 
 
 
-/******************************************************************************
- * 函数名称 XPT2046_GetY
- * 功  能: 获取触摸位置的纵坐标值 (Y)
- * 入  参 无
- * 返 回: 纵坐标值 (Y)
- ******************************************************************************/
+/**
+  * 函    数：XPT2046_GetY
+  * 参    数：无
+  * 返 回 值：触摸点纵坐标(Y)，单位像素
+  */
 uint16_t  XPT2046_GetY(void)
 {
     return xXPT2046.lcdY;
@@ -584,13 +577,11 @@ uint16_t  XPT2046_GetY(void)
 
 
 
-/******************************************************************************
- * 函数名称 XPT2046_TouchDown
- * 功  能: 触摸屏按下时的处理
- *          空回调函数, 用户可以自行编写代码
- * 入  参
- * 返 回:
- ******************************************************************************/
+/**
+  * 函    数：XPT2046_TouchDown
+  * 参    数：无
+  * 返 回 值：无
+  */
 void XPT2046_TouchDown(void)
 {
 //    // 示例:在触摸处画一个黄色点
@@ -603,13 +594,11 @@ void XPT2046_TouchDown(void)
 
 
 
-/******************************************************************************
- * 函数名称 XPT2046_TouchUp
- * 功  能: 触摸屏松开时的处理
- *          空回调函数, 用户可以自行编写代码
- * 入  参
- * 返 回:
- ******************************************************************************/
+/**
+  * 函    数：XPT2046_TouchUp
+  * 参    数：无
+  * 返 回 值：无
+  */
 void XPT2046_TouchUp(void)
 {
 

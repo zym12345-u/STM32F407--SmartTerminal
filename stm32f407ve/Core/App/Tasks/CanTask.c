@@ -1,32 +1,8 @@
-/**
-  ******************************************************************************
-  * @file    CanTask.c
-  * @brief   CAN 通信任务:收帧分发、周期心跳、总线状态轮询、IWDG 心跳上报
-  *
-  *          任务行为(派活单 §8,单任务轮转,不做双任务):
-  *            for (;;) {
-  *                心跳上报;
-  *                while (RX 队列非空) 分发打印;
-  *                if (到心跳周期) 组心跳帧 -> CAN_Send();
-  *                if (TX 队列取到帧) CAN_TxPump();
-  *                if (到状态轮询周期) 读 ESR,按规则打印;
-  *            }
-  *          主循环节奏由 CAN_TxPop 的 100ms 超时兜底:无消息时任务阻塞在队列上,
-  *          CPU 占用为 0。
-  *
-  *          心跳(V1.1 真机教训):
-  *            每轮循环入口无条件上报;阻塞等待一律用有限超时,禁止 portMAX_DELAY ——
-  *            外部无流量时死等会让心跳停摆,进而被 IWDG 咬复位。
-  *
-  *          总线状态打印采用【非对称去抖】(驻场回信 §1.3):
-  *            - 恶化(OK->warning->passive->off):第一次采样立即打印,
-  *              安全信息不能延迟;
-  *            - 恢复:需连续 2 次稳定采样才打印回迁。
-  *            对称去抖会把真实的短时错误吞掉,非对称才对。
-  *            另加【限流】(R3):同一状态持续时,距上次打印 >= 2s 才允许再打,
-  *            避免 warn<->passive 来回抖动时绕过"变化才打印"刷屏。
-  ******************************************************************************
-  */
+/* CanTask.c
+ * CAN 通信任务：收帧分发、1s 心跳 0x701、1s 传感器帧 0x181、1s 总线状态轮询。
+ * 周期：主循环节奏由 CAN_TxPop 的 100ms 超时决定；优先级 Normal，栈 1024 字节。
+ * 注意：所有阻塞等待必须有界，禁止 portMAX_DELAY，否则外部无流量时心跳停摆被 IWDG 复位。
+ */
 
 #include "cmsis_os2.h"
 #include "FreeRTOS.h"
@@ -36,25 +12,39 @@
 #include "bsp_IWDG.h"       /* Watchdog_Heartbeat / WDT_TASK_CAN */
 #include "bsp_CAN.h"
 #include "CanData.h"
-#include "SensorData.h"     /* g_sensorData: V1.4 唯一数据源, 不另采不另存 */
+#include "SensorData.h"     /*g_sensorData 是唯一数据源，不另采不另存*/
 #include "LEDType.h"        /* LEDMessage: 命令下行复用既有 LED 通道 */
 
 /* 状态轮询与打印限流 */
 #define CAN_STAT_POLL_MS        1000U
-#define CAN_STAT_PRINT_THROTTLE 2000U   /* R3: 同一状态至少间隔 2s 再打 */
+#define CAN_STAT_PRINT_THROTTLE 2000U   /*同一状态至少间隔 2s 再打*/
 
 /* 恢复方向去抖所需连续稳定次数 */
 #define CAN_RECOVER_STABLE_CNT  2U
 
-/* ====================== 内部状态 ====================== */
+/*内部状态*/
 
 static uint16_t      s_txCount   = 0U;
 static CanBusState_t s_lastState = CAN_BUS_OK;
 static uint8_t       s_stableCnt = 0U;
 static uint32_t      s_lastPrint = 0U;
 
-/* ====================== 内部工具 ====================== */
+/*总线状态机：由 ESR 的 EWGF/EPVF/BOFF 判定，BOFF 优先，采样周期 1000ms
+ * 状态            含义                        进入条件         超时/恢复
+ * CAN_BUS_OK      正常收发                    TEC/REC < 96     无
+ * CAN_BUS_WARNING 重传/错误帧变多              TEC 或 REC >= 96 回落连续 2 次采样回 OK
+ * CAN_BUS_PASSIVE 只能被动应答                计数继续上升     恶化立即打印
+ * CAN_BUS_OFF     总线关闭，停收发             TEC >= 256       需复位 CAN 外设
+ * 打印：同一状态持续限流 2000ms。
+ */
 
+/*内部工具*/
+
+/**
+  * 函    数：CAN_StateName
+  * 参    数：st  总线状态，CAN_BUS_OK ~ CAN_BUS_OFF
+  * 返 回 值：状态名静态字符串，调用方不得修改
+  */
 static const char *CAN_StateName(CanBusState_t st)
 {
     switch (st)
@@ -68,8 +58,9 @@ static const char *CAN_StateName(CanBusState_t st)
 }
 
 /**
-  * @brief  组心跳帧(大端,8 字节)
-  * @note   非 CANopen 兼容,理由见 CanData.h 心跳帧布局注释
+  * 函    数：CAN_BuildHeartbeat
+  * 参    数：msg  输出帧，8 字节全覆写；uptimeSec  上电秒数；st  统计快照
+  * 返 回 值：无
   */
 static void CAN_BuildHeartbeat(CanMsg_t *msg, uint32_t uptimeSec, const CanStats_t *st)
 {
@@ -92,7 +83,9 @@ static void CAN_BuildHeartbeat(CanMsg_t *msg, uint32_t uptimeSec, const CanStats
 }
 
 /**
-  * @brief  非对称去抖 + 限流的状态打印
+  * 函    数：CAN_PrintStateIfNeeded
+  * 参    数：cur  本次采样状态；tec/rec  错误计数 0~255；nowMs  当前毫秒
+  * 返 回 值：无
   */
 static void CAN_PrintStateIfNeeded(CanBusState_t cur, uint8_t tec, uint8_t rec, uint32_t nowMs)
 {
@@ -131,16 +124,13 @@ static void CAN_PrintStateIfNeeded(CanBusState_t cur, uint8_t tec, uint8_t rec, 
     }
 }
 
-/* LEDQueue 由 freertos.c 创建(深度 16, 元素是 LEDMessage 指针),
- * 消费者是 LEDTask, 由它执行点灯并 vPortFree。
- * 本任务与 KeyTask / GuiTask / ModbusTask 一样只当生产者, 不直接碰 GPIO。 */
+/*LEDQueue 元素是指针：LEDTask 负责点灯并 vPortFree，本任务只当生产者*/
 extern osMessageQueueId_t LEDQueueHandle;
 
 /**
-  * @brief  向 LEDQueue 投递一条 LED 控制消息
-  * @note   队列元素是【指针】而非值(见 freertos.c 的 osMessageQueueNew),
-  *         故必须 pvPortMalloc, 且投递失败时要立刻 vPortFree, 否则泄漏。
-  *         与 ModbusTask 的 MB_LedWrite / KeyTask 的 LED_PostMessage 同模式。
+  * 函    数：CAN_LedPost
+  * 参    数：color  目标灯，LEDColor_Green / LEDColor_Blue；state  目标状态
+  * 返 回 值：无，堆或队列满时静默丢弃
   */
 static void CAN_LedPost(LEDColor color, LEDState state)
 {
@@ -158,11 +148,9 @@ static void CAN_LedPost(LEDColor color, LEDState state)
 }
 
 /**
-  * @brief  组传感器帧(0x181, 大端, 8 字节)
-  * @note   编码与 Modbus 的 MB_RegRead 完全一致(温度/湿度/光照均 x10,
-  *         无效填 0xFFFF), 这样 T7 可以拿 Modbus Poll 与 PCAN-View 对照打。
-  *         温湿度共用 g_sensorData.temp_valid(数据源没有独立的湿度有效位),
-  *         故 bit0 与 bit1 恒为同值; 这是既有行为, 不在 V1.4 改动。
+  * 函    数：CAN_BuildSensorFrame
+  * 参    数：msg  输出帧，8 字节先清零再逐字段填
+  * 返 回 值：无
   */
 static void CAN_BuildSensorFrame(CanMsg_t *msg)
 {
@@ -171,7 +159,7 @@ static void CAN_BuildSensorFrame(CanMsg_t *msg)
     uint16_t lux10;
     uint8_t  valid = 0U;
 
-    /* ---- 字段全填: rsv/timestamp 不填会带栈垃圾进队列(派活单 §4 第 1 条) ---- */
+    /*字段全填：rsv/timestamp 不填会带栈垃圾进队列*/
     msg->id        = CAN_ID_SENSOR;
     msg->ide       = 0U;
     msg->rtr       = 0U;
@@ -183,7 +171,7 @@ static void CAN_BuildSensorFrame(CanMsg_t *msg)
         msg->data[i] = 0U;                 /* 先全清, 再逐字段写 */
     }
 
-    /* ---- 温度 / 湿度: 共用 temp_valid ---- */
+    /*温湿度共用 temp_valid，故 valid 的 bit0/bit1 恒同值*/
     if (g_sensorData.temp_valid)
     {
         temp10 = (uint16_t)(int16_t)(g_sensorData.temperature * 10.0f);
@@ -196,7 +184,7 @@ static void CAN_BuildSensorFrame(CanMsg_t *msg)
         hum10  = 0xFFFFU;
     }
 
-    /* ---- 光照: 与 Modbus 一致, 超量程也钳到 0xFFFF ---- */
+    /*光照超量程钳到 0xFFFF，与 Modbus 编码一致*/
     if (g_sensorData.light_valid)
     {
         uint32_t lux32 = (uint32_t)(g_sensorData.light * 10.0f);
@@ -208,7 +196,7 @@ static void CAN_BuildSensorFrame(CanMsg_t *msg)
         lux10 = 0xFFFFU;
     }
 
-    /* ---- 大端写入 ---- */
+    /*大端写入*/
     msg->data[CAN_SENSOR_OFF_TEMP_MSB] = (uint8_t)((temp10 >> 8) & 0xFFU);
     msg->data[CAN_SENSOR_OFF_TEMP_LSB] = (uint8_t)( temp10       & 0xFFU);
     msg->data[CAN_SENSOR_OFF_HUM_MSB]  = (uint8_t)((hum10  >> 8) & 0xFFU);
@@ -219,11 +207,19 @@ static void CAN_BuildSensorFrame(CanMsg_t *msg)
     msg->data[CAN_SENSOR_OFF_DEVID]    = CAN_SENSOR_DEVID;
 }
 
+/*命令/应答协议：0x201 下行 → 0x281 上行
+ * 0x201  data[0] 命令码 0x01 开灯 / 0x02 关灯 / 0x03 读版本，其余回 NAK
+ * 0x201  data[1] 灯编号 1=绿 2=蓝，内部枚举 0=绿 1=蓝，需映射
+ * 0x201  data[2..7] 预留填 0
+ * 0x281  data[0] 回显命令码，data[1] 结果 0 成功 / 1 未知命令 / 2 参数错误
+ * 0x281  data[2..3] 版本号，DLC 固定 4 但 data[4..7] 也必须清零
+ * 时序：收到即处理并回帧，不重传、不超时判定
+ */
+
 /**
-  * @brief  处理下行命令帧(0x201), 并组好应答帧(0x281)
-  * @param  rx   收到的命令帧
-  * @param  ack  输出: 待发送的应答帧
-  * @note   执行类命令先做动作再填结果; 灯编号非法回 CAN_ACK_PARAM。
+  * 函    数：CAN_HandleCommand
+  * 参    数：rx  收到的命令帧，只读；ack  输出应答帧，字段全覆写
+  * 返 回 值：无，结果写在 ack->data[1]
   */
 static void CAN_HandleCommand(const CanMsg_t *rx, CanMsg_t *ack)
 {
@@ -234,7 +230,7 @@ static void CAN_HandleCommand(const CanMsg_t *rx, CanMsg_t *ack)
     ack->id        = CAN_ID_CMD_ACK;
     ack->ide       = 0U;
     ack->rtr       = 0U;
-    ack->dlc       = CAN_ACK_DLC;
+    ack->dlc       = CAN_ACK_DLC;                    /* 应答固定 DLC=4 */
     ack->rsv       = 0U;
     ack->timestamp = xTaskGetTickCount();
     for (uint8_t i = 0U; i < 8U; i++)
@@ -276,11 +272,16 @@ static void CAN_HandleCommand(const CanMsg_t *rx, CanMsg_t *ack)
     ack->data[CAN_ACK_OFF_RESULT] = result;
     ack->data[CAN_ACK_OFF_VER_H]  = CAN_FW_VER_MAJOR;
     ack->data[CAN_ACK_OFF_VER_L]  = CAN_FW_VER_MINOR;
-    /* data[4..7] 上面已清零: DLC=4 但缓冲有 8 字节, 不清会露出上一帧尾巴 */
+    /*DLC=4 但缓冲有 8 字节，data[4..7] 不清会露出上一帧尾巴*/
 }
 
-/* ====================== 任务主体 ====================== */
+/*任务主体*/
 
+/**
+  * 函    数：StartCanTask
+  * 参    数：argument  未使用，rtos 传入的 NULL
+  * 返 回 值：无
+  */
 void StartCanTask(void *argument)
 {
     (void)argument;
@@ -291,15 +292,14 @@ void StartCanTask(void *argument)
     uint32_t   lastStat   = 0U;
     uint32_t   lastSensor = 0U;
 
-    /* BSP 初始化必须在任务上下文(内部创建队列) */
+    /*BSP 初始化须在任务上下文：内部要创建 RX/TX 队列*/
     if (CAN_BspInit() != 0U)
     {
         UART_Printf("[CAN] task abort: BspInit failed\r\n");
     }
 
 #if CAN_TEST_FILTER_EXACT
-    /* T4 验收: 精确匹配 0x123,分析仪发其它 ID 应一律不打印。
-     * 注意(R6): 运行期改过滤器会置 FMR.FINIT,期间到期的帧会丢,属 HAL 固有行为。 */
+    /*只在 0x123 通过；运行期改过滤器置 FMR.FINIT，其间到期的帧会丢*/
     if (CAN_FilterSet(CAN_ID_TEST, 0x7FFU) == 0U)
     {
         UART_Printf("[CAN] T4: filter exact 0x%03lX only\r\n", (unsigned long)CAN_ID_TEST);
@@ -308,21 +308,16 @@ void StartCanTask(void *argument)
 
     for (;;)
     {
-        Watchdog_Heartbeat(WDT_TASK_CAN);      /* 每轮入口无条件上报 */
+        /*WDT 槽位 9(CAN)*/
+        Watchdog_Heartbeat(WDT_TASK_CAN);      /*每轮入口无条件上报*/
 
-        uint32_t nowMs = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        uint32_t nowMs = xTaskGetTickCount() * portTICK_PERIOD_MS;   /*tick 折算成 ms*/
 
-        /* ---- 1. 收帧分发: 非阻塞排空 ---- */
-        while (CAN_RxPop(&msg, 0U) == 0U)
+        /*收帧分发：超时 0 一次排空*/
+        while (CAN_RxPop(&msg, 0U) == 0U)                  /* 超时 0:一次排空,不阻塞 */
         {
-            /* 整行先拼进局部缓冲, 再一次 UART_Printf 发出。
-             * UART_Printf 保证的是【单次调用】原子: 此前拆成
-             * "前缀 + 8 个 %02X + 换行" 共 10 次调用, 中间任何一次被别的
-             * 任务插入, 这一行就断成两截 —— 现场 [CANSOR] 之类花屏的直接来源。
-             * 边界: 每字节占 3 字符("XX "), 8 字节共 24, 缓冲 32 足够;
-             * 仍用 p < sizeof-4 卡住, 防 snprintf 写越界。 */
-            char hex[32] = {0};   /* 必须清零: dlc=0(零长度帧)时循环不执行,
-                                   * 未初始化的栈内容会被 %s 一直读到随机 0x00 */
+            /*整行拼好一次发出：UART_Printf 只保证单次调用原子，分多次打会被别的任务插进半行*/
+            char hex[32] = {0};   /*必须清零：dlc=0 时循环不执行，未初始化栈内容会被 %s 读到随机 0x00*/
             int  p = 0;
             for (uint8_t i = 0U; i < msg.dlc && p < (int)sizeof(hex) - 4; i++)
             {
@@ -332,8 +327,7 @@ void StartCanTask(void *argument)
             UART_Printf("[CAN] rx id=0x%03lX dlc=%u data=%s\r\n",
                         (unsigned long)msg.id, (unsigned)msg.dlc, hex);
 
-            /* ---- V1.4: 按 ID 分发。0x201 走命令处理并回 0x281,
-             * 其余保持 V1.3 行为(仅打印), 不引入额外语义。 ---- */
+            /*按 ID 分发：0x201 走命令处理并回 0x281，其余只打印*/
             if (msg.id == CAN_ID_CMD)
             {
                 CanMsg_t ack;
@@ -352,8 +346,8 @@ void StartCanTask(void *argument)
             }
         }
 
-        /* ---- 2. 周期心跳帧 ---- */
-        if ((nowMs - lastHb) >= CAN_HB_PERIOD_MS)
+        /*周期心跳帧*/
+        if ((nowMs - lastHb) >= CAN_HB_PERIOD_MS)          /*1s 心跳帧*/
         {
             lastHb = nowMs;
             CAN_GetStats(&stats);
@@ -368,12 +362,8 @@ void StartCanTask(void *argument)
             }
         }
 
-        /* ---- 2b. 周期传感器帧 ----
-         * 与心跳同为 1s, 故二者会在同一轮循环里背靠背触发(心跳在前、
-         * 传感器紧随)。1s 周期下两帧仅占约 0.5ms, 总线负载可忽略,
-         * 不必为"错开相位"引入额外的偏移逻辑 —— 那反而容易踩 uint32
-         * 减法下溢的坑(lastSensor 初值若大于 nowMs 会立即触发一次误发)。*/
-        if ((nowMs - lastSensor) >= CAN_SENSOR_PERIOD_MS)
+        /*与心跳同为 1s，两帧背靠背约占 0.5ms；错相会让 lastSensor 初值大于 nowMs 时 uint32 减法下溢误发*/
+        if ((nowMs - lastSensor) >= CAN_SENSOR_PERIOD_MS)  /*1s 传感器帧*/
         {
             lastSensor = nowMs;
             CAN_BuildSensorFrame(&msg);
@@ -383,18 +373,17 @@ void StartCanTask(void *argument)
             }
         }
 
-        /* ---- 3. 发送: 100ms 超时兜底主循环节奏 ---- */
-        if (CAN_TxPop(&msg, 100U) == 0U)
+        if (CAN_TxPop(&msg, 100U) == 0U)                   /*100ms：出队超时也是主循环节奏*/
         {
             if (CAN_TxPump(&msg) == 0U)
             {
                 UART_Printf("[CAN] tx id=0x%03lX dlc=%u ok\r\n",
                             (unsigned long)msg.id, (unsigned)msg.dlc);
             }
-            /* 邮箱满/失败时由 BSP 累计 tx_drop / tx_error,这里不打印,避免刷屏 */
+            /*邮箱满/失败由 BSP 累计 tx_drop / tx_error，不打印避免刷屏*/
         }
 
-        /* ---- 4. 状态轮询(1s) ---- */
+        /*状态轮询：1000ms 读 ESR*/
         if ((nowMs - lastStat) >= CAN_STAT_POLL_MS)
         {
             lastStat = nowMs;
@@ -405,14 +394,19 @@ void StartCanTask(void *argument)
     }
 }
 
-/* ====================== 对外创建接口 ====================== */
+/*对外创建接口*/
 
+/**
+  * 函    数：CanTask_Create
+  * 参    数：无
+  * 返 回 值：无
+  */
 void CanTask_Create(void)
 {
     const osThreadAttr_t attr = {
         .name       = "CanTask",
-        .stack_size = 256 * 4,                          /* 派活单 §7 定档, 验收时看栈水位 */
-        .priority   = (osPriority_t)osPriorityNormal,   /* 与 ModbusTask 同级 */
+        .stack_size = 256 * 4,                          /*栈以字为单位：256 字 = 1024 字节*/
+        .priority   = (osPriority_t)osPriorityNormal,   /*与 ModbusTask 同级*/
     };
     (void)osThreadNew(StartCanTask, NULL, &attr);
 }

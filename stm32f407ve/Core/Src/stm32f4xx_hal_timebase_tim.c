@@ -1,20 +1,7 @@
 /* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * @file    stm32f4xx_hal_timebase_tim.c
-  * @brief   HAL time base based on the hardware TIM.
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+/* stm32f4xx_hal_timebase_tim.c
+ * 用 TIM4 代替 SysTick 作为 HAL 的 1ms 时基，SysTick 留给 FreeRTOS 调度。
+ */
 /* USER CODE END Header */
 
 /* Includes ------------------------------------------------------------------*/

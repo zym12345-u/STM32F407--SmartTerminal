@@ -1,14 +1,8 @@
-/**
-  ******************************************************************************
-  * @file    bsp_ESP8266.c
-  * @brief   板载 ESP8266 WiFi 模块 AT 指令驱动 —— 实现文件
-  *
-  *          对照网盘 17-3 例程重写为 FreeRTOS 友好版本:
-  *            官方 bsp_ESP8266 的 delay_ms 是 CPU 空转忙等、UART 阻塞收,
-  *            对时一个流程要独占 CPU 十几秒;本驱动接收走中断环形缓冲,
-  *            命令等待 osDelay 让出 CPU,任务栈上生成快照后 strstr/sscanf。
-  ******************************************************************************
-  */
+/* bsp_ESP8266.c
+ * ESP8266 AT 驱动：USART2 中断收字节、环形缓冲、命令等待、SNTP 时间解析。
+ * 硬件：USART2 = PA2(TX)/PA3(RX)，AF7，115200 8N1，无硬件流控。
+ * 注意：只允许 WifiTask 单消费者调用；等待应答用 osDelay 让出 CPU，长命令期间需定期喂狗。
+ */
 #include "bsp_ESP8266.h"
 
 #include "stm32f4xx_hal.h"
@@ -18,19 +12,13 @@
 #include <string.h>
 
 
-/* ================================ 串口硬件 ================================
- * 串口分配(2026-10 调整):
- *   USART1(PA9/PA10) = 调试口(板载 USB-TTL)
- *   USART2(PA2/PA3)  = ESP8266 WiFi(杜邦线跳接,见 bsp_ESP8266.h)
- *   USART3(PB10/PB11)= RS485(出厂默认接线,见 bsp_RS485.h)
- * ESP8266 改用 USART2 后,句柄命名 huart_esp 避免与 usart.c 的全局 huart2 混淆。
- */
+/*串口分配：USART1 调试 / USART2 ESP8266 / USART3 RS485
+ * 句柄 huart_esp 避免与 usart.c 的 huart2 混淆*/
 #define ESP_UART            USART2
 #define ESP_UART_IRQN       USART2_IRQn
 #define ESP_UART_PRIO       6U    /* ISR 只操作环形缓冲,不调 RTOS API,优先级 6 即可 */
 
-/* AT+CWLAP 扫描会返回十几个热点、每条约 70~90 字节,2KB 可容纳 20 条左右;
- * 超出部分丢弃,UI 只取信号最强的前 WIFI_AP_MAX 个,截断可接受 */
+/*AT+CWLAP 每条热点约 70~90 字节，2KB 可容 20 条左右，超出丢弃*/
 #define ESP_RX_BUF_SIZE     2048U
 
 static UART_HandleTypeDef huart_esp;
@@ -41,16 +29,17 @@ static volatile uint16_t s_rxTail = 0U;   /* 任务读位置 */
 static uint8_t           s_rx[ESP_RX_BUF_SIZE];
 
 
-/* ================================ 内部函数 ================================ */
+/*内部函数*/
 static void ESP_GPIO_UART_Init(void);
 static void ESP_RingFlush(void);
 static uint16_t ESP_RingCopy(uint8_t *out, uint16_t max);
 
 
 /**
-  * @brief  USART2 中断入口(全局函数,启动文件向量表直接指向这里;
-  *         stm32f4xx_it.c 不再定义 USART2_IRQHandler,无重复定义冲突)。
-  *         先读 SR 再读 DR 可同时清除 RXNE 与 ORE(过载)标志。
+  * 函    数：USART2_IRQHandler
+  * 参    数：无
+  * 返 回 值：无
+  * 注意事项：ISR 上下文，不调 RTOS API；stm32f4xx_it.c 不得再定义同名函数
   */
 void USART2_IRQHandler(void)
 {
@@ -59,11 +48,8 @@ void USART2_IRQHandler(void)
     if ((isr & USART_SR_RXNE) != 0U)
     {
         uint8_t d = (uint8_t)(ESP_UART->DR & 0xFFU);
-        uint16_t next = (uint16_t)((s_rxHead + 1U) % ESP_RX_BUF_SIZE);
-        /* 满时丢弃"新到的"字节、保留已收到的旧数据(即丢弃最新的):
-         * 应答匹配靠 strstr 从头找 expect,已经攒下的前半段更有价值;
-         * 丢最新字节只是少收个尾巴,丢旧数据会让整条应答永远匹配不上。
-         * 2KB 缓冲对单条 AT 应答足够,实际很难真满 */
+        uint16_t next = (uint16_t)((s_rxHead + 1U) % ESP_RX_BUF_SIZE);   /* 环形自增，2047 后回卷到 0 */
+        /*满时丢新字节、保留已收应答：丢旧数据会让 strstr 永远匹配不上*/
         if (next != s_rxTail)
         {
             s_rx[s_rxHead] = d;
@@ -78,8 +64,10 @@ void USART2_IRQHandler(void)
 }
 
 /**
-  * @brief  USART2 + PA2/PA3 初始化(自包含,GPIO/时钟/NVIC 都在本文件配置,
-  *         不依赖 CubeMX;HAL_UART_MspInit 对 USART2 由本文件接管,不冲突)
+  * 函    数：ESP_GPIO_UART_Init
+  * 参    数：无
+  * 返 回 值：无
+  * 注意事项：GPIO/时钟/NVIC 都在本文件配置，不依赖 CubeMX；重复调用幂等
   */
 static void ESP_GPIO_UART_Init(void)
 {
@@ -88,7 +76,7 @@ static void ESP_GPIO_UART_Init(void)
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_USART2_CLK_ENABLE();
 
-    /* PA2=USART2_TX, PA3=USART2_RX, AF7 */
+    /* PA2=TX，PA3=RX，AF7 */
     gpio.Pin       = GPIO_PIN_2 | GPIO_PIN_3;
     gpio.Mode      = GPIO_MODE_AF_PP;
     gpio.Pull      = GPIO_PULLUP;       /* RX 挂上拉,空闲时避免杂讯误触发 */
@@ -97,13 +85,13 @@ static void ESP_GPIO_UART_Init(void)
     HAL_GPIO_Init(GPIOA, &gpio);
 
     huart_esp.Instance          = ESP_UART;
-    huart_esp.Init.BaudRate     = 115200;
+    huart_esp.Init.BaudRate     = 115200;                              /* 出厂默认 115200，改前先发 AT+UART_CUR */
     huart_esp.Init.WordLength   = UART_WORDLENGTH_8B;
     huart_esp.Init.StopBits     = UART_STOPBITS_1;
     huart_esp.Init.Parity       = UART_PARITY_NONE;
     huart_esp.Init.Mode         = UART_MODE_TX_RX;
-    huart_esp.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
-    huart_esp.Init.OverSampling = UART_OVERSAMPLING_16;
+    huart_esp.Init.HwFlowCtl    = UART_HWCONTROL_NONE;                 /* 未接 RTS/CTS，只能靠 AT 层流控 */
+    huart_esp.Init.OverSampling = UART_OVERSAMPLING_16;                /* 16 倍过采样，115200 下分频误差更小 */
     (void)HAL_UART_Init(&huart_esp);
 
     HAL_NVIC_SetPriority(ESP_UART_IRQN, ESP_UART_PRIO, 0U);
@@ -111,16 +99,25 @@ static void ESP_GPIO_UART_Init(void)
     __HAL_UART_ENABLE_IT(&huart_esp, UART_IT_RXNE);
 }
 
+/**
+  * 函    数：ESP_RingFlush
+  * 参    数：无
+  * 返 回 值：无
+  * 注意事项：任务上下文调用；读写指针归零，丢弃全部已收内容
+  */
 static void ESP_RingFlush(void)
 {
     s_rxHead = 0U;
     s_rxTail = 0U;
 }
 
-/* 把环形缓冲当前内容拍快照成线性字符串,返回长度。
- * ⚠️ 关键:只拷贝、不推进 s_rxTail(不改读写位置)。
- *    因为调用方要反复检查 expect,且一条应答是分多次到达的,
- *    消费掉就找不回前面的内容了。真正清缓冲只有 ESP_RingFlush() */
+/**
+  * 函    数：ESP_RingCopy
+  * 参    数：out  输出缓冲，容量 >= max
+  * 参    数：max  最多拷贝字节数，通常取输出缓冲容量 - 1
+  * 返 回 值：实际拷贝字节数，范围 0~max；不写 '\0'
+  * 注意事项：只拷贝不推进 s_rxTail，否则前半段应答找不回
+  */
 static uint16_t ESP_RingCopy(uint8_t *out, uint16_t max)
 {
     uint16_t n = 0U;
@@ -130,45 +127,52 @@ static uint16_t ESP_RingCopy(uint8_t *out, uint16_t max)
     while ((t != h) && (n < max))
     {
         out[n++] = s_rx[t];
-        t = (uint16_t)((t + 1U) % ESP_RX_BUF_SIZE);
+        t = (uint16_t)((t + 1U) % ESP_RX_BUF_SIZE);     /* 读指针同样按 2KB 环形回卷 */
     }
     return n;
 }
 
 
-/* 应答快照缓冲(BSS,不放任务栈:WifiTask 栈只有 3KB)。
- * 本驱动只有 WifiTask 一个调用者,命令是"发一条等一条"的串行流程,static 安全 */
+/*应答快照放 BSS：WifiTask 栈只有 3KB；命令串行，static 安全*/
 static uint8_t s_snap[ESP_RX_BUF_SIZE];
 
 
-/* ================================ 对外接口 ================================ */
+/*对外接口*/
+/**
+  * 函    数：ESP8266_Init
+  * 参    数：无
+  * 返 回 值：无
+  * 注意事项：调度器启动前或任务上下文调用一次；不探测模块在线
+  */
 void ESP8266_Init(void)
 {
     ESP_GPIO_UART_Init();
     ESP_RingFlush();
 }
 
+/**
+  * 函    数：ESP8266_Cmd
+  * 参    数：cmd  完整命令串，必须自带 "\r\n"，不允许 NULL
+  * 参    数：expect  成功标志子串，如 "OK"，不允许 NULL
+  * 参    数：timeoutMs  最长等待，单位 ms，常用 1000~20000，CWJAP 需 20s
+  * 返 回 值：1 = 已匹配 expect，0 = 超时、参数非法或模块返回 FAIL/ERROR/busy
+  * 注意事项：仅 WifiTask 调用；等待期间每 500ms 上报一次 WDT_TASK_WIFI 心跳
+  */
 uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs)
 {
     uint32_t startTick;
-    uint32_t lastBeat;                  /* V1.1.2 心跳节流基准 */
+    uint32_t lastBeat;                  /* 心跳节流基准 */
 
     if ((cmd == NULL) || (expect == NULL))
     {
         return 0U;
     }
 
-    /* 发命令前清空旧应答,保证只匹配本次响应 */
+    /*发命令前清空旧应答*/
     ESP_RingFlush();
-    /* 阻塞发送。命令只有几十字节,115200 下实际 <10ms,不会撞上 2s 超时,
-     * 所以这一小段没有心跳注入也是安全的(相对下面最长 20s 的等待) */
-    (void)HAL_UART_Transmit(&huart_esp, (uint8_t *)cmd, (uint16_t)strlen(cmd), 2000U);
+    (void)HAL_UART_Transmit(&huart_esp, (uint8_t *)cmd, (uint16_t)strlen(cmd), 2000U);   /* 超时 2s；几十字节 @115200 实际 <10ms */
 
-    /* V1.1.3: 入口无条件上报一次心跳。
-     * V1.1.2 只在等待满 500ms 时才报, 模块秒回(OK<500ms)时整次调用零心跳;
-     * SNTP 轮询这类"1s 延时+快命令"循环会因此无限饿死心跳(真机复现:
-     * 开机自动连接后 SNTP 阶段 WifiTask 被判死, IWDG 反复复位)。
-     * 入口报一次后, 任意调用链的心跳空窗 <= 相邻调用间隔 */
+    /*入口先报一次心跳：否则模块秒回时整次调用零心跳，SNTP 轮询会饿死看门狗*/
     Watchdog_Heartbeat(WDT_TASK_WIFI);
 
     startTick = HAL_GetTick();
@@ -182,26 +186,21 @@ uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs)
         {
             return 1U;
         }
-        /* 模块明确报错时不必等到超时(注意排除命令回显里不可能含 FAIL/ERROR) */
+        /*模块明确报错时不必等到超时*/
         if ((strstr((char *)s_snap, "\r\nFAIL") != NULL) ||
             (strstr((char *)s_snap, "\r\nERROR") != NULL))
         {
             return 0U;
         }
-        /* 模块正忙(上一条命令未结束/正在扫描):快速失败让调用方重试,
-         * 不耗满超时;匹配精确 token,避免与热点名冲突 */
+        /*模块正忙立即返回，精确匹配 token 避免与热点名冲突*/
         if ((strstr((char *)s_snap, "busy p...") != NULL) ||
             (strstr((char *)s_snap, "busy s...") != NULL))
         {
             return 0U;
         }
-        /* 10ms 轮询:再快没意义(115200 下字节间隔约 0.09ms),
-         * 再慢会拖长短命令的响应延迟;同时让出 CPU 给其它任务 */
+        /*10ms 轮询：再快无意义，再慢会拖长响应，同时让出 CPU*/
         osDelay(10);
-        /* V1.1.2: AT 等待最长 20s(CWJAP), 期间本循环不回到任务主循环,
-         * 心跳停发超 3s 会被 MonitorTask 误判卡死而停喂狗(真机复现:
-         * 配网 join 数秒后 IWDG 复位)。每 ~500ms 上报一次心跳。
-         * 注: ESP8266 仅 WifiTask 使用, 故固定以 WDT_TASK_WIFI 身份上报 */
+        /*AT 等待最长 20s，心跳停发超 3s 会被判卡死，每 500ms 补报一次*/
         if ((uint32_t)(HAL_GetTick() - lastBeat) >= 500U)
         {
             Watchdog_Heartbeat(WDT_TASK_WIFI);
@@ -212,6 +211,12 @@ uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs)
     return 0U;
 }
 
+/**
+  * 函    数：ESP8266_FetchTime
+  * 参    数：out  输出时间，不允许 NULL，进入时先整体清 0
+  * 返 回 值：1 = 解析成功；0 = 有应答但无效（未同步或格式不符）；2 = 连 "OK" 都没收到
+  * 注意事项：仅 WifiTask 调用；读 static 快照，不推进环形读指针；时区 8，已是北京时间
+  */
 uint8_t ESP8266_FetchTime(ESP8266_Time_t *out)
 {
     char     weekStr[4]  = {0};
@@ -226,7 +231,7 @@ uint8_t ESP8266_FetchTime(ESP8266_Time_t *out)
     }
     memset(out, 0, sizeof(*out));
 
-    /* 连 OK 都没有:模块掉线/复位/串口不通,调用方应重新连 WiFi */
+    /*连 OK 都没有：模块掉线或复位*/
     if (ESP8266_Cmd("AT+CIPSNTPTIME?\r\n", "OK", 2000U) == 0U)
     {
         return 2U;
@@ -242,16 +247,16 @@ uint8_t ESP8266_FetchTime(ESP8266_Time_t *out)
     }
     p += strlen("+CIPSNTPTIME:");
 
-    /* 未同步时模块返回 1970 年默认值,视为无效 */
+    /*未同步时模块返回 1970 年默认值，视为无效*/
     if (strstr(p, "1970") != NULL)
     {
         return 0U;
     }
 
-    /* 形如: Tue Oct 06 11:30:00 2026 */
+    /*形如：Tue Oct 06 11:30:00 2026*/
     parsed = sscanf(p, "%3s %3s %d %d:%d:%d %d",
                     weekStr, monthStr, &day, &hour, &min, &sec, &year);
-    if (parsed != 7)
+    if (parsed != 7)                    /* 星期/月/日/时/分/秒/年 共 7 个字段，少一个即格式异常 */
     {
         return 0U;
     }
@@ -289,6 +294,13 @@ uint8_t ESP8266_FetchTime(ESP8266_Time_t *out)
     return 1U;
 }
 
+/**
+  * 函    数：ESP8266_CopyResponse
+  * 参    数：out  调用方缓冲，不允许 NULL
+  * 参    数：max  缓冲容量，单位 byte，必须 > 0
+  * 返 回 值：实际拷贝字符数，不含结尾 '\0'；参数非法返回 0
+  * 注意事项：不推进 s_rxTail，可重复调用；最多拷 max-1 字节
+  */
 uint16_t ESP8266_CopyResponse(char *out, uint16_t max)
 {
     uint16_t n;

@@ -1,24 +1,10 @@
 #ifndef __LCD_ILI9341_H
 #define __LCD_ILI9341_H
-/**==================================================================================================================
- *【文件名称】 bsp_LCD_ILI9341.h
- *【功能描述】 2.8寸显示屏驱动
- *==================================================================================================================
- *【硬件平台】 STM32F407 + KEIL5.27 + 2.8寸显示屏_ILI9341
- *
- *【说    明】 1- 显示驱动,本程序配套外部 2.8寸 ILI9341 屏,34PIN 排针对插;
- *             2- 显示内容可以是文本(显示方式:使用自带转模的英文字模数据、使用 Flash 中的字模数据);
- *             3- 若要使用 Flash 中的字模数据,需要加入 bsp_W25Q128.c 参与编译,并在本文件中放开其头文件包含。
- *
- *【更新记录】 2025-12-01  使用新方式读取 LCD 的 ID,读取高度、读取宽度
- *             2024-07-15  优化模板程序,完善代码注释
- *             2024-01-25  从标准库工程移植到 HAL 库工程,使用寄存器方式实现,两种库均可使用
- *             2023-01-12  添加程序中转模文本显示、相关代码及注释
- *             2022-12-30  新建程序,实现显示屏的图片显示等功能
- *
- *【版权说明】 版权归魔女开发板所有,仅供学习,谢谢
- *             https://demoboard.taobao.com
-====================================================================================================================*/
+/* bsp_LCD_ILI9341.h
+ * ILI9341 2.8 寸屏驱动头文件：背光引脚、屏尺寸、RGB565 颜色宏与绘图函数声明。
+ * 硬件：FSMC Bank1/NE1，CS=PD7、RS=PD11(FSMC_A16)、D0~D15 接 PD/PE、WR=PD5、RD=PD4，背光 BL=PA15 高电平点亮。
+ * 注意：GRAM 原生竖屏 240×320，横屏由 0x36 的 MV 位旋转；改方向后触摸必须重新校准。
+ */
 #include "stdlib.h"
 
 #ifdef USE_HAL_DRIVER                         // HAL 库版本
@@ -30,15 +16,12 @@
 #endif
 
 
-/* W25Q128外部Flash字库已裁掉(LVGL使用自带字体,不需要外部中文字库) */
+/* W25Q128 外部字库已裁剪，LVGL 用自带字体 */
 //#include "bsp_W25Q128.h"                      // 外部闪存
 //#include "bsp_24C02.h"                        // 24C02
 
 
-/*****************************************************************************
- ** 背光引脚
- **
-*****************************************************************************/
+/*背光引脚*/
 #ifdef USE_HAL_DRIVER                         // HAL 库版本
 #define LCD_BL_GPIO   GPIOA                   // 背光控制引脚
 #define LCD_BL_PIN    GPIO_PIN_15
@@ -50,8 +33,8 @@
 #endif
 
 
-#define LCD_WIDTH     240                     // 屏幕宽度(竖屏默认)
-#define LCD_HEIGHT    320                     // 屏幕高度(竖屏默认)
+#define LCD_WIDTH     240                     // 竖屏宽度，面板原生列数不可改
+#define LCD_HEIGHT    320                     // 竖屏高度，横屏时与宽度由 LCD_SetDir 互换
 
 
 
@@ -59,7 +42,7 @@
 
 
 
-/******************************* 常用 RGB565 颜色值 *****************************/
+/*常用 RGB565 颜色值*/
 #define      WHITE               0xFFFF       // 白色
 #define      BLACK               0x0000       // 黑色
 #define      GREY                0xF7DE       // 灰色
@@ -88,37 +71,35 @@
 
 
 
-/*****************************************************************************
- ** 全局函数声明
-*****************************************************************************/
+/*全局函数声明*/
 // 初始化
 void LCD_Init(void);                                                                                       // 显示屏初始化
-void LCD_SetDir(uint8_t dir);                                                                              // 设置显示方向; 0-竖屏 3-横屏 5-反向竖屏 6-反向横屏;注意:使用触摸时每次改方向后都要重新校准
+void LCD_SetDir(uint8_t dir);                                                                              // 0=竖屏 1=横屏；改方向后触摸需重新校准
 
-// 主要的基础绘图函数(显示线条、图片、颜色填充等),其他函数都通过对它们的调用来实现
+// 基础绘图：其余函数都由这几个拼出来
 void LCD_DrawPoint(uint16_t x, uint16_t y, uint16_t color);                                                // 画点
 void LCD_Fill(uint16_t startX, uint16_t startY, uint16_t endX, uint16_t endY, uint16_t color);             // 对指定区域填色
-void LCD_String(uint16_t x, uint16_t y, char *pFont, uint8_t size, uint32_t fColor, uint32_t bColor);      // 显示英文字符串(支持英文、数字)
+void LCD_String(uint16_t x, uint16_t y, char *pFont, uint8_t size, uint32_t fColor, uint32_t bColor);      // 显示 ASCII 字符串，size=12/16/24/32
 
-// 扩展1:控制
-void LCD_DisplayOn(void);                                                                                  // 开启显示
-void LCD_DisplayOff(void);                                                                                 // 关闭显示
-uint16_t LCD_GetWidth(void);                                                                               // 获取屏幕宽度(单位:像素)
-uint16_t LCD_GetHeight(void);                                                                              // 获取屏幕高度(单位:像素)
-uint8_t  LCD_GetDir(void);                                                                                 // 获取屏幕当前显示方向
+// 控制类
+void LCD_DisplayOn(void);                                                                                  // 开显示 + 开背光
+void LCD_DisplayOff(void);                                                                                 // 关显示 + 关背光
+uint16_t LCD_GetWidth(void);                                                                               // 当前方向下的宽度(像素)
+uint16_t LCD_GetHeight(void);                                                                              // 当前方向下的高度(像素)
+uint8_t  LCD_GetDir(void);                                                                                 // 0=竖屏 1=横屏
 
-// 扩展2:线条、绘图
+// 线条与图形
 void LCD_Line(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t color);                         // 画线
 void LCD_Circle(uint16_t Xpos, uint16_t Ypos, uint16_t Radius, uint16_t _color);                           // 画圆
-void LCD_Image(uint16_t x, uint16_t y, uint16_t width, uint16_t height, const uint8_t *image);             // 显示图片; 图片需要预先转换成数组数据
+void LCD_Image(uint16_t x, uint16_t y, uint16_t width, uint16_t height, const uint8_t *image);             // 显示图片，数据须预先转成 RGB565 数组
 
-// 扩展3:触摸用
-void LCD_Cross(uint16_t x, uint16_t y, uint16_t len, uint32_t fColor);                                     // 用于触摸屏校准中画十字光标
-uint16_t  LCD_ReadPoint(uint16_t  x, uint16_t  y);
+// 触摸校准用
+void LCD_Cross(uint16_t x, uint16_t y, uint16_t len, uint32_t fColor);                                     // 画十字光标
+uint16_t  LCD_ReadPoint(uint16_t  x, uint16_t  y);                                                         // 读回一个像素的 RGB565 值
 
-// 扩展4:LVGL 移植
-void LCD_DispFlush(uint16_t x, uint16_t y, uint16_t width, uint16_t height, const uint16_t *pData);        // 把指定区域的数据(整块图像)输出到屏,供 LVGL 刷新(DMA 搬运)
-void LCD_SetFlushDoneCallback(void (*cb)(void));                                                            // 注册 DMA 传输完成回调(内部调用 lv_disp_flush_ready)
+// LVGL 刷新
+void LCD_DispFlush(uint16_t x, uint16_t y, uint16_t width, uint16_t height, const uint16_t *pData);        // DMA 整块刷屏，width/height 是右下角坐标
+void LCD_SetFlushDoneCallback(void (*cb)(void));                                                            // 注册 DMA 完成回调，内部触发 lv_disp_flush_ready
 
 
 

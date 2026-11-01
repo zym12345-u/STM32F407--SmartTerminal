@@ -1,36 +1,30 @@
-/**
-  ******************************************************************************
-  * @file    bsp_BH1750.c
-  * @brief   BH1750 环境光强度传感器驱动实现(硬件 I2C1,寄存器直配)
-  *
-  *          说明:
-  *            1. 本工程 HAL 库为精简子集(未包含 stm32f4xx_hal_i2c.c/.h),
-  *               因此 BH1750 的 I2C1 通信直接操作 I2C1 寄存器实现,
-  *               风格与 bsp_LCD_ILI9341.c 中 FSMC 直配寄存器一致。
-  *            2. I2C1 工作在标准模式 100kHz,PB6=SCL、PB7=SDA,开漏+上拉。
-  ******************************************************************************
-  */
+/* bsp_BH1750.c
+ * BH1750 光照传感器驱动：I2C1 寄存器直配，读连续高分辨率模式，输出 float lux。
+ * 硬件：SCL=PB6 / SDA=PB7，开漏上拉，100kHz，7 位地址 0x23。
+ * 注意：上电后第一次转换要等 120ms；总线 BUSY 死锁时发 9 个 SCL 脉冲加 STOP 恢复。
+ */
 #include "bsp_BH1750.h"
 
 
-/* ====================== 全局标志 ====================== */
+/*全局标志*/
 static uint8_t  s_bh1750_ready;   /* 初始化完成标志 */
 
 
-/* ====================== I2C1 寄存器直配 ====================== */
+/*I2C1 寄存器直配*/
 /**
-  * @brief  配置 PB6/PB7 为 I2C1 复用开漏,并初始化 I2C1 外设(100kHz)
-  * @note   APB1 = 42MHz (HCLK 168MHz / 4)
+  * 函    数：I2C1_HardwareInit
+  * 参    数：无
+  * 返 回 值：无
   */
 static void I2C1_HardwareInit(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    /* 1. 开启 GPIOB 与 I2C1 时钟 */
+    /*开 GPIOB 与 I2C1 时钟*/
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_I2C1_CLK_ENABLE();
 
-    /* 2. PB6/PB7 -> I2C1, 开漏, 上拉, 高速 */
+    /*PB6/PB7 复用为 I2C1，开漏上拉*/
     GPIO_InitStruct.Pin       = GPIO_PIN_6 | GPIO_PIN_7;
     GPIO_InitStruct.Mode      = GPIO_MODE_AF_OD;
     GPIO_InitStruct.Pull      = GPIO_PULLUP;
@@ -38,7 +32,7 @@ static void I2C1_HardwareInit(void)
     GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-    /* 3. I2C1 外设配置(先关外设再配寄存器) */
+    /*配 CCR/TRISE 前必须先清 PE，否则新参数不生效*/
     I2C1->CR1  &= ~I2C_CR1_PE;                          /* 关闭 I2C1 */
 
     I2C1->CR2   = 42U;                                  /* FREQ = APB1 = 42MHz */
@@ -52,19 +46,19 @@ static void I2C1_HardwareInit(void)
 
 
 /**
-  * @brief  I2C1 总线恢复:当从机异常把 SDA 钳位在低电平时,
-  *         手动产生 9 个 SCL 脉冲迫使从机释放 SDA,再发 STOP。
-  * @note   调用前 I2C1 可能已死锁(BUSY 永远置位)。
+  * 函    数：I2C1_BusRecovery
+  * 参    数：无
+  * 返 回 值：无
   */
 static void I2C1_BusRecovery(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
     uint32_t i;
 
-    /* 1. 关闭 I2C1 外设 */
+    /*关外设*/
     I2C1->CR1 &= ~I2C_CR1_PE;
 
-    /* 2. PB6(SCL)/PB7(SDA) 切回 GPIO 开漏输出 */
+    /*SCL/SDA 切回 GPIO 开漏输出*/
     GPIO_InitStruct.Pin   = GPIO_PIN_6 | GPIO_PIN_7;
     GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_OD;
     GPIO_InitStruct.Pull  = GPIO_PULLUP;
@@ -75,7 +69,7 @@ static void I2C1_BusRecovery(void)
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
 
-    /* 3. 产生最多 9 个 SCL 脉冲,直到 SDA 被释放 */
+    /*最多 9 个 SCL 脉冲：8 位数据 + 1 个应答位*/
     for (i = 0; i < 9; i++)
     {
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);   /* SCL 低 */
@@ -86,7 +80,7 @@ static void I2C1_BusRecovery(void)
             break;   /* SDA 已被从机释放 */
     }
 
-    /* 4. 产生 STOP 条件: SDA 低→高(在 SCL 高期间) */
+    /*SCL 高期间 SDA 低→高，构成 STOP*/
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);   /* SDA 低 */
     for (volatile uint32_t d = 0; d < 100; d++) { }
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);     /* SCL 高 */
@@ -94,17 +88,15 @@ static void I2C1_BusRecovery(void)
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);     /* SDA 高 = STOP */
     for (volatile uint32_t d = 0; d < 100; d++) { }
 
-    /* 5. 重新初始化 I2C1 外设 */
+    /*重新初始化 I2C1*/
     I2C1_HardwareInit();
 }
 
 
 /**
-  * @brief  I2C1 主机发送 N 字节
-  * @param  addr   从机 8 位地址(已左移,含 W=0)
-  * @param  pData  数据缓冲区
-  * @param  len    字节数
-  * @retval 0-成功,1-失败(已尝试总线恢复)
+  * 函    数：I2C1_MasterWrite
+  * 参    数：addr 8 位从机地址；pData 待发数据；len 字节数 1~255
+  * 返 回 值：0=成功，1=超时(已尝试总线恢复)
   */
 static uint8_t I2C1_MasterWrite(uint8_t addr, const uint8_t *pData, uint8_t len)
 {
@@ -149,11 +141,9 @@ static uint8_t I2C1_MasterWrite(uint8_t addr, const uint8_t *pData, uint8_t len)
 
 
 /**
-  * @brief  I2C1 主机接收 N 字节
-  * @param  addr   从机 8 位地址(已左移)
-  * @param  pData  接收缓冲区
-  * @param  len    字节数
-  * @retval 0-成功,1-失败
+  * 函    数：I2C1_MasterRead
+  * 参    数：addr 8 位从机地址；pData 接收缓冲；len 字节数，传 0 直接失败
+  * 返 回 值：0=成功，1=参数非法或某一步超时(已尝试总线恢复)
   */
 static uint8_t I2C1_MasterRead(uint8_t addr, uint8_t *pData, uint8_t len)
 {
@@ -180,7 +170,7 @@ static uint8_t I2C1_MasterRead(uint8_t addr, uint8_t *pData, uint8_t len)
 
     if (len == 1)
     {
-        /* 单字节接收:清 ACK,再读 SR1/SR2 清 ADDR */
+        /*单字节：先清 ACK，再读 SR1/SR2 清 ADDR*/
         I2C1->CR1 &= ~I2C_CR1_ACK;
         (void)I2C1->SR1; (void)I2C1->SR2;
         I2C1->CR1 |= I2C_CR1_STOP;
@@ -211,8 +201,13 @@ static uint8_t I2C1_MasterRead(uint8_t addr, uint8_t *pData, uint8_t len)
 }
 
 
-/* ====================== BH1750 对外接口 ====================== */
+/*BH1750 对外接口*/
 
+/**
+  * 函    数：BH1750_Init
+  * 参    数：无
+  * 返 回 值：BH1750_OK=成功，BH1750_ERROR=重试 3 次仍失败
+  */
 BH1750_Status_t BH1750_Init(void)
 {
     uint8_t cmd;
@@ -220,28 +215,28 @@ BH1750_Status_t BH1750_Init(void)
 
     s_bh1750_ready = 0;
 
-    /* 1. 初始化 I2C1 硬件 */
+    /*初始化 I2C1 硬件*/
     I2C1_HardwareInit();
 
-    /* 整个初始化序列最多重试 BH1750_RETRY_CNT 次 */
+    /*整条序列最多重试 BH1750_RETRY_CNT 次*/
     for (retry = 0; retry < BH1750_RETRY_CNT; retry++)
     {
-        /* 2. 上电 */
+        /*上电*/
         cmd = BH1750_CMD_POWER_ON;
-        if (I2C1_MasterWrite(BH1750_I2C_ADDR, &cmd, 1) != 0)
+        if (I2C1_MasterWrite(BH1750_I2C_ADDR, &cmd, 1) != 0)                /* 7 位 0x23 左移 1 位 = 0x46(W) */
             continue;
 
-        /* 3. 复位(清数据寄存器) */
+        /*复位清数据寄存器，不做会读到上次的残留值*/
         cmd = BH1750_CMD_RESET;
         if (I2C1_MasterWrite(BH1750_I2C_ADDR, &cmd, 1) != 0)
             continue;
 
-        /* 4. 配置为连续高分辨率模式(1lux,转换时间≤120ms) */
+        /*连续高分辨率：1 lux，转换 ≤120ms*/
         cmd = BH1750_CMD_CONT_H_MODE;
         if (I2C1_MasterWrite(BH1750_I2C_ADDR, &cmd, 1) != 0)
             continue;
 
-        /* 5. 等待第一次转换完成 */
+        /*等第一次转换*/
         HAL_Delay(120);
 
         s_bh1750_ready = 1;
@@ -252,6 +247,19 @@ BH1750_Status_t BH1750_Init(void)
 }
 
 
+/**
+  * 函    数：BH1750_Read
+  * 参    数：data  输出，lux 单位 lux(0~54612)，is_valid 由本函数置 1
+  * 返 回 值：BH1750_OK=成功，BH1750_ERROR=data 为空、未初始化或重试 3 次仍失败
+  */
+/* ---------------------------------------------------------------------------
+ * 连续高分辨率模式数据(只读)：
+ *   名称   类型/位宽  含义               单位/范围     谁写/谁读
+ *   DataH  uint8      高 8 位            0x00~0xFF     BH1750 写 / 主机读
+ *   DataL  uint8      低 8 位            0x00~0xFF     BH1750 写 / 主机读
+ *   raw    uint16     (DataH<<8)|DataL   0~65535       主机算
+ *   lux    float      raw / 1.2          0~54612      主机算
+ * ------------------------------------------------------------------------- */
 BH1750_Status_t BH1750_Read(BH1750_Data_t *data)
 {
     uint8_t  buf[2];
@@ -266,20 +274,20 @@ BH1750_Status_t BH1750_Read(BH1750_Data_t *data)
     if (!s_bh1750_ready)
         return BH1750_ERROR;
 
-    /* 读取最多重试 BH1750_RETRY_CNT 次,排除偶发干扰 */
+    /*重试 3 次，过滤偶发干扰*/
     for (retry = 0; retry < BH1750_RETRY_CNT; retry++)
     {
-        /* 连续模式下直接读取 2 字节数据 */
-        if (I2C1_MasterRead(BH1750_I2C_ADDR, buf, 2) == 0)
+        /*连续模式下直接读 2 字节*/
+        if (I2C1_MasterRead(BH1750_I2C_ADDR, buf, 2) == 0)                  /* 0x47(R): 直接读最近一次转换结果 */
         {
             raw  = ((uint16_t)buf[0] << 8) | buf[1];
-            data->lux      = (float)raw / 1.2f;    /* BH1750 数据手册公式 */
+            data->lux      = (float)raw / 1.2f;    /* 换算系数 1.2 出自 BH1750 数据手册 */
             data->is_valid = 1;
             return BH1750_OK;
         }
     }
 
-    /* 多次读取失败,尝试重新初始化传感器 */
+    /*读失败清标志，下次必须重新 Init*/
     s_bh1750_ready = 0;
     return BH1750_ERROR;
 }

@@ -1,14 +1,8 @@
-/**
-  ******************************************************************************
-  * @file    bsp_W25Q128.c
-  * @brief   W25Q128 串行 NOR Flash(16MB, SPI1)驱动实现 —— V1.2 存储阶段
-  *
-  *          里程碑 M1/M1.5 验收口径:
-  *            M1   : 0x9F 读到 0xEF4018, 且 0x90 读到 0xEF17(交叉验证)
-  *            M1.5 : 自测扇区 擦除->页编程->回读校验 通过, 并打印实测耗时
-  *                   (本地无 W25Q128 数据手册, 用实测值回填巡检草案时序表)
-  ******************************************************************************
-  */
+/* bsp_W25Q128.c
+ * W25Q128 SPI Flash 驱动：初始化与 ID 校验、读数据、4KB 扇区擦除、256B 页编程、BUSY 等待、自测。
+ * 硬件：SPI1 = PA5/PA6/PA7，CS = PC13；容量 16MB，最小擦除单位 4KB。
+ * 注意：一次最多写 256 字节且不能跨页；擦除和写入前必须先发写使能；>= 0x00A00000 字库区一律拒绝擦写。
+ */
 #include "bsp_W25Q128.h"
 #include "bsp_IWDG.h"       /* Watchdog_Heartbeat */
 #include "usart.h"          /* UART_Printf */
@@ -17,23 +11,21 @@
 #include "task.h"
 #include "cmsis_os2.h"      /* osDelay / osKernelGetState */
 
-/* ---- 命令字 ---- */
-#define W25Q_CMD_WRITE_ENABLE   0x06U
-#define W25Q_CMD_READ_SR1       0x05U
-#define W25Q_CMD_PAGE_PROGRAM   0x02U
-#define W25Q_CMD_READ_DATA      0x03U
+/*命令字*/
+#define W25Q_CMD_WRITE_ENABLE   0x06U   /* 写使能 06h，把 SR 的 WEL 置 1，擦/写前必发 */
+#define W25Q_CMD_READ_SR1       0x05U   /* 读状态寄存器 1，bit0=BUSY，bit1=WEL */
+#define W25Q_CMD_PAGE_PROGRAM   0x02U   /* 页编程 02h，一次最多 256 字节且不可跨页 */
+#define W25Q_CMD_READ_DATA      0x03U   /* 读数据 03h，后跟 24 位地址，内部地址自动 +1 */
 #define W25Q_CMD_SECTOR_ERASE   0x20U   /* 4KB */
-#define W25Q_CMD_DEVICE_ID      0x90U
-#define W25Q_CMD_JEDEC_ID       0x9FU
+#define W25Q_CMD_DEVICE_ID      0x90U   /* 读厂商/设备 ID 90h，需先发 3 字节假地址 */
+#define W25Q_CMD_JEDEC_ID       0x9FU   /* 读 JEDEC ID 9Fh，返回 EF/40/18 三字节 */
 
-/* ---- 超时(2026-10-20 真机实测回填: 4KB 擦除 31~35ms, 256B 编程 2ms) ----
- * 取实测值的 ~10x 余量, 既比原来的 1000/100ms 收紧 2.5~10 倍,
- * 又给温度/工艺偏差留足空间; 仅在芯片异常时触发 */
+/*超时：按实测值留约 10 倍余量*/
 #define W25Q_ERASE_TIMEOUT_MS   400U    /* 实测 31~35ms, 取 400ms (~11x) */
 #define W25Q_PROG_TIMEOUT_MS    10U     /* 实测 2ms, 取 10ms (5x) */
 #define W25Q_SPI_BYTE_TIMEOUT   100U    /* 单字节 HAL 超时(10.5MHz 下 1 字节 <1us) */
 
-/* ---- CS(PC13) ---- */
+/*CS = PC13，软件 NSS*/
 #define W25Q_CS_LOW()    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET)
 #define W25Q_CS_HIGH()   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET)
 
@@ -41,8 +33,12 @@ static SPI_HandleTypeDef s_hspi1;
 static uint8_t           s_initOk = 0U;
 static uint32_t          s_lastBusyMs = 0U;   /* 最近一次 WaitReady 实测耗时 */
 
-/* 单字节收发; HAL 出错返回 0xFF(等效 MISO 悬空的全 1, 让上层走超时/失配路径,
- * 而不是把 0x00 误认为"BUSY 已清零") */
+/**
+  * 函    数：W25Q_SpiByte
+  * 参    数：tx  要发出的字节，范围 0x00~0xFF；读命令时填 0xFF
+  * 返 回 值：实际收到的字节；HAL 失败返回 0xFF
+  * 注意事项：调用前必须已拉低 CS；失败返回 0xFF，避免把 0x00 当成 BUSY 已清零
+  */
 static uint8_t W25Q_SpiByte(uint8_t tx)
 {
     uint8_t rx = 0xFFU;
@@ -53,11 +49,12 @@ static uint8_t W25Q_SpiByte(uint8_t tx)
     return rx;
 }
 
-/* 驱动内统一时基: DWT 周期计数(ms), 不依赖 HAL tick/中断/RTOS。
- * 背景(V1.2 两次黑屏): boot 阶段(调度器启动前)HAL tick 实测不前进,
- * HAL_Delay 死等/HAL_GetTick 超时失效, 两次上电实证; 故本驱动计时一律走 DWT。
- * DWT 开 TRCENA 后自由计数, 32 位 @168MHz 约 25.5s 回绕, 无符号差分天然免疫;
- * 懒使能, 重复调用无副作用 */
+/**
+  * 函    数：W25Q_Millis
+  * 参    数：无
+  * 返 回 值：自复位起的毫秒数，32 位 @168MHz 约 25.5s 回绕，调用方用无符号差分算间隔
+  * 注意事项：走 DWT 周期计数，不依赖 HAL tick；boot 阶段调度器未启动时 HAL_GetTick 不前进
+  */
 static uint32_t W25Q_Millis(void)
 {
     if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U)
@@ -65,20 +62,27 @@ static uint32_t W25Q_Millis(void)
         CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
         DWT->CTRL      |= DWT_CTRL_CYCCNTENA_Msk;
     }
-    return DWT->CYCCNT / (SystemCoreClock / 1000U);
+    return DWT->CYCCNT / (SystemCoreClock / 1000U);   /* 每毫秒 = SystemCoreClock/1000 个周期 */
 }
 
-/* boot 阶段专用延时: DWT 忙等(时基见 W25Q_Millis)。不清零 CYCCNT——
- * 保持全时单调, WaitReady 的超时判断与耗时测量共用同一时基 */
+/**
+  * 函    数：W25Q_DelayMsBoot
+  * 参    数：ms  延时长度，单位 ms，本工程只用 300
+  * 返 回 值：无
+  * 注意事项：DWT 忙等，不清零 CYCCNT，与 WaitReady 共用同一时基
+  */
 static void W25Q_DelayMsBoot(uint32_t ms)
 {
     uint32_t start = W25Q_Millis();
     while ((W25Q_Millis() - start) < ms) { }
 }
 
-/* 等待 1ms: RTOS 下让出 CPU(osDelay); boot 阶段 DWT 忙等。
- * 两个禁区: 不能退化为 osDelay(boot 无当前 TCB 会崩),
- *           不能退化为 HAL_Delay(boot 期 HAL tick 不走, 会死等) */
+/**
+  * 函    数：W25Q_Delay1ms
+  * 参    数：无，固定 1ms
+  * 返 回 值：无
+  * 注意事项：boot 阶段不能走 osDelay（无当前 TCB 会崩）或 HAL_Delay（tick 不走会死等）
+  */
 static void W25Q_Delay1ms(void)
 {
     if (osKernelGetState() == osKernelRunning)
@@ -91,6 +95,12 @@ static void W25Q_Delay1ms(void)
     }
 }
 
+/**
+  * 函    数：W25Q128_ReadStatus1
+  * 参    数：无
+  * 返 回 值：状态字节；bit0 = BUSY，bit1 = WEL
+  * 注意事项：0x05 + 1 字节回读，期间 CS 保持拉低；本函数不等待 BUSY
+  */
 uint8_t W25Q128_ReadStatus1(void)
 {
     uint8_t st;
@@ -101,12 +111,18 @@ uint8_t W25Q128_ReadStatus1(void)
     return st;
 }
 
+/**
+  * 函    数：W25Q128_WaitReady
+  * 参    数：timeoutMs  最长等待，单位 ms；擦除传 400，编程传 10
+  * 返 回 值：HAL_OK = BUSY 已清零，HAL_TIMEOUT = 超时仍未空闲
+  * 注意事项：入口必报一次 WDT_TASK_STORAGE 心跳，循环内每轮补报；实测耗时写入 s_lastBusyMs
+  */
 HAL_StatusTypeDef W25Q128_WaitReady(uint32_t timeoutMs)
 {
     uint8_t  st;
     uint32_t t0 = W25Q_Millis();
 
-    /* ① 入口必报(D3 教训: 快响应路径若只在循环里报, 整次调用零心跳) */
+    /*入口必报：只在循环里报时，快响应路径全程零心跳*/
     Watchdog_Heartbeat(WDT_TASK_STORAGE);
 
     W25Q_CS_LOW();
@@ -120,20 +136,32 @@ HAL_StatusTypeDef W25Q128_WaitReady(uint32_t timeoutMs)
             s_lastBusyMs = W25Q_Millis() - t0;
             return HAL_OK;
         }
-        Watchdog_Heartbeat(WDT_TASK_STORAGE);   /* ② 长等待节流补报 */
+        Watchdog_Heartbeat(WDT_TASK_STORAGE);   /* 长等待期间补报心跳 */
         W25Q_Delay1ms();
     } while ((W25Q_Millis() - t0) < timeoutMs);
 
     W25Q_CS_HIGH();
     s_lastBusyMs = W25Q_Millis() - t0;
-    return HAL_TIMEOUT;                         /* ③ 必须有超时, 不死等 */
+    return HAL_TIMEOUT;                         /* 超时返回，不死等 */
 }
 
+/**
+  * 函    数：W25Q128_GetLastBusyMs
+  * 参    数：无
+  * 返 回 值：最近一次 WaitReady 的等待时长，单位 ms
+  * 注意事项：只由 WaitReady 写，32 位读天然原子，不必加锁
+  */
 uint32_t W25Q128_GetLastBusyMs(void)
 {
     return s_lastBusyMs;
 }
 
+/**
+  * 函    数：W25Q_WriteEnable
+  * 参    数：无
+  * 返 回 值：无
+  * 注意事项：必须在 BUSY=0 时发 06h，忙时会被忽略且不报错；调用前先 WaitReady
+  */
 static void W25Q_WriteEnable(void)
 {
     W25Q_CS_LOW();
@@ -141,6 +169,12 @@ static void W25Q_WriteEnable(void)
     W25Q_CS_HIGH();
 }
 
+/**
+  * 函    数：W25Q128_ReadJedecId
+  * 参    数：无
+  * 返 回 值：0x00EF4018 形式；链路异常时可能读到 0x00FFFF 或 0xFFFFFF
+  * 注意事项：读命令不置 BUSY，无需写使能和 WaitReady
+  */
 uint32_t W25Q128_ReadJedecId(void)
 {
     uint32_t id;
@@ -153,6 +187,12 @@ uint32_t W25Q128_ReadJedecId(void)
     return id;
 }
 
+/**
+  * 函    数：W25Q128_ReadDeviceId
+  * 参    数：无
+  * 返 回 值：0xEF17 形式；异常时可能为 0x0000 或 0xFFFF
+  * 注意事项：0x90 需先发 3 字节假地址，本芯片忽略地址；读命令不置 BUSY
+  */
 uint16_t W25Q128_ReadDeviceId(void)
 {
     uint16_t id;
@@ -167,9 +207,14 @@ uint16_t W25Q128_ReadDeviceId(void)
     return id;
 }
 
-/* 读数据:03h + 24 位地址,之后每多收一个字节,芯片内部地址就自动 +1,
- * 可以一口气读完整片,中间不用重发命令 —— 这是 SPI NOR 的特性。
- * 读不需要写使能,也不会置 BUSY,所以这里没有 WaitReady */
+/**
+  * 函    数：W25Q128_ReadData
+  * 参    数：addr  起始字节地址，24 位，范围 0x000000~0xFFFFFF
+  * 参    数：pData  输出缓冲首地址，不允许 NULL
+  * 参    数：num  读取字节数，范围 1~到芯片末尾的剩余字节
+  * 返 回 值：HAL_OK = 读完，HAL_ERROR = 驱动未初始化
+  * 注意事项：芯片内部地址自增，可一口气读完；addr+num 不得越过 16MB，由调用方保证
+  */
 HAL_StatusTypeDef W25Q128_ReadData(uint32_t addr, uint8_t *pData, uint32_t num)
 {
     uint32_t i;
@@ -191,6 +236,12 @@ HAL_StatusTypeDef W25Q128_ReadData(uint32_t addr, uint8_t *pData, uint32_t num)
     return HAL_OK;
 }
 
+/**
+  * 函    数：W25Q128_SectorErase4K
+  * 参    数：addr  字节地址，落点所在 4KB 扇区被整体擦成 0xFF
+  * 返 回 值：HAL_OK = 擦完，HAL_TIMEOUT = 等待超时，HAL_ERROR = 未初始化或落在 GBK 字库区
+  * 注意事项：固定顺序 WaitReady -> 06h -> 20h -> WaitReady
+  */
 HAL_StatusTypeDef W25Q128_SectorErase4K(uint32_t addr)
 {
     HAL_StatusTypeDef st;
@@ -199,8 +250,7 @@ HAL_StatusTypeDef W25Q128_SectorErase4K(uint32_t addr)
     {
         return HAL_ERROR;
     }
-    /* 0x00A00000 以上是 GBK 字库区,一律拒绝擦除
-     * (字模是外部烧进去的,擦掉就没了;读不受限制) */
+    /* >= 字库区的擦写一律拒绝：字模是外部烧的，擦掉就没了*/
     if (addr >= W25Q128_GBK_BASE)
     {
         UART_Printf("[W25Q] erase 0x%08lX rejected: GBK font region\r\n",
@@ -208,14 +258,7 @@ HAL_StatusTypeDef W25Q128_SectorErase4K(uint32_t addr)
         return HAL_ERROR;
     }
 
-    /* 这里有两次 WaitReady,各等一件事:
-     *   第 1 次(下面)—— 等上一次编程/擦除结束,确保芯片空闲;
-     *   第 2 次(函数末尾)—— 等本次擦除真正完成。
-     * ⚠️ 顺序必须是"先等空闲、再发 06h 写使能":芯片 BUSY 期间只接受
-     * 读状态寄存器类命令,06h 会被直接忽略且不报错,接着的擦除命令因
-     * WEL=0 被丢弃 —— 表现为"擦除静默失败、函数仍返回 OK"。
-     * 原先写成 06h 在前,靠调用方保证进来时已空闲,属隐式契约;对调后
-     * 自包含,不再依赖调用顺序 */
+    /*先等空闲再发 06h：BUSY 期间 06h 被忽略，擦除因 WEL=0 被丢弃，表现为静默失败*/
     st = W25Q128_WaitReady(W25Q_ERASE_TIMEOUT_MS);   /* 先等前一次操作完成 */
     if (st != HAL_OK)
     {
@@ -233,6 +276,14 @@ HAL_StatusTypeDef W25Q128_SectorErase4K(uint32_t addr)
     return W25Q128_WaitReady(W25Q_ERASE_TIMEOUT_MS); /* 等擦除完成, 耗时入 s_lastBusyMs */
 }
 
+/**
+  * 函    数：W25Q128_PageProgram
+  * 参    数：addr  起始地址，整段必须在同一 256B 页内
+  * 参    数：pData  数据首地址，不允许 NULL
+  * 参    数：len  字节数，范围 1~256，且页内偏移 + len <= 256
+  * 返 回 值：HAL_OK = 编程完成，HAL_TIMEOUT = 等待超时，HAL_ERROR = 未初始化或参数越界
+  * 注意事项：NOR 只能把 1 写成 0，写前该区域必须已擦除
+  */
 HAL_StatusTypeDef W25Q128_PageProgram(uint32_t addr, const uint8_t *pData, uint16_t len)
 {
     HAL_StatusTypeDef st;
@@ -242,9 +293,9 @@ HAL_StatusTypeDef W25Q128_PageProgram(uint32_t addr, const uint8_t *pData, uint1
     {
         return HAL_ERROR;
     }
-    /* 页编程单次 <=256B 且不可跨页(跨页会回卷到页首, 静默写错位置) */
+    /*单次 <=256B 且不跨页，跨页会回卷到页首静默写错*/
     if ((len == 0U) || (len > W25Q128_PAGE_SIZE) ||
-        ((addr & (W25Q128_PAGE_SIZE - 1U)) + (uint32_t)len) > W25Q128_PAGE_SIZE)
+        ((addr & (W25Q128_PAGE_SIZE - 1U)) + (uint32_t)len) > W25Q128_PAGE_SIZE)   /* 页内偏移 + 长度不得越过 256B 页边界 */
     {
         return HAL_ERROR;
     }
@@ -255,8 +306,7 @@ HAL_StatusTypeDef W25Q128_PageProgram(uint32_t addr, const uint8_t *pData, uint1
         return HAL_ERROR;
     }
 
-    /* 同 SectorErase4K: 必须先等空闲再发 06h, 否则忙时 06h 被忽略,
-     * 编程命令因 WEL=0 被丢弃而静默失败 */
+    /*同擦除：先等空闲再发 06h，忙时 06h 被忽略则静默失败*/
     st = W25Q128_WaitReady(W25Q_PROG_TIMEOUT_MS);
     if (st != HAL_OK)
     {
@@ -278,11 +328,17 @@ HAL_StatusTypeDef W25Q128_PageProgram(uint32_t addr, const uint8_t *pData, uint1
     return W25Q128_WaitReady(W25Q_PROG_TIMEOUT_MS);
 }
 
+/**
+  * 函    数：W25Q128_Init
+  * 参    数：无
+  * 返 回 值：1 = 初始化且两项 ID 校验通过，0 = 初始化或 ID 校验失败
+  * 注意事项：boot 阶段调用，上电延时走 DWT 300ms；只应调用一次，失败会打印实读 ID
+  */
 uint8_t W25Q128_Init(void)
 {
     GPIO_InitTypeDef gpio = {0};
 
-    /* CS = PC13 推挽输出上拉, 先置高(不选中) */
+    /*CS = PC13，先置高不选中*/
     __HAL_RCC_GPIOC_CLK_ENABLE();
     HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
     gpio.Pin   = GPIO_PIN_13;
@@ -291,7 +347,7 @@ uint8_t W25Q128_Init(void)
     gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     HAL_GPIO_Init(GPIOC, &gpio);
 
-    /* SCK=PA5 / MISO=PA6 / MOSI=PA7, AF5 */
+    /*SCK=PA5 / MISO=PA6 / MOSI=PA7，AF5*/
     __HAL_RCC_GPIOA_CLK_ENABLE();
     gpio.Pin       = GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7;
     gpio.Mode      = GPIO_MODE_AF_PP;
@@ -299,10 +355,9 @@ uint8_t W25Q128_Init(void)
     gpio.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
     gpio.Alternate = GPIO_AF5_SPI1;
     HAL_GPIO_Init(GPIOA, &gpio);
-    UART_Printf("[W25Q] init: gpio ok\r\n");      /* 分段定位留痕(V1.2 黑屏) */
+    UART_Printf("[W25Q] init: gpio ok\r\n");      /* 分段留痕：定位卡在哪一步 */
 
-    /* SPI1: 与厂商一致的 Mode 3(CPOL=1/CPHA=2edge), 8bit MSB 软 NSS;
-     * 里程碑先跑 10.5MHz(84MHz/8), 链路通后再逐级试 21M/42M */
+    /*Mode 3、8bit、MSB、软件 NSS；APB2 84MHz / 8 = 10.5MHz*/
     __HAL_RCC_SPI1_CLK_ENABLE();
     s_hspi1.Instance               = SPI1;
     s_hspi1.Init.Mode              = SPI_MODE_MASTER;
@@ -311,7 +366,7 @@ uint8_t W25Q128_Init(void)
     s_hspi1.Init.CLKPolarity       = SPI_POLARITY_HIGH;
     s_hspi1.Init.CLKPhase          = SPI_PHASE_2EDGE;
     s_hspi1.Init.NSS               = SPI_NSS_SOFT;
-    s_hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
+    s_hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;   /* APB2 84MHz / 8 = 10.5MHz，链路通后再提速 */
     s_hspi1.Init.FirstBit          = SPI_FIRSTBIT_MSB;
     s_hspi1.Init.TIMode            = SPI_TIMODE_DISABLE;
     s_hspi1.Init.CRCCalculation    = SPI_CRCCALCULATION_DISABLE;
@@ -321,14 +376,13 @@ uint8_t W25Q128_Init(void)
         s_initOk = 0U;
         return 0U;
     }
-    UART_Printf("[W25Q] init: spi ok\r\n");       /* 分段定位留痕(V1.2 黑屏) */
+    UART_Printf("[W25Q] init: spi ok\r\n");       /* 分段留痕：定位卡在哪一步 */
 
-    /* 上电稳定延时(厂商注释: 避免烧录时多次复位导致擦写过程错误);
-     * 用 DWT 忙等而非 HAL_Delay: 消除 boot 阶段对 HAL tick 的依赖(见函数注释) */
+    /*上电稳定延时 300ms，DWT 忙等不依赖 HAL tick*/
     W25Q_DelayMsBoot(300U);
-    UART_Printf("[W25Q] init: delay ok\r\n");     /* 分段定位留痕(V1.2 黑屏) */
+    UART_Printf("[W25Q] init: delay ok\r\n");     /* 分段留痕：定位卡在哪一步 */
 
-    /* M1 验收: 两条命令交叉验证, 全对才算链路通 */
+    /*两条 ID 命令交叉验证，全对才算链路通*/
     {
         uint32_t jedec = W25Q128_ReadJedecId();
         uint16_t dev   = W25Q128_ReadDeviceId();
@@ -348,15 +402,21 @@ uint8_t W25Q128_Init(void)
     }
     else
     {
-        /* 全 1: MISO 悬空/CS 没拉上; 全 0: MISO 短路/时序错 —— 按此方向查线 */
+        /*全 1 = MISO 悬空或 CS 没拉高；全 0 = MISO 短路或时序错*/
         UART_Printf("[W25Q] M1 FAIL: check CS=PC13 / PA5-7 wiring & Mode3\r\n");
     }
     return s_initOk;
 }
 
+/**
+  * 函    数：W25Q128_SelfTest
+  * 参    数：无
+  * 返 回 值：无，结果通过串口打印 PASS/FAIL
+  * 注意事项：测试地址 0x009FF000，会破坏该扇区原数据；缓存必须 static（boot 阶段栈只有 1KB）
+  */
 void W25Q128_SelfTest(void)
 {
-    /* 测试扇区: 用户区最后一个扇区(0x009FF000), 避开 0x00A00000 起的字库区 */
+    /*测试扇区：用户区最后一个扇区，避开 0x00A00000 字库区*/
     const uint32_t  testAddr = W25Q128_GBK_BASE - W25Q128_SECTOR_SIZE;
     static uint8_t  s_wr[W25Q128_PAGE_SIZE];   /* static: boot 阶段 MSP 栈只有 1KB */
     static uint8_t  s_rd[W25Q128_PAGE_SIZE];
@@ -372,10 +432,10 @@ void W25Q128_SelfTest(void)
 
     for (i = 0U; i < W25Q128_PAGE_SIZE; i++)
     {
-        s_wr[i] = (uint8_t)i;
+        s_wr[i] = (uint8_t)i;       /* 0x00~0xFF 递增图案：回读错位/翻转都能一眼看出 */
     }
 
-    /* 1. 擦除 4KB, 打印实测耗时 */
+    /*擦除 4KB*/
     st = W25Q128_SectorErase4K(testAddr);
     UART_Printf("[W25Q] self-test: erase 4KB @0x%08lX -> %s, busy %lu ms\r\n",
                 (unsigned long)testAddr, (st == HAL_OK) ? "OK" : "TIMEOUT",
@@ -385,7 +445,7 @@ void W25Q128_SelfTest(void)
         return;
     }
 
-    /* 2. 擦除态校验(应全 0xFF) */
+    /*擦除态应全 0xFF*/
     (void)W25Q128_ReadData(testAddr, s_rd, W25Q128_PAGE_SIZE);
     for (i = 0U; i < W25Q128_PAGE_SIZE; i++)
     {
@@ -398,7 +458,7 @@ void W25Q128_SelfTest(void)
     UART_Printf("[W25Q] self-test: erased page all-0xFF? %s\r\n",
                 (eraseFF != 0U) ? "YES" : "NO");
 
-    /* 3. 页编程 256B, 打印实测耗时 */
+    /*页编程 256B*/
     st = W25Q128_PageProgram(testAddr, s_wr, W25Q128_PAGE_SIZE);
     UART_Printf("[W25Q] self-test: program 256B -> %s, busy %lu ms\r\n",
                 (st == HAL_OK) ? "OK" : "TIMEOUT",
@@ -408,7 +468,7 @@ void W25Q128_SelfTest(void)
         return;
     }
 
-    /* 4. 回读比对 */
+    /*回读比对*/
     (void)W25Q128_ReadData(testAddr, s_rd, W25Q128_PAGE_SIZE);
     for (i = 0U; i < W25Q128_PAGE_SIZE; i++)
     {
@@ -422,14 +482,12 @@ void W25Q128_SelfTest(void)
                 (i == W25Q128_PAGE_SIZE) ? "matched" : "MISMATCH");
 }
 
-/* ====================== M2: GBK 字库存在性检测 ======================
- * 字库区: 0x00A00000 ~ 0x01000000 (后 6MB), 厂商约定烧录宋体 12/16/24/32 字模。
- * 本函数不解析字库格式(留待外挂字库适配阶段), 只做"存在性 + 结构合理性"检测:
- *   ① 首 16 字节非全 0xFF(擦除态) → 有数据
- *   ② 用户区末尾字节(0x009FFFFF)为 0xFF → 分区边界干净, 字库区不是误写
- *   ③ 6MB 区间内 6 个采样点非全 0xFF → 数据覆盖整个区域(非零星字节)
- *   ④ 首 256 字节中 0xFF 占比 < 80% → 非擦除态残留, 像真实字模数据
- * 通过返回 1, 否则 0; 全程打印采样值便于人工核对 */
+/**
+  * 函    数：W25Q128_CheckGBKFont
+  * 参    数：无
+  * 返 回 值：1 = 判定有字库，0 = 未初始化或判定无字库
+  * 注意事项：全程只读；s_buf 为 static，避免占用 boot 阶段 1KB 栈
+  */
 uint8_t W25Q128_CheckGBKFont(void)
 {
     static uint8_t s_buf[256U];     /* static: boot 阶段 MSP 栈仅 1KB */
@@ -447,7 +505,7 @@ uint8_t W25Q128_CheckGBKFont(void)
         return 0U;
     }
 
-    /* ① 首 16 字节: 全 0xFF = 擦除态 = 无字库 */
+    /*首 16 字节全 0xFF = 擦除态 = 无字库*/
     (void)W25Q128_ReadData(W25Q128_GBK_BASE, head16, 16U);
     UART_Printf("[W25Q] GBK first 16B @0x%08lX:",
                 (unsigned long)W25Q128_GBK_BASE);
@@ -463,12 +521,12 @@ uint8_t W25Q128_CheckGBKFont(void)
         return 0U;
     }
 
-    /* ② 分区边界: 用户区最后一字节应为 0xFF(未被字库数据覆盖) */
+    /*分区边界：用户区最后一字节应为 0xFF*/
     (void)W25Q128_ReadData(W25Q128_GBK_BASE - 1U, &boundary, 1U);
     UART_Printf("[W25Q] GBK boundary byte @0x%08lX = 0x%02X (expect 0xFF)\r\n",
                 (unsigned long)(W25Q128_GBK_BASE - 1U), boundary);
 
-    /* ③ 6MB 区间均匀采样 6 点(每 1MB), 确认数据覆盖全区 */
+    /*6MB 内每 1MB 采一点，确认数据覆盖全区*/
     nonFFcnt = 0U;
     for (off = 0U; off < 0x00600000UL; off += 0x00100000UL)  /* 0,1,2,3,4,5 MB */
     {
@@ -480,7 +538,7 @@ uint8_t W25Q128_CheckGBKFont(void)
         if (b != 0xFFU) { nonFFcnt++; }
     }
 
-    /* ④ 首 256 字节 0xFF 占比: 真实字模数据应 < 80% */
+    /*首 256 字节 0xFF 占比 < 80% 才像真实字模*/
     (void)W25Q128_ReadData(W25Q128_GBK_BASE, s_buf, 256U);
     {
         uint16_t ff = 0U;
@@ -493,8 +551,7 @@ uint8_t W25Q128_CheckGBKFont(void)
     UART_Printf("[W25Q] GBK first 256B: 0xFF ratio = %u%% (expect <80%%)\r\n",
                 (unsigned)ffRatio);
 
-    /* 综合判定 */
-    pass = (boundary == 0xFFU) && (nonFFcnt >= 5U) && (ffRatio < 80U);
+    pass = (boundary == 0xFFU) && (nonFFcnt >= 5U) && (ffRatio < 80U);   /* 6 点采样至少 5 点非 FF，首 256B 的 FF 占比 < 80% */
     UART_Printf("[W25Q] M2 %s: GBK font %s at 0x%08lX\r\n",
                 (pass != 0U) ? "PASS" : "FAIL",
                 (pass != 0U) ? "detected" : "NOT found",

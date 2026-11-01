@@ -1,25 +1,8 @@
-/**
-  ******************************************************************************
-  * @file    bsp_font_gbk.c
-  * @brief   LVGL 外挂 GBK 字库适配层(详述见 bsp_font_gbk.h)
-  *
-  *          实现要点:
-  *            1. LVGL 只认 Unicode, 板载字库按 GB2312 码位索引,
-  *               所以先用 g_bspGbkMap 做 Unicode -> GB2312 二分查找。
-  *            2. 点阵 1bpp/16x16/32B, 直接读进 static 缓冲交给 LVGL 使用。
-  *               LVGL 是"取一个字形 -> 立刻画 -> 再取下一个"的串行流程,
-  *               所以单个静态缓冲就够, 不需要按字形分配内存。
-  *            3. **这块字库是列式(纵向)存储**: 32 字节 = 16 列 x 每列 2 字节,
-  *               列内高位在上。LVGL 要的是行式(横向), 所以取到后必须转置一次。
-  *               2026-10-23 真机现象: 汉字显示出来但左右镜像 + 逆时针 90 度,
-  *               正是"把转置后的图当原图"的特征; 实测 "中" 前 8 字节
-  *               00 00 00 00 3F E0 10 40, 按列读 = 第 3 列长竖 + 第 4 列上下两点
-  *               (口字左边框 + 内部上下横), 按行读则不成立 → 列式坐实。
-  *            4. 查不到(ASCII/emoji/未收录汉字)返回 false, 由 fallback
-  *               字体 lv_font_montserrat_16 兜底。
-  *            5. 缓冲用 static, 不占堆, 也不占 boot 阶段仅 1KB 的 MSP 栈。
-  ******************************************************************************
-  */
+/* bsp_font_gbk.c
+ * LVGL 外挂 GBK 字库适配：Unicode 查表得 GB2312 码，按码位算地址，读 32 字节点阵。
+ * 硬件：SPI1 = PA5/PA6/PA7 + CS=PC13，字库位于 W25Q128 0x00A00000，16px 段 +0x0008C460。
+ * 注意：点阵是列式存储，必须转置成行式；static 缓冲下一次取字形即被覆盖。
+ */
 #include "bsp_font_gbk.h"
 #include "bsp_W25Q128.h"
 #include "usart.h"
@@ -34,7 +17,11 @@
 
 static uint8_t s_glyphBuf[GBK16_GLYPH_BYTES];
 
-/** Unicode -> GB2312 双字节码; 表里没有返回 0 */
+/**
+  * 函    数：gbk16_uni_to_code
+  * 参    数：uni  Unicode 码点 0x0000~0xFFFF，超出直接失败
+  * 返 回 值：GB2312 双字节码，表中没有返回 0
+  */
 static uint16_t gbk16_uni_to_code(uint32_t uni)
 {
     uint16_t lo;
@@ -46,15 +33,15 @@ static uint16_t gbk16_uni_to_code(uint32_t uni)
     }
 
     lo = 0U;
-    hi = g_bspGbkMapNum;                 /* 左闭右开 */
+    hi = g_bspGbkMapNum;                 /* 左闭右开 [0, g_bspGbkMapNum) */
     while (lo < hi)
     {
         uint16_t mid = (uint16_t)((lo + hi) >> 1);
-        uint32_t u   = g_bspGbkMap[mid] >> 16;
+        uint32_t u   = g_bspGbkMap[mid] >> 16;    /* 比高 16 位 Unicode */
 
         if (u == uni)
         {
-            return (uint16_t)(g_bspGbkMap[mid] & 0xFFFFU);
+            return (uint16_t)(g_bspGbkMap[mid] & 0xFFFFU);    /* 命中取低 16 位 GBK 码 */
         }
         if (u < uni)
         {
@@ -68,7 +55,11 @@ static uint16_t gbk16_uni_to_code(uint32_t uni)
     return 0U;
 }
 
-/** GB2312 码位 -> 字库内字节地址; 越界返回 0xFFFFFFFF */
+/**
+  * 函    数：gbk16_glyph_addr
+  * 参    数：gbk  GB2312 码，高字节 0x81~0xFE，低字节 0x40~0xFE(0x7F 除外)
+  * 返 回 值：字模地址 0x00A00000 + 0x0008C460 + idx*32，非法码返回 0xFFFFFFFF
+  */
 static uint32_t gbk16_glyph_addr(uint16_t gbk)
 {
     uint8_t  hi = (uint8_t)(gbk >> 8);
@@ -80,13 +71,17 @@ static uint32_t gbk16_glyph_addr(uint16_t gbk)
         return 0xFFFFFFFFUL;
     }
 
-    idx = 190U * (uint32_t)(hi - 0x81U)
-        + ((lo < 0x7FU) ? (uint32_t)(lo - 0x40U) : (uint32_t)(lo - 0x41U));
+    idx = 190U * (uint32_t)(hi - 0x81U)        /* 190 = 每个区去掉 0x7F 后的低位个数 */
+        + ((lo < 0x7FU) ? (uint32_t)(lo - 0x40U) : (uint32_t)(lo - 0x41U));   /* 跨过 0x7F 空洞 */
 
-    return GBK_FONT_BASE + GBK16_SECTION_OFS + idx * GBK16_GLYPH_BYTES;
+    return GBK_FONT_BASE + GBK16_SECTION_OFS + idx * GBK16_GLYPH_BYTES;        /* 0xA00000+0x8C460+idx*32 */
 }
 
-/** 列式 -> 行式: 16x16 1bpp 转置(两次转置等于还原, 可逆) */
+/**
+  * 函    数：gbk16_transpose
+  * 参    数：buf  32 字节点阵，输入列式，原地输出行式
+  * 返 回 值：无
+  */
 static void gbk16_transpose(uint8_t *buf)
 {
     uint8_t  src[GBK16_GLYPH_BYTES];
@@ -100,7 +95,7 @@ static void gbk16_transpose(uint8_t *buf)
     {
         for (ox = 0U; ox < 16U; ox++)             /* ox: 行式缓冲的列 */
         {
-            /* out(oy,ox) = in(ox,oy): 第 ox 行、第 oy 位 */
+            /*列式取第 ox 列第 oy 位，写到行式第 oy 行第 ox 列*/
             uint8_t b = src[ox * 2U + (oy >> 3)];
 
             if ((b & (uint8_t)(0x80U >> (oy & 7U))) != 0U)
@@ -111,7 +106,11 @@ static void gbk16_transpose(uint8_t *buf)
     }
 }
 
-/** LVGL 取字形描述 */
+/**
+  * 函    数：gbk16_get_dsc
+  * 参    数：font 不使用；dsc 输出字形描述；letter Unicode 码点；letter_next 不使用
+  * 返 回 值：true=本字库有此字形，false=交给 fallback 字体
+  */
 static bool gbk16_get_dsc(const lv_font_t *font, lv_font_glyph_dsc_t *dsc,
                           uint32_t letter, uint32_t letter_next)
 {
@@ -127,14 +126,18 @@ static bool gbk16_get_dsc(const lv_font_t *font, lv_font_glyph_dsc_t *dsc,
     dsc->box_w  = GBK16_CELL;
     dsc->box_h  = GBK16_CELL;
     dsc->ofs_x  = 0;
-    /* 16px 字身整体坐在基线上方: 顶部 = (19-3) - 16 - 0 = 0 */
+    /*16px 字身坐在基线上方，顶部偏移为 0*/
     dsc->ofs_y  = 0;
     dsc->bpp    = 1;
     dsc->is_placeholder = 0;
     return true;
 }
 
-/** LVGL 取字形点阵指针(指向 static 缓冲, 下一次调用会被覆盖) */
+/**
+  * 函    数：gbk16_get_bitmap
+  * 参    数：font 不使用；letter Unicode 码点
+  * 返 回 值：指向 static 32 字节缓冲的行式点阵；查表失败/地址越界/SPI 读失败返回 NULL
+  */
 static const uint8_t *gbk16_get_bitmap(const lv_font_t *font, uint32_t letter)
 {
     uint16_t gbk;
@@ -178,11 +181,21 @@ static const lv_font_t s_gbk16 = {
 #endif
 };
 
+/**
+  * 函    数：BSP_Font_Gbk16
+  * 参    数：无
+  * 返 回 值：字体对象指针，指向文件内静态对象
+  */
 const lv_font_t *BSP_Font_Gbk16(void)
 {
     return &s_gbk16;
 }
 
+/**
+  * 函    数：BSP_Font_SelfTest
+  * 参    数：无
+  * 返 回 值：1=读取成功且点亮位数在 1~255，0=读失败或全 0/全 1
+  */
 uint8_t BSP_Font_SelfTest(void)
 {
     const uint16_t gbk  = 0xD6D0U;        /* "中" */

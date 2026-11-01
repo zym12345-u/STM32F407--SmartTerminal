@@ -1,22 +1,16 @@
 /* USER CODE BEGIN Header */
-/**
-  * @file    CommandTask.c
-  * @brief   串口命令解析任务:从 CommandQueue 逐字节取出命令串口收到的数据,
-  *          按协议组帧、校验,校验通过后把每对 {颜色, 状态} 打包成 LEDMessage
-  *          指针投递到 LEDQueue,由 LEDTask 点灯。
-  *          (协议参考 P3_QueueDemo/Core/App/Tasks/CommandTask.c)
-  *
-  * 帧格式:  [0xAA][LEN][COLOR1][STATE1]...[CHECKSUM]
-  *            包头   整帧长度(含包头和校验,4~30)   负载(成对出现)  校验和
-  *          校验和 = 前面 LEN-1 个字节的累加和(uint8 溢出截断)
-  *          COLOR: 1=红 2=绿 3=蓝(案例枚举+1);本板只有绿灯/蓝灯,
-  *                 2 -> LEDColor_Green,3 -> LEDColor_Blue,1(红)忽略
-  *          STATE: 0=灭 1=亮
-  *
-  *          三路控制(按键 / 触摸按钮 / 本串口命令)都只往 LEDQueue 投消息,
-  *          由 LEDTask 单点执行点灯,避免多方直接写 GPIO 导致状态互相覆盖。
-  *          ⚠️ 内存约定:这里 pvPortMalloc,由 LEDTask 那边 vPortFree。
-  */
+/* CommandTask.c
+ * 串口命令解析：从 CommandQueue 取 USART1 字节，组帧校验后把每对 {颜色,状态}
+ * 投递 LEDQueue，由 LEDTask 点灯。
+ */
+/* 协议帧 [0xAA][LEN][COLOR1][STATE1]...[CHECKSUM]
+ * 字段        长度  含义              取值                 谁写谁读
+ * HEAD        1B    包头              0xAA                 上位机写，本任务读
+ * LEN         1B    整帧长度(含头尾)  4~30                 上位机写，本任务读
+ * COLOR/STATE 2B    颜色与状态成对    COLOR 1~3，STATE 0/1 上位机写，本任务读
+ * CHECKSUM    1B    前 LEN-1 字节累加 0~255(uint8 截断)    上位机写，本任务读
+ * COLOR 1=红 2=绿 3=蓝，本板只有绿/蓝，红被忽略；STATE 0=灭 1=亮
+ */
 /* USER CODE END Header */
 
 #include "cmsis_os2.h"
@@ -27,21 +21,26 @@
 #include "LEDType.h"
 #include "PowerMgr.h"
 
-/* 队列句柄由 freertos.c 中 CubeMX 生成的代码定义/创建 */
+/*队列句柄由 freertos.c 创建*/
 extern osMessageQueueId_t CommandQueueHandle;
 extern osMessageQueueId_t LEDQueueHandle;
 
-/* 协议常量 */
-#define CMD_FRAME_HEAD      0xAAU   /* 包头 */
-#define CMD_FRAME_MIN_LEN   4U      /* 最小整帧长度:包头+长度+校验 = 3,带1对负载为 5,案例下限取 4 */
-#define CMD_FRAME_BUF_SIZE  30U     /* 接收缓冲区/整帧最大长度 */
+/*协议常量*/
+#define CMD_FRAME_HEAD      0xAAU   /*包头*/
+#define CMD_FRAME_MIN_LEN   4U      /*整帧长度下限 4 字节*/
+#define CMD_FRAME_BUF_SIZE  30U     /*接收缓冲大小，也是整帧最大长度*/
 
-/* 协议颜色码 -> 本工程 LEDColor 映射;不支持的颜色返回 0xFF */
+/*协议颜色码到 LEDColor 映射，不支持的颜色返回 0xFF*/
 #define CMD_COLOR_RED       1U
 #define CMD_COLOR_GREEN     2U
 #define CMD_COLOR_BLUE      3U
 #define CMD_COLOR_INVALID   0xFFU
 
+/**
+  * 函    数：Command_MapColor
+  * 参    数：code  协议颜色码，取值 1~3
+  * 返 回 值：绿/蓝对应枚举，红及其它值返回 (LEDColor)0xFF
+  */
 static LEDColor Command_MapColor(uint8_t code)
 {
   LEDColor color;
@@ -55,31 +54,34 @@ static LEDColor Command_MapColor(uint8_t code)
       color = LEDColor_Blue;
       break;
     default:
-      color = (LEDColor)CMD_COLOR_INVALID;   /* 红色等本板不支持的颜色:忽略 */
+      color = (LEDColor)CMD_COLOR_INVALID;   /*红色等不支持的颜色，忽略*/
       break;
   }
   return color;
 }
 
+/**
+  * 函    数：StartCommandTask
+  * 参    数：argument  未使用，任务参数
+  * 返 回 值：无
+  */
 void StartCommandTask(void *argument)
 {
   (void)argument;
 
   uint8_t receive = 0U;
   uint8_t command[CMD_FRAME_BUF_SIZE];
-  uint8_t commandIndex = 0U;    /* 已存入缓冲区的字节数 */
-  uint8_t commandLength = 0U;   /* 本帧总长度 */
+  uint8_t commandIndex = 0U;    /*已存入字节数*/
+  uint8_t commandLength = 0U;   /*本帧总长度*/
 
-  /* 任务一启动就挂起命令串口中断接收(队列已由 MX_FREERTOS_Init 先行创建)。
-   * 当前命令口 = USART1(板载 USB-TTL,一根 USB 线直连即可测试);
-   * USART2 已分配给 ESP8266,USART3 已分配给 RS485,不再作命令口。 */
+  /*打开 USART1 中断接收*/
   UART1_Receive_Start();
 
   for(;;)
   {
     Watchdog_Heartbeat(WDT_TASK_COMMAND);
 
-    /* 没有命令字节时阻塞 1s(而非永久),确保心跳定期上报 */
+    /*最多等 1s 就回来喂心跳，不能改 portMAX_DELAY，否则无命令时被判卡死*/
     if(osMessageQueueGet(CommandQueueHandle, &receive, NULL, 1000U) != osOK)
     {
       continue;
@@ -87,7 +89,7 @@ void StartCommandTask(void *argument)
 
     if(commandIndex == 0U)
     {
-      /* 状态 0:寻找包头 */
+      /*找包头*/
       if(receive == CMD_FRAME_HEAD)
       {
         command[commandIndex++] = receive;
@@ -95,10 +97,10 @@ void StartCommandTask(void *argument)
     }
     else if(commandIndex == 1U)
     {
-      /* 状态 1:第二字节是整帧长度,合法性检查 */
+      /*第二字节为整帧长度，越界丢弃*/
       if((receive < CMD_FRAME_MIN_LEN) || (receive > (uint8_t)sizeof(command)))
       {
-        commandIndex = 0U;   /* 长度不合法,丢弃本帧,重新找包头 */
+        commandIndex = 0U;   /*长度越界，重新找包头*/
         continue;
       }
       commandLength = receive;
@@ -106,12 +108,12 @@ void StartCommandTask(void *argument)
     }
     else
     {
-      /* 状态 2+:依次收集负载和校验字节 */
+      /*依次收负载与校验字节*/
       command[commandIndex++] = receive;
 
       if(commandIndex == commandLength)
       {
-        /* 整帧接收完成:计算校验和 = 前 LEN-1 字节之和 */
+        /*整帧收完，累加前 LEN-1 字节*/
         uint8_t checksum = 0U;
         for(uint8_t i = 0U; i < (uint8_t)(commandLength - 1U); i++)
         {
@@ -120,15 +122,14 @@ void StartCommandTask(void *argument)
 
         if(checksum == command[commandLength - 1U])
         {
-          /* 收到合法串口命令:视为用户活动,刷新息屏计时 */
+          /*合法命令算用户活动，刷新息屏计时*/
           PowerMgr_Feed();
-          /* 校验通过:负载从下标 2 开始,到校验位前结束,每 2 字节一对 */
-          for(uint8_t i = 2U; i < (uint8_t)(commandLength - 2U); i += 2U)
+          for(uint8_t i = 2U; i < (uint8_t)(commandLength - 2U); i += 2U)   /*步长 2，{颜色,状态} 成对*/
           {
             LEDColor color = Command_MapColor(command[i]);
             if(color == (LEDColor)CMD_COLOR_INVALID)
             {
-              continue;   /* 不支持的颜色(如红色),跳过这一对 */
+              continue;   /*不支持的颜色，跳过这一对*/
             }
 
             LEDMessage *message = pvPortMalloc(sizeof(LEDMessage));
@@ -136,7 +137,7 @@ void StartCommandTask(void *argument)
             {
               message->color = color;
               message->state = (command[i + 1U] != 0U) ? LEDState_On : LEDState_Off;
-              /* 非阻塞投递;队列满时释放内存,避免泄漏 */
+              /*0 tick 投递，队列满就释放，不漏内存*/
               if(osMessageQueuePut(LEDQueueHandle, &message, 0U, 0U) != osOK)
               {
                 vPortFree(message);
@@ -145,7 +146,7 @@ void StartCommandTask(void *argument)
           }
         }
 
-        /* 无论校验是否通过,帧结束后复位状态机等待下一帧 */
+        /*帧尾不论校验结果都复位状态机*/
         commandIndex = 0U;
         commandLength = 0U;
       }

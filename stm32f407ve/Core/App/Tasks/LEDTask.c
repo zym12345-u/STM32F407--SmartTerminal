@@ -1,10 +1,8 @@
 /* USER CODE BEGIN Header */
-/**
-  * @file    LEDTask.c
-  * @brief   LED 控制任务(消费者):阻塞等待 LEDQueue 消息,按消息中的颜色
-  *          驱动对应引脚(绿灯 PC5 / 蓝灯 PB2),处理完释放消息内存。
-  *          (参考 P3_QueueDemo/Core/App/Tasks/LEDTask.c)
-  */
+/* LEDTask.c
+ * LED 控制：阻塞等待 LEDQueue，按消息颜色驱动绿灯 PC5 / 蓝灯 PB2，
+ * 处理完释放消息内存。
+ */
 /* USER CODE END Header */
 
 #include "cmsis_os2.h"
@@ -13,13 +11,13 @@
 #include "bsp_IWDG.h"
 #include "LEDType.h"
 
-/* LEDQueue 句柄由 freertos.c 中 CubeMX 生成的代码定义/创建,此处外部引用 */
+/*队列句柄由 freertos.c 创建*/
 extern osMessageQueueId_t LEDQueueHandle;
 
 /**
-  * @brief  LED 控制任务入口(由 CubeMX 的 LEDTask 创建,As external)
-  * @note   板载 LED 低电平点亮(灌电流,官方流水灯例程证实):
-  *          亮 -> GPIO_PIN_RESET,灭 -> GPIO_PIN_SET
+  * 函    数：StartLEDTask
+  * 参    数：argument  未使用，任务参数
+  * 返 回 值：无
   */
 void StartLEDTask(void *argument)
 {
@@ -31,11 +29,10 @@ void StartLEDTask(void *argument)
 
     Watchdog_Heartbeat(WDT_TASK_LED);
 
-    /* 队列空时阻塞 1s(而非永久),确保心跳定期上报;
-     * 收到消息后立即点亮/熄灭对应小灯 */
+    /*最多等 1s 就回来喂心跳，不能等 portMAX_DELAY*/
     if(osMessageQueueGet(LEDQueueHandle, &msg, NULL, 1000U) == osOK)
     {
-      /* 低电平点亮:On 输出 RESET,Off 输出 SET */
+      /*板载 LED 低电平点亮，On 输出 RESET，Off 输出 SET*/
       GPIO_PinState pinLevel = (msg->state == LEDState_On) ? GPIO_PIN_RESET : GPIO_PIN_SET;
 
       switch(msg->color)
@@ -51,7 +48,7 @@ void StartLEDTask(void *argument)
         default:
           break;
       }
-      vPortFree(msg);   /* 消费完毕,释放生产者分配的内存 */
+      vPortFree(msg);   /*消费后释放生产者分配的内存*/
     }
   }
 }

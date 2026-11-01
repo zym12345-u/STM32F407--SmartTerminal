@@ -1,20 +1,8 @@
 /* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * File Name          : freertos.c
-  * Description        : Code for freertos applications
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+/* freertos.c
+ * CubeMX 生成的 FreeRTOS 骨架：创建任务与队列，并挂运行时统计和故障钩子。
+ * 注意：栈溢出/堆耗尽钩子里已关中断，只能轮询直发。
+ */
 /* USER CODE END Header */
 
 /* Includes ------------------------------------------------------------------*/
@@ -25,25 +13,21 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-/* LED 队列元素类型 LEDMessage 定义在 App/Types(供下方生成的 sizeof(LEDMessage*) 使用);
- * 任务实现在 App/Tasks:KeyTask.c(强定义覆盖本文件弱骨架)、LEDTask.c(external) */
-#include "LEDType.h"
-/* LVGL GUI 任务创建函数(Core/App/Tasks/GuiTask.c) */
+#include "LEDType.h"          /*队列元素类型 LEDMessage*/
 #include "usart.h"
-extern void GuiTask_Create(void);
-extern void SensorTask_Create(void);
-extern void WifiTask_Create(void);
-extern void ModbusTask_Create(void);   /* Modbus RTU 从站任务(App/Tasks/ModbusTask.c) */
-extern void CanTask_Create(void);      /* CAN 通信任务(App/Tasks/CanTask.c) */
-extern void MonitorTask_Create(void);  /* 心跳监控 + IWDG 喂狗(App/Tasks/MonitorTask.c) */
-#include "bsp_W25Q128.h"               /* V1.2 外部 Flash(boot 阶段 M1/M1.5 自检) */
-#include "bsp_lfs_port.h"              /* V1.2 M3 LittleFS 挂载 */
-#include "bsp_font_gbk.h"              /* V1.2 M4 外挂 GBK 字库自检 */
+extern void GuiTask_Create(void);      /*LVGL GUI 任务*/
+extern void SensorTask_Create(void);   /*BH1750 + DHT11 采集*/
+extern void WifiTask_Create(void);     /*ESP8266 SNTP 对时*/
+extern void ModbusTask_Create(void);    /*RS485 Modbus RTU 从站*/
+extern void CanTask_Create(void);       /*CAN1 500Kbps 收发*/
+extern void MonitorTask_Create(void);   /*心跳监控 + IWDG 喂狗*/
+#include "bsp_W25Q128.h"               /*外部 Flash 自检*/
+#include "bsp_lfs_port.h"              /*LittleFS 挂载*/
+#include "bsp_font_gbk.h"              /*外挂 GBK 字库自检*/
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-/* 类型定义已迁移至 Core/App/Types/LEDType.h */
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -58,8 +42,6 @@ extern void MonitorTask_Create(void);  /* 心跳监控 + IWDG 喂狗(App/Tasks/M
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-/* 任务(KEYTask/LEDTask)与队列(LEDQueue)的句柄、属性均由 CubeMX 生成,
- * 见本文件下方 Definitions for ... 区域,此处不再重复定义 */
 /* USER CODE END Variables */
 /* Definitions for KEYTask */
 osThreadId_t KEYTaskHandle;
@@ -95,9 +77,7 @@ const osMessageQueueAttr_t CommandQueue_attributes = {
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
-/* StartKeyTask / StartLEDTask 的 extern 声明由 CubeMX 在下方生成区输出;
- * 任务实现在 Core/App/Tasks/KeyTask.c、LEDTask.c */
-static void StartStatsTask(void *argument);   /* 本文件 USER CODE 区的统计任务 */
+static void StartStatsTask(void *argument);   /*本文件的统计任务*/
 /* USER CODE END FunctionPrototypes */
 
 void StartKeyTask(void *argument);
@@ -113,14 +93,9 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
   */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
-  /* 开机版本标记:烧录新固件后串口第一行应能看到本行(调度器启动前,轮询直发)。
-   * 若看不到此行/时间戳是旧的,说明烧录的不是最新固件 */
-  UART_Printf("\r\n[SYS] boot " __DATE__ " " __TIME__ "\r\n");
+  UART_Printf("\r\n[SYS] boot " __DATE__ " " __TIME__ "\r\n");   /*开机版本标记，能看到这行才算烧对固件*/
 
-  /* 复位来源诊断: 读 RCC->CSR 的复位标志后立即清除, 下次复位重新累计。
-   * 用于区分"不明复位"是否为 IWDG 咬狗(任务卡死时 MonitorTask 停止喂狗)。
-   * 注意: 上电时 NRST 引脚也被拉低过, PINRSTF 总会置位,
-   * 所以判断顺序是 看门狗/软件复位 优先, 都没有才归为上电/复位键。 */
+  /* 读复位标志后立即清除；NRST 引脚总会置位，所以看门狗/软件复位优先判断 */
   if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST))
   {
     UART_Printf("[SYS] reset cause: IWDG watchdog!\r\n");
@@ -145,15 +120,12 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
-  /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
 
   /* Create the queue(s) */
@@ -164,7 +136,6 @@ void MX_FREERTOS_Init(void) {
   CommandQueueHandle = osMessageQueueNew (16, sizeof(uint8_t), &CommandQueue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* LEDQueue 已由 CubeMX 在上方创建(深度 16,元素为 LEDMessage 指针) */
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -178,82 +149,58 @@ void MX_FREERTOS_Init(void) {
   CommandTaskHandle = osThreadNew(StartCommandTask, NULL, &CommandTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* KEYTask、LEDTask 已由 CubeMX 在上方 osThreadNew 创建,此处无需重复创建 */
-  /* LVGL GUI 任务:实现在 Core/App/Tasks/GuiTask.c,不占用 CubeMX 任务表 */
-  GuiTask_Create();
-  /* 传感器采集任务:实现在 Core/App/Tasks/SensorTask.c,采集 BH1750+DHT11 */
-  SensorTask_Create();
-  /* WiFi 对时任务:实现在 Core/App/Tasks/WifiTask.c,ESP8266(USART2) SNTP 取网络时间 */
-  WifiTask_Create();
-  /* Modbus RTU 从站任务:实现在 Core/App/Tasks/ModbusTask.c,RS485(USART3) */
-  ModbusTask_Create();
-  /* CAN 通信任务:实现在 Core/App/Tasks/CanTask.c, CAN1(PB8/PB9) 500Kbps */
-  CanTask_Create();
-  /* 系统监控任务:心跳检测 + IWDG 喂狗(App/Tasks/MonitorTask.c) */
-  MonitorTask_Create();
-  /* 系统统计任务:5s 周期打印任务栈水位 + 各任务 CPU 占比(DWT 计数) */
+  GuiTask_Create();       /*LVGL GUI*/
+  SensorTask_Create();   /*BH1750 + DHT11*/
+  WifiTask_Create();      /*ESP8266 网络对时*/
+  ModbusTask_Create();    /*RS485 Modbus 从站*/
+  CanTask_Create();       /*CAN1 报文收发*/
+  MonitorTask_Create();   /*心跳检测 + IWDG 喂狗*/
+  /* 每 5s 打印任务栈水位和 CPU 占比 */
   {
     static const osThreadAttr_t statsTaskAttr = {
       .name = "StatsTask",
-      .stack_size = 1024U,       /* 字节;buf[640] 为 static,栈只放 printf 调用帧 */
+      .stack_size = 1024U,       /*字节；打印缓冲为 static*/
       .priority = (osPriority_t)osPriorityLow,
     };
     osThreadNew(StartStatsTask, NULL, &statsTaskAttr);
   }
-  /* 稳态堆余量实测(应巡检 A1 要求, 2026-10-17): 所有应用任务创建完毕后打印。
-   * 此前 boot 日志的 13968B 是 WifiTask 建队列时的中途快照(其后还有
-   * Modbus/Monitor/Stats 未建), 不能用作 V1.2 预算基准。
-   * 注意 osKernelStart 还会建 Idle(512B)+TmrSvc(1024B),
-   * 故调度器启动后的真实余量 ≈ 本值 - 1536B */
+  /* 所有任务建完后的稳态堆余量，调度器启动还会再占约 1536B */
   UART_Printf("[SYS] free heap after all app tasks: %u bytes\r\n",
               (unsigned)xPortGetFreeHeapSize());
-  /* 芯片 Flash 容量直读(应巡检要求, 2026-10-18): 丝印 VET6 应为 512KB,
-   * 以出厂固化在系统存储区的容量寄存器为准(只读, 安全) */
+  /* Flash 容量寄存器，VET6 应为 512KB */
   UART_Printf("[SYS] flash size register: %u KB\r\n",
               (unsigned)(*(__IO uint16_t *)0x1FFF7A22UL));
-  /* 地址别名甄别实验(应巡检要求, 2026-10-18): 凭据区 0x080E0000 超出 512KB
-   * 标称范围, 但实测可存可取。读两处首字对比:
-   *   二者不同 -> 0x080E0000 是独立物理区域(疑似 1MB 硅片按 512KB 打标)
-   *   二者相同 -> 地址回绕别名到 sector 7, 须立即停用内部 Flash 存凭据
-   * 纯读取, 安全; 出结果前冻结 WifiStore 改动(与巡检共识) */
+  /* 地址别名甄别：读 0x080E0000 与 0x08060000 首字对比，只读安全 */
   UART_Printf("[SYS] magic@0x080E0000=0x%08lX word@0x08060000=0x%08lX\r\n",
               (unsigned long)(*(__IO uint32_t *)0x080E0000UL),
               (unsigned long)(*(__IO uint32_t *)0x08060000UL));
-  /* V1.2 存储阶段 M1+M1.5(调度器启动前执行, IWDG 未启动, 无喂狗压力):
-   * M1   = 0x9F 读 JEDEC ID 0xEF4018 + 0x90 读 0xEF17 交叉验证;
-   * M1.5 = 用户区尾扇区 擦除/页编程/回读校验, 顺手打印实测耗时
-   *        (本地无 W25Q128 手册, 实测值回填巡检草案时序表) */
+  /* 调度器启动前做 Flash 自检：JEDEC ID + 尾扇区擦写回读 */
   if (W25Q128_Init() != 0U)
   {
     W25Q128_SelfTest();
-    W25Q128_CheckGBKFont();   /* M2: 检测 0xA00000 起的 GBK 字库是否存在 */
-    /* M3: 挂载 LittleFS(0x000000~0x009FEFFF, 2559 x 4KB);
-     * 空白 Flash 自动格式化, 挂载后做一次 /m3.txt 写读验证 */
+    W25Q128_CheckGBKFont();   /*检测 0xA00000 起的 GBK 字库*/
+    /* 挂载 LittleFS，空白 Flash 会自动格式化 */
     (void)LFS_Port_Mount();
-    /* M4: 外挂 GBK 字库适配层自检(读 "中" 的 16px 点阵, 校验内容非空) */
+    /* 读“中”的 16px 点阵验证字库 */
     (void)BSP_Font_SelfTest();
   }
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
-  /* add events, ... */
   /* USER CODE END RTOS_EVENTS */
 
 }
 
 /* USER CODE BEGIN Header_StartKeyTask */
 /**
-  * @brief  Function implementing the KEYTask thread.
-  * @note   真正实现位于 Core/App/Tasks/KeyTask.c(同名强定义在链接时覆盖本弱骨架,
-  *         与 P3_QueueDemo 组织方式一致)
-  * @param  argument: Not used
-  * @retval None
+  * 函    数：StartKeyTask
+  * 参    数：argument  未使用
+  * 返 回 值：无
   */
 /* USER CODE END Header_StartKeyTask */
 __weak void StartKeyTask(void *argument)
 {
   /* USER CODE BEGIN StartKeyTask */
-  /* Infinite loop */
   for(;;)
   {
     osDelay(1);
@@ -263,20 +210,16 @@ __weak void StartKeyTask(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
-/* 任务实现已迁移:
- *   Core/App/Tasks/KeyTask.c - StartKeyTask(强定义,覆盖上方 __weak 骨架)
- *   Core/App/Tasks/LEDTask.c - StartLEDTask(CubeMX external 入口)
- * 消息类型见 Core/App/Types/LEDType.h */
 
-/* ====================== FreeRTOS 运行时统计(DWT 周期计数器) ====================== */
-/* CYCCNT @168MHz 是 32 位,25.56s 就回绕,直接当统计时钟几分钟后百分比全部失真。
- * 做法:每 1ms 在 tick 钩子里用无符号差分把增量累加进 64 位变量(无符号减法天然
- * 处理 25.56s 回绕),读出时再加上本 ms 内的增量并右移 10 位(约 164kHz,
- * 32 位结果 7.3 小时才回绕) */
+/* 运行时统计：CYCCNT 32 位 25.56s 就回绕，每 1ms 把增量累进 64 位变量 */
 static volatile uint64_t s_runCycles = 0U;
 static volatile uint32_t s_lastCycles = 0U;
 
-/* vTaskStartScheduler() 在任何任务运行前调用一次本函数;不能依赖 DHT11_Init 里的 DWT_Init */
+/**
+  * 函    数：vConfigureTimerForRunTimeStats
+  * 参    数：无
+  * 返 回 值：无
+  */
 void vConfigureTimerForRunTimeStats(void)
 {
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
@@ -286,7 +229,12 @@ void vConfigureTimerForRunTimeStats(void)
   s_runCycles  = 0U;
 }
 
-/* 1ms tick 中断:累加本 tick 内的 cycle 增量(回绕也正确:0 - 大数 = 回绕后的真实差值) */
+/**
+  * 函    数：vApplicationTickHook
+  * 参    数：无
+  * 返 回 值：无
+  */
+/* 在 SysTick 中断上下文里执行，只做加法 */
 void vApplicationTickHook(void)
 {
   uint32_t now = DWT->CYCCNT;
@@ -294,8 +242,11 @@ void vApplicationTickHook(void)
   s_lastCycles = now;
 }
 
-/* 调用点均在临界区内(vTaskSwitchContext / uxTaskGetSystemState),SysTick 已被
- * BASEPRI 屏蔽,64 位累加值不会在读取中途被改写 */
+/**
+  * 函    数：vGetRunTimeCounterValue
+  * 参    数：无
+  * 返 回 值：uint32_t  累计周期右移 10 位（约 164kHz，7.3 小时回绕）
+  */
 uint32_t vGetRunTimeCounterValue(void)
 {
   uint32_t now = DWT->CYCCNT;
@@ -303,8 +254,12 @@ uint32_t vGetRunTimeCounterValue(void)
   return (uint32_t)(total >> 10);
 }
 
-/* ====================== 系统诊断钩子 ====================== */
-/* 栈溢出/堆耗尽后已关中断,不能再走互斥锁+DMA(会死锁),用轮询直发固定字符串 */
+/* 故障钩子：已关中断，只能轮询直发，不能再取锁 */
+/**
+  * 函    数：FatalUartSend
+  * 参    数：s  以 '\0' 结尾的字符串，最多发 200 字节
+  * 返 回 值：无
+  */
 static void FatalUartSend(const char *s)
 {
   uint16_t n = 0U;
@@ -312,7 +267,12 @@ static void FatalUartSend(const char *s)
   (void)HAL_UART_Transmit(&huart1, (const uint8_t *)s, n, 0xFFFFU);
 }
 
-/* 栈溢出:打印任务名后停机(继续跑会发生无规律 HardFault,停机更易定位) */
+/**
+  * 函    数：vApplicationStackOverflowHook
+  * 参    数：xTask  溢出任务句柄（未使用）
+  * 参    数：pcTaskName  任务名，最多打印 200 字节
+  * 返 回 值：无
+  */
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
   (void)xTask;
@@ -323,7 +283,11 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
   for(;;) { ; }
 }
 
-/* 堆分配失败:队列消息全靠 pvPortMalloc,失败说明 configTOTAL_HEAP_SIZE 不足 */
+/**
+  * 函    数：vApplicationMallocFailedHook
+  * 参    数：无
+  * 返 回 值：无
+  */
 void vApplicationMallocFailedHook(void)
 {
   FatalUartSend("\r\n[FATAL] pvPortMalloc failed, heap exhausted\r\n");
@@ -331,24 +295,27 @@ void vApplicationMallocFailedHook(void)
   for(;;) { ; }
 }
 
-/* ====================== 统计任务:每 5s 打印任务状态/栈水位/CPU 占比 ====================== */
+/**
+  * 函    数：StartStatsTask
+  * 参    数：argument  未使用
+  * 返 回 值：无
+  */
 static void StartStatsTask(void *argument)
 {
   (void)argument;
-  /* 8 个任务(含 Idle/Tmr Svc)每行约 45 字节,640 字节足够 */
+  /* 8 个任务每行约 45 字节，640 字节够用 */
   static char buf[640];
 
-  osDelay(5000U);   /* 等系统稳定(避开 LVGL 首屏渲染)再开始统计 */
+  osDelay(5000U);   /* 避开 LVGL 首屏渲染再开始统计 */
   for(;;)
   {
-    /* 任务表: Name State Prio StackMin(剩余字) Num */
+    /* 任务表：名称/状态/优先级/最小剩余栈 */
     vTaskList(buf);
     UART_Printf("\r\n================ Task List ================\r\n%s", buf);
 
-    /* CPU 占比: Name AbsTime(统计单位) Percent%%(上电以来累计平均) */
+    /* CPU 占比，上电以来累计平均 */
     vTaskGetRunTimeStats(buf);
-    /* 分隔线并入同一次调用: 单独再打一行的话, 其它任务的日志可能插在
-     * CPU 占比内容和结尾分隔线之间, 这一份报告就断开了 */
+    /* 分隔线并进同一次调用，否则别的任务日志会插进来 */
     UART_Printf("================ CPU Usage =================\r\n%s"
                 "============================================\r\n", buf);
 

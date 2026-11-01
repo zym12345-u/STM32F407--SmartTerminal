@@ -1,31 +1,17 @@
-/**
-  ******************************************************************************
-  * @file    ModbusTask.c
-  * @brief   Modbus RTU 从站任务(功能码 03/06/16, 异常响应, CRC16 校验)
-  *
-  *          架构说明:
-  *            bsp_RS485(USART3 字节中断收) -> 环形缓冲
-  *            -> USART3 IDLE 中断(一帧结束) -> xTaskNotifyFromISR 唤醒本任务
-  *            -> 校验从站地址/CRC -> 按功能码分发 -> 组响应帧 -> RS485_Send
-  *
-  *          帧间隔检测: 由 USART3 硬件 IDLE 中断完成(总线空闲超 1 字节时间),
-  *          比原来的 10ms 软件轮询更精确、更省 CPU(无请求时任务挂起)
-  *
-  *          保持寄存器映射(从站地址 1, 9600-8-N-1):
-  *            0x0000  温度 x10    (RO, 传感器无效时读到 0xFFFF)
-  *            0x0001  湿度 x10    (RO, 同上)
-  *            0x0002  光照 x10    (RO, 同上)
-  *            0x0003~0x000F       保留, 读 0xFFFF, 写返回非法地址异常
-  *            0x0010  绿灯状态    (RW, 1=亮 0=灭, 写后经 LEDQueue 生效)
-  *            0x0011  蓝灯状态    (RW, 同上)
-  *
-  *          已知限制(v1, 刻意简化):
-  *            - 帧提取按"空闲整缓冲"一次取完, 依赖主站遵守帧间隔 >= 3.5T。
-  *              若未来要支持主站背靠背请求, 应改为按功能码推算期望帧长、
-  *              每次只消费一帧(改进点已在面试可讲)
-  *            - 暂未实现线圈(01/05)与输入寄存器(04), LED 用保持寄存器代替
-  ******************************************************************************
-  */
+/* ModbusTask.c
+ * Modbus RTU 从站：USART3(RS485) 收帧，校验地址/CRC 后按功能码 03/06/16 应答；
+ * 帧结束由 IDLE 中断通知本任务，无请求时任务挂起。
+ */
+/* 保持寄存器映射(从站地址 1，9600-8-N-1)
+ * 地址         内容      读写  取值
+ * 0x0000       温度 x10  RO    传感器无效时 0xFFFF
+ * 0x0001       湿度 x10  RO    同上
+ * 0x0002       光照 x10  RO    同上
+ * 0x0003~0x000F         保留  读 0xFFFF，写回非法地址异常
+ * 0x0010       绿灯状态  RW    1=亮 0=灭
+ * 0x0011       蓝灯状态  RW    同上
+ */
+/*按空闲整缓冲一次取完，需主站遵守帧间隔 >= 3.5T；01/05 线圈与 04 输入寄存器未实现，LED 用保持寄存器*/
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -40,35 +26,38 @@
 #include "SensorData.h"
 #include "LEDType.h"
 
-/* LEDQueue 由 freertos.c 创建, 消费者是 LEDTask(收到指针后 vPortFree) */
+/*队列由 freertos.c 创建，LEDTask 消费后释放*/
 extern osMessageQueueId_t LEDQueueHandle;
 
-/* ====================== 参数定义 ====================== */
-#define MB_SLAVE_ADDR           1U      /* 本从站地址 */
-#define MB_FRAME_MAX            256U    /* Modbus RTU 一帧最长 256 字节 */
-#define MB_REG_MAP_END          0x0012U /* 有效寄存器区间 [0, 0x0012) */
-#define MB_REG_GREEN            0x0010U
-#define MB_REG_BLUE             0x0011U
+/*参数定义*/
+#define MB_SLAVE_ADDR           1U      /*本从站地址*/
+#define MB_FRAME_MAX            256U    /*一帧最长 256 字节*/
+#define MB_REG_MAP_END          0x0012U /*有效寄存器区间 [0, 0x0012)*/
+#define MB_REG_GREEN            0x0010U /*绿灯寄存器地址*/
+#define MB_REG_BLUE             0x0011U /*蓝灯寄存器地址*/
 
-/* 功能码 */
-#define MB_FUNC_READ_HOLDING    0x03U
-#define MB_FUNC_WRITE_SINGLE    0x06U
-#define MB_FUNC_WRITE_MULTI     0x10U
+/*功能码*/
+#define MB_FUNC_READ_HOLDING    0x03U   /*03 读保持寄存器*/
+#define MB_FUNC_WRITE_SINGLE    0x06U   /*06 写单寄存器*/
+#define MB_FUNC_WRITE_MULTI     0x10U   /*16 写多寄存器*/
 
-/* 异常码 */
-#define MB_EX_ILLEGAL_FUNCTION  0x01U
-#define MB_EX_ILLEGAL_ADDRESS   0x02U
-#define MB_EX_ILLEGAL_VALUE     0x03U
+/*异常码*/
+#define MB_EX_ILLEGAL_FUNCTION  0x01U   /*01 非法功能码*/
+#define MB_EX_ILLEGAL_ADDRESS   0x02U   /*02 非法地址*/
+#define MB_EX_ILLEGAL_VALUE     0x03U   /*03 非法数值*/
 
-/* ====================== 内部状态 ====================== */
-/* LED 影子寄存器: 写操作经 LEDQueue 异步生效, 读操作直接返回影子值 */
-static volatile uint16_t s_regGreen = 0U;
-static volatile uint16_t s_regBlue  = 0U;
+/*内部状态*/
+/*LED 影子寄存器：写经 LEDQueue 异步生效，读直接返回影子值*/
+static volatile uint16_t s_regGreen = 0U;   /*绿灯光态影子，本任务写，读寄存器时取*/
+static volatile uint16_t s_regBlue  = 0U;   /*蓝灯光态影子，本任务写，读寄存器时取*/
 
-/* ====================== CRC16(Modbus) ======================
- * 多项式 0x8005 反射为 0xA001, 初值 0xFFFF, 结果低字节在前发往总线。
- * 此处用位迭代法: 每字节 8 次循环, 256 字节帧约 2k 次循环, 微秒级,
- * 换查表法仅省 ~100us 却多占 512B Flash, 从站负载下无必要。 */
+/*CRC16(Modbus)：多项式 0x8005 反射为 0xA001，初值 0xFFFF，发送时低字节在前*/
+/*位迭代法微秒级；查表法省 ~100us 但多占 512B Flash，不划算*/
+/**
+  * 函    数：MB_Crc16
+  * 参    数：data  待校验数据首地址(不含 CRC)；len  字节数，0~256
+  * 返 回 值：16 位 CRC，发往总线时低字节先发
+  */
 static uint16_t MB_Crc16(const uint8_t *data, uint16_t len)
 {
     uint16_t crc = 0xFFFFU;
@@ -93,16 +82,21 @@ static uint16_t MB_Crc16(const uint8_t *data, uint16_t len)
     return crc;
 }
 
-/* ====================== 寄存器读取 ====================== */
+/*寄存器读取*/
+/**
+  * 函    数：MB_RegRead
+  * 参    数：reg  寄存器地址，0x0000~0x0011
+  * 返 回 值：温湿度/光照为 ×10 定点，无效 0xFFFF；0x0010/0x0011 返回影子值
+  */
 static uint16_t MB_RegRead(uint16_t reg)
 {
     switch (reg)
     {
-        case 0x0000U:   /* 温度 x10, 无效返回 0xFFFF */
+        case 0x0000U:   /*温度 x10，无效 0xFFFF*/
             return g_sensorData.temp_valid ? (uint16_t)(int16_t)(g_sensorData.temperature * 10.0f) : 0xFFFFU;
-        case 0x0001U:   /* 湿度 x10 */
+        case 0x0001U:   /*湿度 x10，与温度共用 temp_valid*/
             return g_sensorData.temp_valid ? (uint16_t)(int16_t)(g_sensorData.humidity * 10.0f) : 0xFFFFU;
-        case 0x0002U:   /* 光照 x10, 上限 6553.5 lux */
+        case 0x0002U:   /*光照 x10，上限 6553.5 lux*/
             if (!g_sensorData.light_valid) return 0xFFFFU;
         {
             uint32_t lux10 = (uint32_t)(g_sensorData.light * 10.0f);
@@ -112,18 +106,23 @@ static uint16_t MB_RegRead(uint16_t reg)
             return s_regGreen;
         case MB_REG_BLUE:
             return s_regBlue;
-        default:        /* 保留区间 */
+        default:        /*保留区间，读 0xFFFF*/
             return 0xFFFFU;
     }
 }
 
-/* ====================== LED 写入(经队列, 生产者分配/消费者释放) ====================== */
+/*LED 写入：经队列，生产者分配、消费者释放*/
+/**
+  * 函    数：MB_LedWrite
+  * 参    数：reg  只接受 0x0010/0x0011；value  非 0=亮，0=灭
+  * 返 回 值：无
+  */
 static void MB_LedWrite(uint16_t reg, uint16_t value)
 {
     LEDMessage *msg = pvPortMalloc(sizeof(LEDMessage));
     if (msg == NULL)
     {
-        return;                         /* 堆耗尽: 丢弃本次控制, 不影响 Modbus 响应 */
+        return;                         /*堆耗尽丢弃控制，写仍算成功*/
     }
 
     if (reg == MB_REG_GREEN) { msg->color = LEDColor_Green; s_regGreen = value; }
@@ -132,13 +131,16 @@ static void MB_LedWrite(uint16_t reg, uint16_t value)
 
     if (osMessageQueuePut(LEDQueueHandle, &msg, 0U, 0U) != osOK)
     {
-        vPortFree(msg);                 /* 队列满: 释放并丢弃 */
+        vPortFree(msg);                 /*队列满释放丢弃，写仍算成功*/
     }
 }
 
-/* ====================== 各功能码处理 ======================
- * 统一约定: 入参为整帧(含地址与CRC), 输出响应到 resp, 返回响应长度;
- * 广播帧(地址0)只执行写操作并返回 0(不回应答) */
+/*各功能码处理：入参为整帧(含地址与 CRC)，响应写 resp 并返回长度；广播只写不应答*/
+/**
+  * 函    数：MB_OnReadHolding
+  * 参    数：req  请求整帧；reqLen  固定 8；resp  响应缓冲(CRC 由调用方补)
+  * 返 回 值：3+2×qty(qty 1~125 且 start+qty 不越 0x0012)；非法返回 3；帧长错返回 0
+  */
 static uint16_t MB_OnReadHolding(const uint8_t *req, uint16_t reqLen, uint8_t *resp)
 {
     uint16_t start, qty, i;
@@ -152,14 +154,14 @@ static uint16_t MB_OnReadHolding(const uint8_t *req, uint16_t reqLen, uint8_t *r
         resp[1] = (uint8_t)(MB_FUNC_READ_HOLDING | 0x80U);
         resp[2] = (start + qty > MB_REG_MAP_END) ? MB_EX_ILLEGAL_ADDRESS
                                                  : MB_EX_ILLEGAL_VALUE;
-        return 3U;                                      /* 地址+异常码, CRC 由调用方补 */
+        return 3U;                                      /*地址+异常码，CRC 由调用方补*/
     }
 
     resp[1] = MB_FUNC_READ_HOLDING;
-    resp[2] = (uint8_t)(qty * 2U);
+    resp[2] = (uint8_t)(qty * 2U);                      /*字节数＝寄存器数 × 2*/
     for (i = 0U; i < qty; i++)
     {
-        /* Modbus 寄存器在线上是大端(高字节在前),和 CRC 的小端相反 */
+        /*寄存器大端，高字节在前，与 CRC 的低字节在前相反*/
         uint16_t v = MB_RegRead((uint16_t)(start + i));
         resp[3U + i * 2U]     = (uint8_t)(v >> 8);
         resp[3U + i * 2U + 1U] = (uint8_t)(v & 0xFFU);
@@ -167,6 +169,11 @@ static uint16_t MB_OnReadHolding(const uint8_t *req, uint16_t reqLen, uint8_t *r
     return (uint16_t)(3U + qty * 2U);
 }
 
+/**
+  * 函    数：MB_OnWriteSingle
+  * 参    数：req  请求整帧；reqLen  必须 8；resp  响应缓冲；isBroadcast  1=广播
+  * 返 回 值：8=回显请求；3=非法地址异常；0=广播或帧长错
+  */
 static uint16_t MB_OnWriteSingle(const uint8_t *req, uint16_t reqLen,
                                  uint8_t *resp, uint8_t isBroadcast)
 {
@@ -178,6 +185,7 @@ static uint16_t MB_OnWriteSingle(const uint8_t *req, uint16_t reqLen,
 
     if (reg != MB_REG_GREEN && reg != MB_REG_BLUE)
     {
+        /*保留寄存器一律回 02，与 16 的静默忽略不同*/
         if (!isBroadcast)
         {
             resp[1] = (uint8_t)(MB_FUNC_WRITE_SINGLE | 0x80U);
@@ -190,7 +198,7 @@ static uint16_t MB_OnWriteSingle(const uint8_t *req, uint16_t reqLen,
     if (!isBroadcast)
     {
         MB_LedWrite(reg, val);
-        (void)memcpy(resp, req, 8U);                    /* 06 正常响应=原样回显请求 */
+        (void)memcpy(resp, req, 8U);                    /*06 正常响应＝原样回显请求*/
         return 8U;
     }
 
@@ -198,6 +206,11 @@ static uint16_t MB_OnWriteSingle(const uint8_t *req, uint16_t reqLen,
     return 0U;
 }
 
+/**
+  * 函    数：MB_OnWriteMulti
+  * 参    数：req  请求整帧；reqLen  必须 9+byteCnt；resp  响应缓冲；isBroadcast  1=广播
+  * 返 回 值：6=正常响应；3=异常；0=广播或帧长错
+  */
 static uint16_t MB_OnWriteMulti(const uint8_t *req, uint16_t reqLen,
                                 uint8_t *resp, uint8_t isBroadcast)
 {
@@ -229,7 +242,7 @@ static uint16_t MB_OnWriteMulti(const uint8_t *req, uint16_t reqLen,
         {
             MB_LedWrite(reg, val);
         }
-        /* 保留寄存器(RO): 静默忽略, 保证批量写整体成功(与常见工业设备行为一致) */
+        /*保留寄存器静默忽略，保证整批写整体成功*/
     }
 
     if (!isBroadcast)
@@ -239,22 +252,26 @@ static uint16_t MB_OnWriteMulti(const uint8_t *req, uint16_t reqLen,
         resp[3] = req[3];
         resp[4] = req[4];
         resp[5] = req[5];
-        return 6U;                                      /* 地址+功能码+起始+数量 */
+        return 6U;                                      /*地址+功能码+起始+数量*/
     }
     return 0U;
 }
 
-/* ====================== 帧处理入口 ====================== */
+/*帧处理入口*/
+/**
+  * 函    数：MB_ProcessFrame
+  * 参    数：frame  已通过 CRC 校验的整帧；len  帧长度，>= 4
+  * 返 回 值：无，应答经 RS485_Send 发出
+  */
 static void MB_ProcessFrame(const uint8_t *frame, uint16_t len)
 {
     uint8_t  resp[MB_FRAME_MAX];
     uint16_t respLen = 0U;
     uint16_t crc;
-    /* Modbus 广播地址是 0:所有从站都要执行写操作,但任何一个都不回应答
-     * (多个从站同时发会撞总线)。所以下面每一处应答都要先看 isBroadcast */
+    /*广播地址 0：所有从站执行写但不回应答，多站同时发会撞总线*/
     uint8_t  isBroadcast = (frame[0] == 0U);
 
-    /* 从站地址过滤: 非本机且非广播, 直接丢弃 */
+    /*非本机且非广播，丢弃*/
     if (!isBroadcast && frame[0] != MB_SLAVE_ADDR)
     {
         UART_Printf("[MB] addr=%u not mine, drop\r\n", (unsigned)frame[0]);
@@ -272,10 +289,10 @@ static void MB_ProcessFrame(const uint8_t *frame, uint16_t len)
         case MB_FUNC_WRITE_MULTI:
             respLen = MB_OnWriteMulti(frame, len, resp, isBroadcast);
             break;
-        default:                                        /* 不支持的功能码 */
+        default:                                        /*不支持的功能码*/
             if (!isBroadcast)
             {
-                /* Modbus 异常应答规则:把功能码最高位置 1,后面跟一个异常码 */
+                /*异常应答：功能码最高位置 1，后跟异常码*/
                 resp[1] = (uint8_t)(frame[1] | 0x80U);
                 resp[2] = MB_EX_ILLEGAL_FUNCTION;
                 respLen = 3U;
@@ -283,20 +300,25 @@ static void MB_ProcessFrame(const uint8_t *frame, uint16_t len)
             break;
     }
 
-    if (respLen == 0U)                                  /* 广播或异常丢弃, 不应答 */
+    if (respLen == 0U)                                  /*广播或异常，不应答*/
     {
         return;
     }
 
-    resp[0] = MB_SLAVE_ADDR;                            /* 应答永远用本站地址 */
+    resp[0] = MB_SLAVE_ADDR;                            /*应答用本站地址*/
     crc = MB_Crc16(resp, respLen);
-    resp[respLen++] = (uint8_t)(crc & 0xFFU);           /* CRC 低字节在前 */
+    resp[respLen++] = (uint8_t)(crc & 0xFFU);           /*CRC 低字节在前*/
     resp[respLen++] = (uint8_t)(crc >> 8);
 
     RS485_Send(resp, respLen);
 }
 
-/* ====================== 任务主体 ====================== */
+/*任务主体*/
+/**
+  * 函    数：StartModbusTask
+  * 参    数：argument  未使用，任务参数
+  * 返 回 值：无
+  */
 void StartModbusTask(void *argument)
 {
     (void)argument;
@@ -304,8 +326,7 @@ void StartModbusTask(void *argument)
 
     RS485_Init();
 
-    /* 注册本任务句柄 + 使能 USART3 IDLE 中断:
-     * 一帧结束(总线空闲)时 ISR 发任务通知唤醒本任务, 替代原 10ms 轮询 */
+    /*注册任务句柄并开 IDLE 中断：一帧结束时 ISR 通知本任务*/
     RS485_SetNotifyTask(xTaskGetCurrentTaskHandle());
     RS485_EnableIdleIT();
 
@@ -316,23 +337,20 @@ void StartModbusTask(void *argument)
     {
         uint16_t cnt;
         uint16_t i;
-        static char dbg[48];                        /* 诊断用 static, 不占栈 */
+        static char dbg[48];                        /*诊断缓冲 static，不占栈*/
         int dbgLen = 0;
 
-        /* 等 IDLE 中断通知(一帧结束)。带 1s 超时兜底:
-         * 若用 portMAX_DELAY 死等, 主站停止轮询后本任务不再醒来、心跳停发,
-         * 3s 后会被 MonitorTask 误判卡死而停喂狗 -> IWDG 复位(真机复现过)。
-         * 有请求时仍由中断通知立即唤醒(低延迟不变), 1s 超时只是心跳保底 */
+        /*必须带 1s 超时：死等时主站停轮询，心跳停发会被判卡死复位(真机复现)*/
         (void)xTaskNotifyWait(0U, 0U, NULL, pdMS_TO_TICKS(1000U));
 
-        /* 通知到达或超时醒来: 先上报心跳, 再取环形缓冲 */
+        /*醒来先喂心跳，再取环形缓冲*/
         Watchdog_Heartbeat(WDT_TASK_MODBUS);
         cnt = RS485_RxCount();
         if (cnt == 0U)
         {
-            continue;                               /* 噪声或自发自收已被清空 */
+            continue;                               /*噪声或自发自收已清空*/
         }
-        if (cnt > MB_FRAME_MAX)                     /* 超长帧视为噪声, 丢弃 */
+        if (cnt > MB_FRAME_MAX)                     /*超长帧按噪声丢弃*/
         {
             RS485_RxFlush();
             continue;
@@ -343,7 +361,7 @@ void StartModbusTask(void *argument)
             (void)RS485_ReadByte(&frame[i]);
         }
 
-        /* 诊断打印: 从站听到的原始帧(hex, 最多 12 字节) */
+        /*诊断打印原始帧(hex，最多 12 字节)*/
         for (i = 0U; i < cnt && i < 12U; i++)
         {
             dbgLen += snprintf(&dbg[dbgLen], sizeof(dbg) - (size_t)dbgLen,
@@ -352,11 +370,11 @@ void StartModbusTask(void *argument)
         UART_Printf("[MB] rx %uB: %s%s\r\n",
                     (unsigned)cnt, dbg, (cnt > 12U) ? "..." : "");
 
-        /* 最短合法帧 = 地址+功能码+CRC(2) = 4 字节; CRC 错整帧丢弃 */
+        /*最短合法帧 4 字节，CRC 错整帧丢弃*/
         if (cnt >= 4U)
         {
             uint16_t crcCalc = MB_Crc16(frame, (uint16_t)(cnt - 2U));
-            uint16_t crcRecv = (uint16_t)((uint16_t)frame[cnt - 1U] << 8 | frame[cnt - 2U]);
+            uint16_t crcRecv = (uint16_t)((uint16_t)frame[cnt - 1U] << 8 | frame[cnt - 2U]);   /*低字节在前，cnt-2 是低字节*/
             if (crcCalc == crcRecv)
             {
                 MB_ProcessFrame(frame, cnt);
@@ -374,12 +392,17 @@ void StartModbusTask(void *argument)
     }
 }
 
-/* ====================== 对外创建接口 ====================== */
+/*对外创建接口*/
+/**
+  * 函    数：ModbusTask_Create
+  * 参    数：无
+  * 返 回 值：无，句柄不保存
+  */
 void ModbusTask_Create(void)
 {
     const osThreadAttr_t attr = {
         .name = "ModbusTask",
-        .stack_size = 512 * 4,                          /* 帧缓冲在静态区, 栈给足裕量 */
+        .stack_size = 512 * 4,                          /*帧缓冲 256B 在栈上，栈给足裕量*/
         .priority = (osPriority_t)osPriorityNormal,
     };
     (void)osThreadNew(StartModbusTask, NULL, &attr);

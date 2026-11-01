@@ -1,27 +1,13 @@
 /* USER CODE BEGIN Header */
-/**
-  ******************************************************************************
-  * @file    can.c
-  * @brief   This file provides code for the configuration
-  *          of the CAN instances.
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+/* can.c
+ * CAN1（PB8/PB9，复用 AF9）的 HAL 初始化与 MSP 配置。
+ */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "can.h"
 
 /* USER CODE BEGIN 0 */
-
+/* 生成区的位时序只是占位值，500Kbps 由 bsp_CAN.c 的 CAN_BspInit 覆写 */
 /* USER CODE END 0 */
 
 CAN_HandleTypeDef hcan1;
@@ -118,6 +104,6 @@ void HAL_CAN_MspDeInit(CAN_HandleTypeDef* canHandle)
 }
 
 /* USER CODE BEGIN 1 */
-
+/* 过滤器、启动和 FIFO0 中断都在 bsp_CAN.c 的 CAN_BspInit 里 */
 /* USER CODE END 1 */
 
