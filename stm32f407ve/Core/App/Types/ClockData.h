@@ -30,7 +30,11 @@ extern ClockData_t g_clockData;
 
 
 /*WifiTask 发布整组时间，临界区只包一次 memcpy*/
-/* 发布一份时间快照，供其它任务读取（对着结构体字段填好再传进来）。 */
+/**
+  * 功    能：发布一份时间快照，供其它任务读取（对着结构体字段填好再传进来）
+  * 参    数：src  待发布的时间快照，字段范围见结构体
+  * 返 回 值：无
+  */
 static inline void ClockData_Set(const ClockData_t *src)
 {
     taskENTER_CRITICAL();
@@ -39,7 +43,11 @@ static inline void ClockData_Set(const ClockData_t *src)
 }
 
 /*GuiTask 读取整组时间，临界区只包一次 memcpy*/
-/* 取当前时间快照，拷到调用方给的缓冲里。 */
+/**
+  * 功    能：取当前时间快照，拷到调用方给的缓冲里
+  * 参    数：dst  输出缓冲，调用方提供
+  * 返 回 值：无
+  */
 static inline void ClockData_Get(ClockData_t *dst)
 {
     taskENTER_CRITICAL();

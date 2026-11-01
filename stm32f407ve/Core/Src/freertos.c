@@ -212,8 +212,12 @@ __weak void StartKeyTask(void *argument)
 static volatile uint64_t s_runCycles = 0U;
 static volatile uint32_t s_lastCycles = 0U;
 
-/* FreeRTOS 统计 CPU 占用率用的钩子：这里使能 DWT 周期计数器当时间基准。
- * 只有开了 configGENERATE_RUN_TIME_STATS 才会被调到。 */
+/**
+  * 功    能：FreeRTOS 统计 CPU 占用率用的钩子：这里使能 DWT 周期计数器当时间基准
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：只有开了 configGENERATE_RUN_TIME_STATS 才会被调到
+  */
 void vConfigureTimerForRunTimeStats(void)
 {
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
@@ -232,8 +236,12 @@ void vApplicationTickHook(void)
   s_lastCycles = now;
 }
 
-/* 给 FreeRTOS 统计用的时间基准：返回 DWT 周期数右移 10 位。
- * 折算后约 164kHz，约 7.3 小时回绕一次，够统计一次运行周期用。 */
+/**
+  * 功    能：给 FreeRTOS 统计用的时间基准：返回 DWT 周期数右移 10 位
+  * 参    数：无
+  * 返 回 值：uint32_t  累计周期右移 10 位（约 164kHz，7.3 小时回绕）
+  * 补    充：折算后约 164kHz，约 7.3 小时回绕一次，够统计一次运行周期用
+  */
 uint32_t vGetRunTimeCounterValue(void)
 {
   uint32_t now = DWT->CYCCNT;
@@ -242,8 +250,12 @@ uint32_t vGetRunTimeCounterValue(void)
 }
 
 /* 故障钩子：已关中断，只能轮询直发，不能再取锁 */
-/* 系统快挂时用的最后一条打印：不走互斥锁、不依赖 RTOS，直接轮询串口往外发。
- * 因为走到这里时堆或栈已经出问题了，套接字/信号量这些都不能再信。最多发 200 字节。 */
+/**
+  * 功    能：系统快挂时用的最后一条打印：不走互斥锁、不依赖 RTOS，直接轮询串口往外发
+  * 参    数：s  以 '\0' 结尾的字符串，最多发 200 字节
+  * 返 回 值：无
+  * 补    充：因为走到这里时堆或栈已经出问题了，套接字/信号量这些都不能再信。最多发 200 字节
+  */
 static void FatalUartSend(const char *s)
 {
   uint16_t n = 0U;
@@ -251,8 +263,13 @@ static void FatalUartSend(const char *s)
   (void)HAL_UART_Transmit(&huart1, (const uint8_t *)s, n, 0xFFFFU);
 }
 
-/* 有任务把栈用爆时会进这里：打印任务名（最多 200 字节）然后死循环，
- * 等独立看门狗把整机复位。xTask 句柄用不上。 */
+/**
+  * 功    能：有任务把栈用爆时会进这里：打印任务名（最多 200 字节）然后死循环，
+  * 参    数：xTask  溢出任务句柄（未使用）
+  *            pcTaskName  任务名，最多打印 200 字节
+  * 返 回 值：无
+  * 补    充：等独立看门狗把整机复位。xTask 句柄用不上
+  */
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
   (void)xTask;
@@ -263,8 +280,12 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
   for(;;) { ; }
 }
 
-/* FreeRTOS 堆分配失败时会进这里：打印一条然后死循环等复位。
- * 出现它就说明 configTOTAL_HEAP_SIZE 开小了，要去调大。 */
+/**
+  * 功    能：FreeRTOS 堆分配失败时会进这里：打印一条然后死循环等复位
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：出现它就说明 configTOTAL_HEAP_SIZE 开小了，要去调大
+  */
 void vApplicationMallocFailedHook(void)
 {
   FatalUartSend("\r\n[FATAL] pvPortMalloc failed, heap exhausted\r\n");
@@ -272,7 +293,11 @@ void vApplicationMallocFailedHook(void)
   for(;;) { ; }
 }
 
-/* 统计任务：每 5s 打一次任务列表和 CPU 占用率，纯调试用，不参与业务。 */
+/**
+  * 功    能：统计任务：每 5s 打一次任务列表和 CPU 占用率，纯调试用，不参与业务
+  * 参    数：argument  未使用
+  * 返 回 值：无
+  */
 static void StartStatsTask(void *argument)
 {
   (void)argument;

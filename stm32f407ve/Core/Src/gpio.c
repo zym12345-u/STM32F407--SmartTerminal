@@ -78,8 +78,12 @@ void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 2 */
-/* 外部中断回调：触摸屏的 PENIRQ（按下时拉低）走这里，
- * 通知触摸相关逻辑去读坐标。GPIO_Pin 参数没用到，因为只挂了一个中断源。 */
+/**
+  * 功    能：外部中断回调：触摸屏的 PENIRQ（按下时拉低）走这里，
+  * 参    数：GPIO_Pin  触发中断的引脚掩码（未使用）
+  * 返 回 值：无
+  * 补    充：通知触摸相关逻辑去读坐标。GPIO_Pin 参数没用到，因为只挂了一个中断源
+  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   (void)GPIO_Pin;

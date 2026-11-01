@@ -272,8 +272,12 @@ struct __FILE { int handle; };
 FILE __stdout;
 void _sys_exit(int x) { (void)x; }
 
-/* 把 USART1 的发送改成 DMA 方式（DMA2 的 Stream7），并建好「发送完成」信号量。
- * printf 走这条路才不用 CPU 一个字节一个字节地等。 */
+/**
+  * 功    能：把 USART1 的发送改成 DMA 方式（DMA2 的 Stream7），并建好「发送完成」信号量
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：printf 走这条路才不用 CPU 一个字节一个字节地等
+  */
 static void UART1_DMA_Init(void)
 {
   __HAL_RCC_DMA2_CLK_ENABLE();
@@ -302,15 +306,23 @@ static void UART1_DMA_Init(void)
     uart1PrintfMutex = osMutexNew(NULL);
 }
 
-/* ARM 编译器半主机（semihosting）模式要求的回调，用来吞掉一个字符。
- * 没有它会一直等调试器，脱机运行就卡死。 */
+/**
+  * 功    能：ARM 编译器半主机（semihosting）模式要求的回调，用来吞掉一个字符
+  * 参    数：ch  待输出字符（0~255）
+  * 返 回 值：无
+  * 补    充：没有它会一直等调试器，脱机运行就卡死
+  */
 void _ttywrch(int ch)
 {
   (void)fputc(ch, &__stdout);
 }
 
-/* printf 的重定向入口：标准库每输出一个字符就调它一次，这里直接丢给 UART1。
- * 相当于把 printf 接到串口上。f 参数用不上，原样把 ch 返回去。 */
+/**
+  * 功    能：printf 的重定向入口：标准库每输出一个字符就调它一次，这里直接丢给 UART1
+  * 参    数：ch  待发送字符（0~255）
+  *            f  标准库文件指针，未使用
+  * 返 回 值：int  原样返回 ch
+  */
 int fputc(int ch, FILE *f)
 {
   (void)f;
@@ -358,9 +370,14 @@ static uint8_t  uart1WireBuf[UART1_WIRE_BUF_SIZE];
 static uint32_t uart1MsgSeq = 0U;
 #endif
 
-/* 线程安全的串口打印：把一行格式化好 → 取互斥锁 → DMA 发出去 → 等真正发完再放锁。
- * 整行不会被别的任务插进来切断；代价是调用期间会阻塞到发送完成。
- * RTOS 还没启动时（main 初始化阶段）走轮询发送，那条路径不取锁。 */
+/**
+  * 功    能：线程安全的串口打印：把一行格式化好 → 取互斥锁 → DMA 发出去 → 等真正发完再放锁
+  * 参    数：fmt  格式串，同 printf
+  *            ...  可变参数
+  * 返 回 值：无
+  * 补    充：整行不会被别的任务插进来切断；代价是调用期间会阻塞到发送完成
+  *            RTOS 还没启动时（main 初始化阶段）走轮询发送，那条路径不取锁
+  */
 void UART_Printf(const char *fmt, ...)
 {
   va_list ap;
@@ -450,20 +467,32 @@ static uint8_t rxData1;   /*USART1 接收缓冲*/
 
 extern void RS485_RxByteISR(uint8_t byte);   /*RS485 接收环形缓冲*/
 
-/* 开始收 USART1 的数据：挂上接收中断，之后每收到一字节由回调再重新挂上。 */
+/**
+  * 功    能：开始收 USART1 的数据：挂上接收中断，之后每收到一字节由回调再重新挂上
+  * 参    数：无
+  * 返 回 值：无
+  */
 void UART1_Receive_Start(void)
 {
   HAL_UART_Receive_IT(&huart1, &rxData1, 1);
 }
 
-/* 开始收 USART3（RS485）的数据，机制同 USART1。 */
+/**
+  * 功    能：开始收 USART3（RS485）的数据，机制同 USART1
+  * 参    数：无
+  * 返 回 值：无
+  */
 void UART3_Receive_Start(void)
 {
   HAL_UART_Receive_IT(&huart3, &s_rxByte, 1);
 }
 
-/* 收到一字节的回调：把数据投进对应的消息队列，然后立刻重新挂接收。
- * 忘了重挂的话就只收得到这一字节，后面全丢。 */
+/**
+  * 功    能：收到一字节的回调：把数据投进对应的消息队列，然后立刻重新挂接收
+  * 参    数：huart  触发回调的串口句柄
+  * 返 回 值：无
+  * 补    充：忘了重挂的话就只收得到这一字节，后面全丢
+  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if(huart->Instance == USART1)

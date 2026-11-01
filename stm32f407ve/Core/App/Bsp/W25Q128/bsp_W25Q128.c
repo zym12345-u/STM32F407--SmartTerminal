@@ -33,8 +33,12 @@ static SPI_HandleTypeDef s_hspi1;
 static uint8_t           s_initOk = 0U;
 static uint32_t          s_lastBusyMs = 0U;   /* 最近一次 WaitReady 实测耗时 */
 
-/* SPI 收发一个字节，读命令时发 0xFF 当哑元。调用前 CS 必须已经拉低。
- * HAL 出错时返回 0xFF 而不是 0x00 —— 返回 0 会被上层误当成「BUSY 已清零」。 */
+/**
+  * 功    能：SPI 收发一个字节，读命令时发 0xFF 当哑元。调用前 CS 必须已经拉低
+  * 参    数：tx  要发出的字节，范围 0x00~0xFF；读命令时填 0xFF
+  * 返 回 值：实际收到的字节；HAL 失败返回 0xFF
+  * 补    充：调用前必须已拉低 CS；失败返回 0xFF，避免把 0x00 当成 BUSY 已清零
+  */
 static uint8_t W25Q_SpiByte(uint8_t tx)
 {
     uint8_t rx = 0xFFU;
@@ -45,8 +49,13 @@ static uint8_t W25Q_SpiByte(uint8_t tx)
     return rx;
 }
 
-/* 用 DWT 周期数算毫秒。不能用 HAL_GetTick：boot 阶段调度器还没起，tick 根本不前进。
- * 32 位约 25.5s 回绕一次，调用方要用无符号差分算间隔。 */
+/**
+  * 功    能：用 DWT 周期数算毫秒。不能用 HAL_GetTick：boot 阶段调度器还没起，tick 根本不前进
+  * 参    数：无
+  * 返 回 值：自复位起的毫秒数，32 位 @168MHz 约 25.5s 回绕，调用方用无符号差分算间隔
+  * 补    充：走 DWT 周期计数，不依赖 HAL tick；boot 阶段调度器未启动时 HAL_GetTick 不前进
+  *            32 位约 25.5s 回绕一次，调用方要用无符号差分算间隔
+  */
 static uint32_t W25Q_Millis(void)
 {
     if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U)
@@ -57,15 +66,25 @@ static uint32_t W25Q_Millis(void)
     return DWT->CYCCNT / (SystemCoreClock / 1000U);   /* 每毫秒 = SystemCoreClock/1000 个周期 */
 }
 
-/* boot 阶段可用的毫秒延时，靠 DWT 忙等，不清零计数器（和 WaitReady 共用同一时基）。 */
+/**
+  * 功    能：boot 阶段可用的毫秒延时，靠 DWT 忙等，不清零计数器（和 WaitReady 共用同一时基）
+  * 参    数：ms  延时长度，单位 ms，本工程只用 300
+  * 返 回 值：无
+  * 补    充：DWT 忙等，不清零 CYCCNT，与 WaitReady 共用同一时基
+  */
 static void W25Q_DelayMsBoot(uint32_t ms)
 {
     uint32_t start = W25Q_Millis();
     while ((W25Q_Millis() - start) < ms) { }
 }
 
-/* 固定 1ms 延时。boot 阶段既不能 osDelay（没有当前 TCB 会崩），
- * 也不能 HAL_Delay（tick 不走会死等），只能忙等。 */
+/**
+  * 功    能：固定 1ms 延时。boot 阶段既不能 osDelay（没有当前 TCB 会崩），
+  * 参    数：无，固定 1ms
+  * 返 回 值：无
+  * 补    充：boot 阶段不能走 osDelay（无当前 TCB 会崩）或 HAL_Delay（tick 不走会死等）
+  *            也不能 HAL_Delay（tick 不走会死等），只能忙等
+  */
 static void W25Q_Delay1ms(void)
 {
     if (osKernelGetState() == osKernelRunning)
@@ -78,7 +97,12 @@ static void W25Q_Delay1ms(void)
     }
 }
 
-/* 读状态寄存器 1（0x05 + 回读 1 字节），CS 全程保持拉低。本函数不等待 BUSY。 */
+/**
+  * 功    能：读状态寄存器 1（0x05 + 回读 1 字节），CS 全程保持拉低。本函数不等待 BUSY
+  * 参    数：无
+  * 返 回 值：状态字节；bit0 = BUSY，bit1 = WEL
+  * 补    充：0x05 + 1 字节回读，期间 CS 保持拉低；本函数不等待 BUSY
+  */
 uint8_t W25Q128_ReadStatus1(void)
 {
     uint8_t st;
@@ -89,9 +113,14 @@ uint8_t W25Q128_ReadStatus1(void)
     return st;
 }
 
-/* 轮询 BUSY 位直到清零，实测耗时记进 s_lastBusyMs。
- * 【入口和每轮循环都补报一次 STORAGE 心跳】—— 4KB 擦除最长要 400ms，
- * 不补报的话这个槽位会被 MonitorTask 判成卡死，整机被复位。 */
+/**
+  * 功    能：轮询 BUSY 位直到清零，实测耗时记进 s_lastBusyMs
+  * 参    数：timeoutMs  最长等待，单位 ms；擦除传 400，编程传 10
+  * 返 回 值：HAL_OK = BUSY 已清零，HAL_TIMEOUT = 超时仍未空闲
+  * 补    充：入口必报一次 WDT_TASK_STORAGE 心跳，循环内每轮补报；实测耗时写入 s_lastBusyMs
+  *            【入口和每轮循环都补报一次 STORAGE 心跳】—— 4KB 擦除最长要 400ms，
+  *            不补报的话这个槽位会被 MonitorTask 判成卡死，整机被复位
+  */
 HAL_StatusTypeDef W25Q128_WaitReady(uint32_t timeoutMs)
 {
     uint8_t  st;
@@ -120,14 +149,24 @@ HAL_StatusTypeDef W25Q128_WaitReady(uint32_t timeoutMs)
     return HAL_TIMEOUT;                         /* 超时返回，不死等 */
 }
 
-/* 取上次等待时长。只有 WaitReady 会写它，32 位读本身原子，不用加锁。 */
+/**
+  * 功    能：取上次等待时长。只有 WaitReady 会写它，32 位读本身原子，不用加锁
+  * 参    数：无
+  * 返 回 值：最近一次 WaitReady 的等待时长，单位 ms
+  * 补    充：只由 WaitReady 写，32 位读天然原子，不必加锁
+  */
 uint32_t W25Q128_GetLastBusyMs(void)
 {
     return s_lastBusyMs;
 }
 
-/* 发写使能命令（0x06）。【必须在 BUSY=0 时发】—— 忙的时候芯片会默默忽略且不报错，
- * 之后写/擦就会静默失败。所以调用前一定要先 WaitReady。 */
+/**
+  * 功    能：发写使能命令（0x06）。【必须在 BUSY=0 时发】—— 忙的时候芯片会默默忽略且不报错，
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：必须在 BUSY=0 时发 06h，忙时会被忽略且不报错；调用前先 WaitReady
+  *            之后写/擦就会静默失败。所以调用前一定要先 WaitReady
+  */
 static void W25Q_WriteEnable(void)
 {
     W25Q_CS_LOW();
@@ -135,8 +174,13 @@ static void W25Q_WriteEnable(void)
     W25Q_CS_HIGH();
 }
 
-/* 读 JEDEC ID（0x9F）。链路有问题时会读到 0x00FFFF 或 0xFFFFFF，可据此判断。
- * 读命令不会置 BUSY，所以不用写使能、也不用等待。 */
+/**
+  * 功    能：读 JEDEC ID（0x9F）。链路有问题时会读到 0x00FFFF 或 0xFFFFFF，可据此判断
+  * 参    数：无
+  * 返 回 值：0x00EF4018 形式；链路异常时可能读到 0x00FFFF 或 0xFFFFFF
+  * 补    充：读命令不置 BUSY，无需写使能和 WaitReady
+  *            读命令不会置 BUSY，所以不用写使能、也不用等待
+  */
 uint32_t W25Q128_ReadJedecId(void)
 {
     uint32_t id;
@@ -149,8 +193,13 @@ uint32_t W25Q128_ReadJedecId(void)
     return id;
 }
 
-/* 读 Device ID（0x90，要先发 3 字节假地址，本芯片会忽略它）。
- * 异常时读到 0x0000 或 0xFFFF。读命令同样不置 BUSY。 */
+/**
+  * 功    能：读 Device ID（0x90，要先发 3 字节假地址，本芯片会忽略它）
+  * 参    数：无
+  * 返 回 值：0xEF17 形式；异常时可能为 0x0000 或 0xFFFF
+  * 补    充：0x90 需先发 3 字节假地址，本芯片忽略地址；读命令不置 BUSY
+  *            异常时读到 0x0000 或 0xFFFF。读命令同样不置 BUSY
+  */
 uint16_t W25Q128_ReadDeviceId(void)
 {
     uint16_t id;
@@ -165,8 +214,14 @@ uint16_t W25Q128_ReadDeviceId(void)
     return id;
 }
 
-/* 读一段数据（0x03 + 24 位地址 + 连续读）。地址由芯片自己自增。
- * addr+num 不得越过 16MB，由调用方保证。返回 HAL_ERROR 表示驱动还没初始化。 */
+/**
+  * 功    能：读一段数据（0x03 + 24 位地址 + 连续读）。地址由芯片自己自增
+  * 参    数：addr  起始字节地址，24 位，范围 0x000000~0xFFFFFF
+  *            pData  输出缓冲首地址，不允许 NULL
+  *            num  读取字节数，范围 1~到芯片末尾的剩余字节
+  * 返 回 值：HAL_OK = 读完，HAL_ERROR = 驱动未初始化
+  * 补    充：芯片内部地址自增，可一口气读完；addr+num 不得越过 16MB，由调用方保证
+  */
 HAL_StatusTypeDef W25Q128_ReadData(uint32_t addr, uint8_t *pData, uint32_t num)
 {
     uint32_t i;
@@ -188,8 +243,13 @@ HAL_StatusTypeDef W25Q128_ReadData(uint32_t addr, uint8_t *pData, uint32_t num)
     return HAL_OK;
 }
 
-/* 擦除一个 4KB 扇区：写使能 → 发 0x20 → 等 BUSY 清零。
- * 落在字库区内的地址会被拒绝，保护字库不被误擦。 */
+/**
+  * 功    能：擦除一个 4KB 扇区：写使能 → 发 0x20 → 等 BUSY 清零
+  * 参    数：addr  字节地址，落点所在 4KB 扇区被整体擦成 0xFF
+  * 返 回 值：HAL_OK = 擦完，HAL_TIMEOUT = 等待超时，HAL_ERROR = 未初始化或落在 GBK 字库区
+  * 补    充：固定顺序 WaitReady -> 06h -> 20h -> WaitReady
+  *            落在字库区内的地址会被拒绝，保护字库不被误擦
+  */
 HAL_StatusTypeDef W25Q128_SectorErase4K(uint32_t addr)
 {
     HAL_StatusTypeDef st;
@@ -224,8 +284,15 @@ HAL_StatusTypeDef W25Q128_SectorErase4K(uint32_t addr)
     return W25Q128_WaitReady(W25Q_ERASE_TIMEOUT_MS); /* 等擦除完成, 耗时入 s_lastBusyMs */
 }
 
-/* 写一页：写使能 → 发 0x02 → 发数据 → 等 BUSY。
- * 整段必须同一页内 —— 跨页时地址会在页内回绕，把页首已经写好的数据盖掉。 */
+/**
+  * 功    能：写一页：写使能 → 发 0x02 → 发数据 → 等 BUSY
+  * 参    数：addr  起始地址，整段必须在同一 256B 页内
+  *            pData  数据首地址，不允许 NULL
+  *            len  字节数，范围 1~256，且页内偏移 + len <= 256
+  * 返 回 值：HAL_OK = 编程完成，HAL_TIMEOUT = 等待超时，HAL_ERROR = 未初始化或参数越界
+  * 补    充：NOR 只能把 1 写成 0，写前该区域必须已擦除
+  *            整段必须同一页内 —— 跨页时地址会在页内回绕，把页首已经写好的数据盖掉
+  */
 HAL_StatusTypeDef W25Q128_PageProgram(uint32_t addr, const uint8_t *pData, uint16_t len)
 {
     HAL_StatusTypeDef st;
@@ -270,7 +337,12 @@ HAL_StatusTypeDef W25Q128_PageProgram(uint32_t addr, const uint8_t *pData, uint1
     return W25Q128_WaitReady(W25Q_PROG_TIMEOUT_MS);
 }
 
-/* 初始化 SPI 并读 ID 校验芯片。返回 1 通过，0 失败（会打印实际读到的字节）。 */
+/**
+  * 功    能：初始化 SPI 并读 ID 校验芯片。返回 1 通过，0 失败（会打印实际读到的字节）
+  * 参    数：无
+  * 返 回 值：1 = 初始化且两项 ID 校验通过，0 = 初始化或 ID 校验失败
+  * 补    充：boot 阶段调用，上电延时走 DWT 300ms；只应调用一次，失败会打印实读 ID
+  */
 uint8_t W25Q128_Init(void)
 {
     GPIO_InitTypeDef gpio = {0};
@@ -345,7 +417,12 @@ uint8_t W25Q128_Init(void)
     return s_initOk;
 }
 
-/* 自检：挑用户区尾部一块扇区，擦 → 写测试图案 → 读回逐个比对。不碰字库区。 */
+/**
+  * 功    能：自检：挑用户区尾部一块扇区，擦 → 写测试图案 → 读回逐个比对。不碰字库区
+  * 参    数：无
+  * 返 回 值：无，结果通过串口打印 PASS/FAIL
+  * 补    充：测试地址 0x009FF000，会破坏该扇区原数据；缓存必须 static（boot 阶段栈只有 1KB）
+  */
 void W25Q128_SelfTest(void)
 {
     /*测试扇区：用户区最后一个扇区，避开 0x00A00000 字库区*/
@@ -414,7 +491,12 @@ void W25Q128_SelfTest(void)
                 (i == W25Q128_PAGE_SIZE) ? "matched" : "MISMATCH");
 }
 
-/* 字库存在性检查：多点采样看 0xFF 占比，全 0xFF 说明根本没烧字库。 */
+/**
+  * 功    能：字库存在性检查：多点采样看 0xFF 占比，全 0xFF 说明根本没烧字库
+  * 参    数：无
+  * 返 回 值：1 = 判定有字库，0 = 未初始化或判定无字库
+  * 补    充：全程只读；s_buf 为 static，避免占用 boot 阶段 1KB 栈
+  */
 uint8_t W25Q128_CheckGBKFont(void)
 {
     static uint8_t s_buf[256U];     /* static: boot 阶段 MSP 栈仅 1KB */

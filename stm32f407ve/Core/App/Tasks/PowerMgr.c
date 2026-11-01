@@ -23,7 +23,11 @@ static volatile uint8_t    s_sleeping;
  * 切换只发生在 GuiTask 上下文，故 s_sleeping 无需加锁。
  */
 
-/* 进息屏：关背光并记下时间。省电主要靠外设自己，这里只管显示。 */
+/**
+  * 功    能：进息屏：关背光并记下时间。省电主要靠外设自己，这里只管显示
+  * 参    数：无
+  * 返 回 值：无
+  */
 static void enter_sleep(void)
 {
     if (s_sleeping != 0U)
@@ -35,7 +39,11 @@ static void enter_sleep(void)
     UART_Printf("[PWR] enter sleep (backlight off)\r\n");
 }
 
-/* 退出息屏：重新点亮背光。 */
+/**
+  * 功    能：退出息屏：重新点亮背光
+  * 参    数：无
+  * 返 回 值：无
+  */
 static void exit_sleep(void)
 {
     if (s_sleeping == 0U)
@@ -48,7 +56,11 @@ static void exit_sleep(void)
     UART_Printf("[PWR] exit sleep (backlight on)\r\n");
 }
 
-/* 初始化自动息屏模块：清状态、记下起始时刻。 */
+/**
+  * 功    能：初始化自动息屏模块：清状态、记下起始时刻
+  * 参    数：无
+  * 返 回 值：无
+  */
 void PowerMgr_Init(void)
 {
     /*必须在 GuiTask 进主循环前调用一次，否则 s_lastActiveTick=0 会立刻息屏*/
@@ -56,13 +68,21 @@ void PowerMgr_Init(void)
     s_sleeping = 0U;
 }
 
-/* 喂一次「有人在操作」的信号：按键、触摸、命令都该调它，把息屏倒计时重置。 */
+/**
+  * 功    能：喂一次「有人在操作」的信号：按键、触摸、命令都该调它，把息屏倒计时重置
+  * 参    数：无
+  * 返 回 值：无
+  */
 void PowerMgr_Feed(void)
 {
     s_lastActiveTick = xTaskGetTickCount();
 }
 
-/* 强制唤醒：正在息屏时点亮屏幕（比如息屏中收到触摸或远程命令）。 */
+/**
+  * 功    能：强制唤醒：正在息屏时点亮屏幕（比如息屏中收到触摸或远程命令）
+  * 参    数：无
+  * 返 回 值：无
+  */
 void PowerMgr_Wakeup(void)
 {
     if (s_sleeping != 0U)
@@ -76,7 +96,11 @@ void PowerMgr_Wakeup(void)
     }
 }
 
-/* 周期处理：判断是不是该息屏、该不该唤醒。各任务主循环里调一下即可。 */
+/**
+  * 功    能：周期处理：判断是不是该息屏、该不该唤醒。各任务主循环里调一下即可
+  * 参    数：无
+  * 返 回 值：无
+  */
 void PowerMgr_Process(void)
 {
     /*只在未息屏时查超时：息屏后靠触摸/按键唤醒*/
@@ -90,7 +114,11 @@ void PowerMgr_Process(void)
     }
 }
 
-/* 问一下当前是不是息屏中。返回 1 息屏、0 正常显示。 */
+/**
+  * 功    能：问一下当前是不是息屏中。返回 1 息屏、0 正常显示
+  * 参    数：无
+  * 返 回 值：1=息屏中，0=正常显示
+  */
 uint8_t PowerMgr_IsSleeping(void)
 {
     return s_sleeping;

@@ -20,8 +20,12 @@ SensorData_t g_sensorData = {0};
 #define SENSOR_TASK_STACK_SIZE   1024U
 
 
-/* 传感器任务：周期读 DHT11 温湿度和 BH1750 光照，结果写进全局 g_sensorData。
- * 读 DHT11 期间会临时把自己提到最高优先级（时序要求严格），读完立刻降回来。 */
+/**
+  * 功    能：传感器任务：周期读 DHT11 温湿度和 BH1750 光照，结果写进全局 g_sensorData
+  * 参    数：argument  未使用，任务参数
+  * 返 回 值：无
+  * 补    充：读 DHT11 期间会临时把自己提到最高优先级（时序要求严格），读完立刻降回来
+  */
 void StartSensorTask(void *argument)
 {
   (void)argument;
@@ -95,7 +99,11 @@ void StartSensorTask(void *argument)
 }
 
 
-/* 创建传感器任务，由 freertos.c 启动时调一次。句柄不保存。 */
+/**
+  * 功    能：创建传感器任务，由 freertos.c 启动时调一次。句柄不保存
+  * 参    数：无
+  * 返 回 值：无，句柄不保存
+  */
 void SensorTask_Create(void)
 {
   static const osThreadAttr_t sensorTaskAttr = {

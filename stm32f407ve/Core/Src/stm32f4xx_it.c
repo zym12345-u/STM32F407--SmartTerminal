@@ -233,13 +233,21 @@ void USART1_IRQHandler(void)
   HAL_UART_IRQHandler(&huart1);
 }
 
-/* DMA2 Stream7 中断入口 —— 这条流是 USART1 的发送 DMA，转给 HAL 处理。 */
+/**
+  * 功    能：DMA2 Stream7 中断入口 —— 这条流是 USART1 的发送 DMA，转给 HAL 处理
+  * 参    数：无
+  * 返 回 值：无
+  */
 void DMA2_Stream7_IRQHandler(void)
 {
   HAL_DMA_IRQHandler(&hdma_usart1_tx);   /*Stream7 = USART1_TX，中断优先级 5*/
 }
 
-/* CAN1 接收 FIFO0 中断入口，转给 HAL —— HAL 里再回调到 bsp_CAN 的收帧函数。 */
+/**
+  * 功    能：CAN1 接收 FIFO0 中断入口，转给 HAL —— HAL 里再回调到 bsp_CAN 的收帧函数
+  * 参    数：无
+  * 返 回 值：无
+  */
 void CAN1_RX0_IRQHandler(void)
 {
   HAL_CAN_IRQHandler(&hcan1);   /*优先级必须 5：回调里要调 FromISR，0/0 会触发断言*/
