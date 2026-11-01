@@ -18,8 +18,30 @@ DMA_HandleTypeDef hdma_usart1_tx;   /*USART1_TX 固定走 DMA2 Stream7 Channel4*
 static volatile uint8_t  uart1DmaBusy = 0U;   /*DMA 正在发送*/
 
 /* DMA 完成信号量 + 两路发送共用的锁 */
-static osSemaphoreId_t uart1TxDoneSem;
-static osMutexId_t     uart1PrintfMutex;
+/* ══════ 两个同步对象，解决的是【两个完全不同的问题】══════
+ * 这是理解「信号量 vs 互斥锁」最直接的例子，就在同一个文件里：
+ *
+ * ── uart1TxDoneSem（信号量，max=1，初值 0）──
+ *   用途：ISR → 任务 的【同步】。DMA 发完在中断里 release，任务在 UART_Printf 里 acquire 等。
+ *   初值 0 的意思是「一开始没有信号」，任务必须等到中断释放了才拿得到。
+ *   为什么不用互斥锁：这里等的是「一件事发生了」，不是「抢一个资源」。
+ *   事件没有所有者，谁都能 take；而互斥锁必须「谁锁谁解」，
+ *   中断里既不能拿锁也不能放锁，用它就做不成这件事。
+ *
+ * ── uart1PrintfMutex（互斥锁）──
+ *   用途：保护 uart1PrintfBuf 这块【共享缓冲区】。多个任务都要 printf，谁拿到锁谁用这块缓冲。
+ *   为什么必须用互斥锁而不是二值信号量：
+ *     FreeRTOS 的互斥锁带【优先级继承】—— 低优先级任务持锁时若高优先级任务来抢，
+ *     低优先级会被临时提到高优先级，赶紧干完放手。这是为了防止「优先级反转」：
+ *     高优先级干等低优先级，而低优先级又被中优先级抢走 CPU，结果高优先级被饿死。
+ *     普通信号量【没有】优先级继承，拿它保护共享资源就可能踩这个坑。
+ *
+ * 一句话区分：
+ *   等某件事发生 → 信号量（二值/计数）
+ *   抢某个资源用 → 互斥锁（带优先级继承）
+ */
+static osSemaphoreId_t uart1TxDoneSem;    /* 同步：等 DMA 发完，初值 0 = 一开始没信号 */
+static osMutexId_t     uart1PrintfMutex;   /* 互斥：保护 uart1PrintfBuf，带优先级继承 */
 
 static void UART1_DMA_Init(void);
 /* USER CODE END 0 */
