@@ -76,27 +76,17 @@ typedef enum
 
 
 /*非阻塞，可在 GUI 事件回调里直接调用，队列满静默丢弃*/
-/**
-  * 函    数：Wifi_PostScan
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 让 WifiTask 去扫一遍热点：只投一条命令进队列就返回，不等结果。 */
 void Wifi_PostScan(void);
 
 /*非阻塞；字符串在函数内拷入命令结构体，调用方缓冲可立即释放*/
-/**
-  * 函    数：Wifi_PostJoin
-  * 参    数：ssid  热点名 0~32 字符，不可为 NULL；pwd  密码 0~63 字符，开放热点传空串
-  * 返 回 值：无
-  */
+/* 让 WifiTask 连指定热点：投命令进队列就返回，连接结果通过事件队列拿。
+ * ssid 不能为 NULL；开放热点密码传空串。 */
 void Wifi_PostJoin(const char *ssid, const char *pwd);
 
 /*0 tick 超时，绝不阻塞 GUI；事件队列长度由 WifiTask_Create 决定*/
-/**
-  * 函    数：Wifi_TryGetEvent
-  * 参    数：ev  输出事件，取到时写入 1~3，不可为 NULL
-  * 返 回 值：1=取到一个事件，0=当前无事件
-  */
+/* 非阻塞取一个 WiFi 事件（扫描完成 / 连接成功 / 连接失败）。
+ * 返回 1 取到、0 当前没有事件。 */
 uint8_t Wifi_TryGetEvent(WifiEvent_t *ev);
 
 

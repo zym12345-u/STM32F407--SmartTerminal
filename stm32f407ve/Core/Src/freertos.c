@@ -192,11 +192,8 @@ void MX_FREERTOS_Init(void) {
 }
 
 /* USER CODE BEGIN Header_StartKeyTask */
-/**
-  * 函    数：StartKeyTask
-  * 参    数：argument  未使用
-  * 返 回 值：无
-  */
+/* CubeMX 生成的默认空实现（__weak）。真正的按键任务在 KeyTask.c 里，
+ * 同名覆盖掉了这个弱符号，所以这里永远轮不到执行。 */
 /* USER CODE END Header_StartKeyTask */
 __weak void StartKeyTask(void *argument)
 {
@@ -215,11 +212,8 @@ __weak void StartKeyTask(void *argument)
 static volatile uint64_t s_runCycles = 0U;
 static volatile uint32_t s_lastCycles = 0U;
 
-/**
-  * 函    数：vConfigureTimerForRunTimeStats
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* FreeRTOS 统计 CPU 占用率用的钩子：这里使能 DWT 周期计数器当时间基准。
+ * 只有开了 configGENERATE_RUN_TIME_STATS 才会被调到。 */
 void vConfigureTimerForRunTimeStats(void)
 {
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
@@ -229,11 +223,7 @@ void vConfigureTimerForRunTimeStats(void)
   s_runCycles  = 0U;
 }
 
-/**
-  * 函    数：vApplicationTickHook
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 每个系统节拍（1ms）被调用一次。这里留空，没做任何事。 */
 /* 在 SysTick 中断上下文里执行，只做加法 */
 void vApplicationTickHook(void)
 {
@@ -242,11 +232,8 @@ void vApplicationTickHook(void)
   s_lastCycles = now;
 }
 
-/**
-  * 函    数：vGetRunTimeCounterValue
-  * 参    数：无
-  * 返 回 值：uint32_t  累计周期右移 10 位（约 164kHz，7.3 小时回绕）
-  */
+/* 给 FreeRTOS 统计用的时间基准：返回 DWT 周期数右移 10 位。
+ * 折算后约 164kHz，约 7.3 小时回绕一次，够统计一次运行周期用。 */
 uint32_t vGetRunTimeCounterValue(void)
 {
   uint32_t now = DWT->CYCCNT;
@@ -255,11 +242,8 @@ uint32_t vGetRunTimeCounterValue(void)
 }
 
 /* 故障钩子：已关中断，只能轮询直发，不能再取锁 */
-/**
-  * 函    数：FatalUartSend
-  * 参    数：s  以 '\0' 结尾的字符串，最多发 200 字节
-  * 返 回 值：无
-  */
+/* 系统快挂时用的最后一条打印：不走互斥锁、不依赖 RTOS，直接轮询串口往外发。
+ * 因为走到这里时堆或栈已经出问题了，套接字/信号量这些都不能再信。最多发 200 字节。 */
 static void FatalUartSend(const char *s)
 {
   uint16_t n = 0U;
@@ -267,12 +251,8 @@ static void FatalUartSend(const char *s)
   (void)HAL_UART_Transmit(&huart1, (const uint8_t *)s, n, 0xFFFFU);
 }
 
-/**
-  * 函    数：vApplicationStackOverflowHook
-  * 参    数：xTask  溢出任务句柄（未使用）
-  * 参    数：pcTaskName  任务名，最多打印 200 字节
-  * 返 回 值：无
-  */
+/* 有任务把栈用爆时会进这里：打印任务名（最多 200 字节）然后死循环，
+ * 等独立看门狗把整机复位。xTask 句柄用不上。 */
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
   (void)xTask;
@@ -283,11 +263,8 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
   for(;;) { ; }
 }
 
-/**
-  * 函    数：vApplicationMallocFailedHook
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* FreeRTOS 堆分配失败时会进这里：打印一条然后死循环等复位。
+ * 出现它就说明 configTOTAL_HEAP_SIZE 开小了，要去调大。 */
 void vApplicationMallocFailedHook(void)
 {
   FatalUartSend("\r\n[FATAL] pvPortMalloc failed, heap exhausted\r\n");
@@ -295,11 +272,7 @@ void vApplicationMallocFailedHook(void)
   for(;;) { ; }
 }
 
-/**
-  * 函    数：StartStatsTask
-  * 参    数：argument  未使用
-  * 返 回 值：无
-  */
+/* 统计任务：每 5s 打一次任务列表和 CPU 占用率，纯调试用，不参与业务。 */
 static void StartStatsTask(void *argument)
 {
   (void)argument;

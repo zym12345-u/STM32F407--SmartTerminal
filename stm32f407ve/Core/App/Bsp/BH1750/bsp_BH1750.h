@@ -51,18 +51,10 @@ typedef struct
 
 /*对外接口*/
 
-/**
-  * 函    数：BH1750_Init
-  * 参    数：无
-  * 返 回 值：BH1750_OK=成功，其它=失败(重试 3 次仍不通)
-  */
+/* 初始化光照传感器（走 I2C1），内部最多重试 3 次。返回 BH1750_OK 表示通了。 */
 BH1750_Status_t BH1750_Init(void);
 
-/**
-  * 函    数：BH1750_Read
-  * 参    数：data  输出，lux 单位 lux(0~54612)，is_valid 由本函数置 1
-  * 返 回 值：BH1750_OK=成功，其它=失败
-  */
+/* 读一次光照，单位 lux（0~54612），成功后把 is_valid 置 1。 */
 BH1750_Status_t BH1750_Read(BH1750_Data_t *data);
 
 

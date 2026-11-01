@@ -8,11 +8,8 @@
 
 
 /*微秒级计时(DWT 周期计数器)*/
-/**
-  * 函    数：DWT_Init
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 使能 DWT 的周期计数器（CYCCNT），给 DHT11 的微秒级时序当基准。
+ * 没有它做不了 us 级延时 —— DHT11 每个电平的判定都在几十微秒量级。 */
 static void DWT_Init(void)
 {
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;  /* TRCENA 不置 1，DWT 不计数 */
@@ -20,21 +17,15 @@ static void DWT_Init(void)
     DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;            /* 开启周期计数 */
 }
 
-/**
-  * 函    数：DWT_GetCycles
-  * 参    数：无
-  * 返 回 值：内核周期数，168MHz 下约 25.6s 回绕一次(无符号减法可正确跨回绕)
-  */
+/* 读当前内核周期数。168MHz 下约 25.6s 回绕一次，
+ * 用无符号减法算差值可以正确跨过回绕点。 */
 static __INLINE uint32_t DWT_GetCycles(void)
 {
     return DWT->CYCCNT;
 }
 
-/**
-  * 函    数：DWT_DelayUs
-  * 参    数：us  延时微秒数，常用 30(主机释放总线后的 20~40us 等待)
-  * 返 回 值：无
-  */
+/* 用 DWT 计数做微秒级忙等（会占着 CPU，但精度够）。
+ * 常用 30us —— 主机发完起始信号、释放总线后要等这一小段。 */
 static void DWT_DelayUs(uint32_t us)
 {
     uint32_t start = DWT_GetCycles();
@@ -42,11 +33,8 @@ static void DWT_DelayUs(uint32_t us)
     while ((DWT_GetCycles() - start) < ticks) { ; }
 }
 
-/**
-  * 函    数：DWT_GetElapsedUs
-  * 参    数：start  起始时刻的 CYCCNT 值(DWT_GetCycles 取得)
-  * 返 回 值：自 start 起经过的微秒数，0~约 25.6e6(回绕前)
-  */
+/* 算从 start 到现在过了多少微秒。DHT11 里每个「等电平变化」的超时判断都靠它，
+ * 也是防止时序错乱时死等下去的唯一手段。 */
 static uint32_t DWT_GetElapsedUs(uint32_t start)
 {
     return (DWT_GetCycles() - start) / (SystemCoreClock / 1000000U);
@@ -54,11 +42,7 @@ static uint32_t DWT_GetElapsedUs(uint32_t start)
 
 
 /*引脚操作*/
-/**
-  * 函    数：DHT11_PinOutput
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 把数据引脚切成输出 —— 主机要拉低总线发起始信号时才用。 */
 static void DHT11_PinOutput(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -69,11 +53,7 @@ static void DHT11_PinOutput(void)
     HAL_GPIO_Init(DHT11_GPIO_PORT, &GPIO_InitStruct);
 }
 
-/**
-  * 函    数：DHT11_PinInput
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 把数据引脚切回输入 —— 发完起始信号、准备读传感器回的电平。 */
 static void DHT11_PinInput(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -89,11 +69,8 @@ static void DHT11_PinInput(void)
 
 /*对外接口*/
 
-/**
-  * 函    数：DHT11_Init
-  * 参    数：无
-  * 返 回 值：恒为 DHT11_OK(本驱动无硬件检测手段，掉线由首次读取的超时暴露)
-  */
+/* 初始化 DHT11：配引脚、初始化 DWT 时基。
+ * 注意它恒返回 OK —— 这个驱动没有硬件检测手段，传感器掉线要等第一次读超时才发现。 */
 DHT11_Status_t DHT11_Init(void)
 {
     DHT11_GPIO_CLK_EN();
@@ -103,11 +80,9 @@ DHT11_Status_t DHT11_Init(void)
 }
 
 
-/**
-  * 函    数：DHT11_Read
-  * 参    数：data  输出，temperature 单位 °C(0~50)，humidity 单位 %RH(20~90)，is_valid 由本函数置 1
-  * 返 回 值：DHT11_OK=成功，DHT11_ERROR=data 为空，DHT11_TIMEOUT=等电平超时，DHT11_CHECKSUM_ERR=校验错
-  */
+/* 读一次温湿度：拉低总线发起始 → 等传感器响应 → 逐位读 40bit → 校验和。
+ * 每一步等待都有微秒级超时兜底，不会因为传感器没接就卡死在这里。
+ * 返回 OK / ERROR（data 为空）/ TIMEOUT（等电平超时）/ CHECKSUM_ERR（校验错）。 */
 DHT11_Status_t DHT11_Read(DHT11_Data_t *data)
 {
     uint8_t  buf[5] = {0};

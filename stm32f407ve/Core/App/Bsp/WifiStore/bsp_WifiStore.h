@@ -14,18 +14,11 @@
 #define WIFI_FLASH_BASE    0x080E0000U   /* sector 11 起始地址 */
 
 
-/**
-  * 函    数：WifiStore_Load
-  * 参    数：out  输出，不能为空
-  * 返 回 值：1=有合法记录，0=从未写过/校验失败(内容清零)
-  */
+/* 从内部 Flash 读 WiFi 凭据。返回 1 有合法记录；
+ * 返回 0 表示从没写过或校验不过，这时会把 out 清零。 */
 uint8_t WifiStore_Load(WifiCred_t *out);
 
-/**
-  * 函    数：WifiStore_Save
-  * 参    数：in  待保存凭据，不能为空
-  * 返 回 值：1=成功，0=失败
-  */
+/* 把 WiFi 凭据写进内部 Flash（擦除 + 写入 + 回读比对）。返回 1 成功、0 失败。 */
 uint8_t WifiStore_Save(const WifiCred_t *in);
 
 

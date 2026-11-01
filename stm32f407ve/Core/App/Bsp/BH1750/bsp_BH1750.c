@@ -11,11 +11,7 @@ static uint8_t  s_bh1750_ready;   /* 初始化完成标志 */
 
 
 /*I2C1 寄存器直配*/
-/**
-  * 函    数：I2C1_HardwareInit
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 配好 I2C1 的引脚（PB6/PB7 复用开漏）和时钟，给读光照传感器打基础。 */
 static void I2C1_HardwareInit(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -45,11 +41,8 @@ static void I2C1_HardwareInit(void)
 }
 
 
-/**
-  * 函    数：I2C1_BusRecovery
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* I2C 总线死锁恢复：从机把 SDA 一直拉低不放时，主设备手动打 9 个时钟脉冲把它顶出来，
+ * 再补一个 STOP。传感器掉电重启后经常需要这一步，否则后续所有读写都超时。 */
 static void I2C1_BusRecovery(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -93,11 +86,8 @@ static void I2C1_BusRecovery(void)
 }
 
 
-/**
-  * 函    数：I2C1_MasterWrite
-  * 参    数：addr 8 位从机地址；pData 待发数据；len 字节数 1~255
-  * 返 回 值：0=成功，1=超时(已尝试总线恢复)
-  */
+/* I2C1 主机模式发一串字节（起始 → 从机地址 → 数据 → 停止）。
+ * 返回 0 成功；1 超时，且超时前已经尝试过一次总线恢复。 */
 static uint8_t I2C1_MasterWrite(uint8_t addr, const uint8_t *pData, uint8_t len)
 {
     uint32_t timeout;
@@ -140,11 +130,8 @@ static uint8_t I2C1_MasterWrite(uint8_t addr, const uint8_t *pData, uint8_t len)
 }
 
 
-/**
-  * 函    数：I2C1_MasterRead
-  * 参    数：addr 8 位从机地址；pData 接收缓冲；len 字节数，传 0 直接失败
-  * 返 回 值：0=成功，1=参数非法或某一步超时(已尝试总线恢复)
-  */
+/* I2C1 主机模式读一串字节。len 传 0 直接判失败（没有可读长度）。
+ * 返回 0 成功；1 参数非法或某一步超时（超时前已尝试总线恢复）。 */
 static uint8_t I2C1_MasterRead(uint8_t addr, uint8_t *pData, uint8_t len)
 {
     uint32_t timeout;
@@ -203,11 +190,8 @@ static uint8_t I2C1_MasterRead(uint8_t addr, uint8_t *pData, uint8_t len)
 
 /*BH1750 对外接口*/
 
-/**
-  * 函    数：BH1750_Init
-  * 参    数：无
-  * 返 回 值：BH1750_OK=成功，BH1750_ERROR=重试 3 次仍失败
-  */
+/* 初始化光照传感器：上电、设成连续高分辨率模式，失败会重试 3 次。
+ * 返回 BH1750_OK 成功，BH1750_ERROR 表示 3 次都没通。 */
 BH1750_Status_t BH1750_Init(void)
 {
     uint8_t cmd;
@@ -247,11 +231,8 @@ BH1750_Status_t BH1750_Init(void)
 }
 
 
-/**
-  * 函    数：BH1750_Read
-  * 参    数：data  输出，lux 单位 lux(0~54612)，is_valid 由本函数置 1
-  * 返 回 值：BH1750_OK=成功，BH1750_ERROR=data 为空、未初始化或重试 3 次仍失败
-  */
+/* 读一次光照值，单位 lux（0~54612），读成功后把 is_valid 置 1。
+ * 返回 BH1750_OK 成功；BH1750_ERROR 表示 data 为空、没初始化或重试 3 次仍失败。 */
 /* ---------------------------------------------------------------------------
  * 连续高分辨率模式数据(只读)：
  *   名称   类型/位宽  含义               单位/范围     谁写/谁读

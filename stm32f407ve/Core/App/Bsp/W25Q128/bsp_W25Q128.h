@@ -22,90 +22,44 @@
 /*GBK 字库区：后 6MB，验证前一律写保护*/
 #define W25Q128_GBK_BASE        0x00A00000UL   /* 字库起始(后 6MB), 之前 10MB 为用户区 */
 
-/**
-  * 函    数：W25Q128_Init
-  * 参    数：无
-  * 返 回 值：1 = 初始化且 ID 校验通过，0 = 失败
-  * 注意事项：失败时会打印实读字节
-  */
+/* 初始化 W25Q128：配 SPI 并读 JEDEC ID 确认芯片在位。
+ * 返回 1 通过、0 失败（失败时会打印实际读到的字节，方便判断是没接还是线序错）。 */
 uint8_t W25Q128_Init(void);
 
-/**
-  * 函    数：W25Q128_ReadJedecId
-  * 参    数：无
-  * 返 回 值：0x9F 读回的 3 字节，0x00EF4018 形式
-  */
+/* 读 JEDEC ID（命令 0x9F）。正常应返回 0x00EF4018：EF 是 Winbond，40 表示 128Mb。 */
 uint32_t W25Q128_ReadJedecId(void);
 
-/**
-  * 函    数：W25Q128_ReadDeviceId
-  * 参    数：无
-  * 返 回 值：0x90 读回的 2 字节，0xEF17 形式
-  */
+/* 读 Device ID（命令 0x90）。正常应返回 0xEF17。 */
 uint16_t W25Q128_ReadDeviceId(void);
 
-/**
-  * 函    数：W25Q128_ReadData
-  * 参    数：addr  起始字节地址，24 位
-  * 参    数：pData  输出缓冲
-  * 参    数：num  读取字节数
-  * 返 回 值：HAL_OK = 读完，HAL_ERROR = 未初始化
-  */
+/* 从指定地址读一段数据。芯片内部地址会自动增长，可以一口气读完。
+ * addr+num 不能越过 16MB 边界，这点由调用方保证。 */
 HAL_StatusTypeDef W25Q128_ReadData(uint32_t addr, uint8_t *pData, uint32_t num);
 
-/**
-  * 函    数：W25Q128_SectorErase4K
-  * 参    数：addr  字节地址，按 A23~A12 对齐到所在扇区
-  * 返 回 值：HAL_OK = 擦完，HAL_TIMEOUT = 超时，HAL_ERROR = 未初始化或字库区
-  * 注意事项：含写使能与 BUSY 轮询，实测耗时存于 W25Q128_GetLastBusyMs
-  */
+/* 擦掉 addr 所在的 4KB 扇区（按 A23~A12 对齐到扇区起点）。
+ * 字库区受写保护，传进去直接返回错误；内部含写使能和 BUSY 轮询。 */
 HAL_StatusTypeDef W25Q128_SectorErase4K(uint32_t addr);
 
-/**
-  * 函    数：W25Q128_PageProgram
-  * 参    数：addr  起始地址，必须整段在同一 256B 页内
-  * 参    数：pData  数据首地址
-  * 参    数：len  字节数，范围 1~256
-  * 返 回 值：HAL_OK = 完成，HAL_ERROR = 越界或未初始化
-  */
+/* 往一页里写数据（一页 256 字节）。
+ * 【整段必须落在同一页内】—— 跨页会绕回页首覆盖已写内容，这是 Flash 的硬件行为。 */
 HAL_StatusTypeDef W25Q128_PageProgram(uint32_t addr, const uint8_t *pData, uint16_t len);
 
-/**
-  * 函    数：W25Q128_ReadStatus1
-  * 参    数：无
-  * 返 回 值：状态字节，bit0 = BUSY，bit1 = WEL
-  */
+/* 读状态寄存器 1：bit0 = BUSY，bit1 = 写使能 WEL。本函数只是读，不等待。 */
 uint8_t W25Q128_ReadStatus1(void);
 
-/**
-  * 函    数：W25Q128_WaitReady
-  * 参    数：timeoutMs  最长等待，单位 ms
-  * 返 回 值：HAL_OK = BUSY 已清零，HAL_TIMEOUT = 超时仍未空闲
-  * 注意事项：入口与循环内各补报一次 WDT_TASK_STORAGE 心跳，否则长擦除会喂不上狗
-  */
+/* 轮询等芯片空闲（BUSY 清零）。擦除给 400ms，编程给 10ms。
+ * 等待期间会持续补报 STORAGE 心跳，否则长擦除会把看门狗饿死。 */
 HAL_StatusTypeDef W25Q128_WaitReady(uint32_t timeoutMs);
 
-/**
-  * 函    数：W25Q128_GetLastBusyMs
-  * 参    数：无
-  * 返 回 值：最近一次 WaitReady 实测等待时长，单位 ms
-  */
+/* 取最近一次等待实际花了多少毫秒，用来判断芯片是不是越擦越慢。 */
 uint32_t W25Q128_GetLastBusyMs(void);
 
-/**
-  * 函    数：W25Q128_SelfTest
-  * 参    数：无
-  * 返 回 值：无
-  * 注意事项：仅 W25Q128_Init 成功后调用；测试扇区取用户区尾部，避开 GBK 字库区
-  */
+/* 自检：在用户区尾部找一块扇区做「擦 → 写图案 → 读回比对」。
+ * 刻意避开字库区，不会破坏字库。只能在 Init 成功之后调。 */
 void W25Q128_SelfTest(void);
 
-/**
-  * 函    数：W25Q128_CheckGBKFont
-  * 参    数：无
-  * 返 回 值：1 = 字库区结构合理，0 = 未写入或结构异常
-  * 注意事项：只做存在性检查，不解析字库格式；首字节非全 0xFF 且 6MB 采样 0xFF 占比 < 80%
-  */
+/* 查字库有没有烧进去：看首字节、分区边界、6MB 范围内几处采样点的 0xFF 占比。
+ * 只判存在性，不解析字库格式。返回 1 结构合理、0 未写入或异常。 */
 uint8_t W25Q128_CheckGBKFont(void);
 
 #endif /* __BSP_W25Q128_H */

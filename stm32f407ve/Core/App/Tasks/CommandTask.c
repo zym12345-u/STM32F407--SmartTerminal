@@ -36,11 +36,8 @@ extern osMessageQueueId_t LEDQueueHandle;
 #define CMD_COLOR_BLUE      3U
 #define CMD_COLOR_INVALID   0xFFU
 
-/**
-  * 函    数：Command_MapColor
-  * 参    数：code  协议颜色码，取值 1~3
-  * 返 回 值：绿/蓝对应枚举，红及其它值返回 (LEDColor)0xFF
-  */
+/* 把串口协议里的颜色码（1~3）翻成 LED 枚举。
+ * 红和其它值返回 (LEDColor)0xFF 表示「这个颜色本板子没有」，由调用方回错误。 */
 static LEDColor Command_MapColor(uint8_t code)
 {
   LEDColor color;
@@ -60,11 +57,8 @@ static LEDColor Command_MapColor(uint8_t code)
   return color;
 }
 
-/**
-  * 函    数：StartCommandTask
-  * 参    数：argument  未使用，任务参数
-  * 返 回 值：无
-  */
+/* 串口命令任务：从 CommandQueue 取字节拼成一条命令，解析后执行（点灯等）。
+ * 取消息带 1s 超时，所以即使没命令进来也会定期报心跳。 */
 void StartCommandTask(void *argument)
 {
   (void)argument;

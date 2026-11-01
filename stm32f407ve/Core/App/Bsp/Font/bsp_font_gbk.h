@@ -13,18 +13,10 @@
 extern const uint32_t g_bspGbkMap[];      /* 6877 项, 高 16 位=Unicode, 低 16 位=GBK 码, 升序 */
 extern const uint16_t g_bspGbkMapNum;     /* 表项数, 二分查找的右边界(左闭右开) */
 
-/**
-  * 函    数：BSP_Font_Gbk16
-  * 参    数：无
-  * 返 回 值：外挂 GBK 16px 字体对象指针(ASCII 回落 montserrat_16)
-  */
+/* 取外挂 GBK 16px 字体对象（ASCII 回落 montserrat_16），设给 LVGL 用。 */
 const lv_font_t *BSP_Font_Gbk16(void);
 
-/**
-  * 函    数：BSP_Font_SelfTest
-  * 参    数：无
-  * 返 回 值：1=读取成功且点阵不是全 0/全 1，0=读取失败或内容异常
-  */
+/* 字库自检：返回 1 读取正常且点阵不是全 0/全 1，0 表示读失败或内容异常。 */
 uint8_t BSP_Font_SelfTest(void);
 
 #endif /* __BSP_FONT_GBK_H */

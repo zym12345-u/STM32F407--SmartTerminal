@@ -50,11 +50,9 @@ int main(void)
   }
 }
 
-/**
-  * 函    数：app_is_valid
-  * 参    数：无
-  * 返 回 值：1 有效，0 无效
-  */
+/* 判断 App 区有没有能跑的固件：读它向量表的前两个字（栈顶、复位向量）。
+ * 栈顶必须落在 SRAM 范围内且 8 字节对齐（不对齐用 64 位变量就 UsageFault）；
+ * 复位向量 bit0 必须为 1（Thumb 地址，为 0 立刻 HardFault）且落在 App 区内。 */
 static int app_is_valid(void)
 {
   uint32_t app_msp   = *(volatile uint32_t *)(APP_BASE_ADDR);
@@ -76,11 +74,9 @@ static int app_is_valid(void)
   return 1;
 }
 
-/**
-  * 函    数：jump_to_app
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 从 BootLoader 跳到 App 执行：先关中断、停 SysTick、清 NVIC 的使能与挂起位，
+ * 再把 MSP 设成 App 的栈顶、VTOR 指向 App 的向量表，最后按复位向量跳过去。
+ * 顺序不能乱 —— 尤其是清 NVIC 必须在改 VTOR 之前，否则 App 一开中断就跳回 BootLoader。 */
 static void jump_to_app(void)
 {
   typedef void (*app_entry_t)(void);

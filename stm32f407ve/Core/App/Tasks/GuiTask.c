@@ -72,11 +72,7 @@ static uint8_t   s_wifiBusy;
 /*LED 命令投递*/
 
 /*队列只传指针：这里 pvPortMalloc，LEDTask 负责 vPortFree，投递失败必须自己释放*/
-/**
-  * 函    数：GUI_LedPost
-  * 参    数：color  目标灯，LEDColor_Green / LEDColor_Blue；state  目标状态
-  * 返 回 值：无
-  */
+/* 往 LEDQueue 投一条点灯指令。GUI 按钮点灯也走这条统一通道，不直接碰 GPIO。 */
 static void GUI_LedPost(LEDColor color, LEDState state)
 {
   LEDMessage *msg = pvPortMalloc(sizeof(LEDMessage));
@@ -108,11 +104,7 @@ static lv_style_t s_styleSwBg;      /* 开关背景(关) */
 static lv_style_t s_styleSwIndOn;   /* 开关指示器(开) */
 static lv_style_t s_styleSwKnob;    /* 开关旋钮 */
 
-/**
-  * 函    数：GUI_InitStyles
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 初始化界面样式（圆角、配色、阴影等），建屏之前调一次。 */
 static void GUI_InitStyles(void)
 {
   /* 背景:纵向渐变 */
@@ -219,11 +211,8 @@ static void GUI_InitStyles(void)
 }
 
 /*传感器卡片*/
-/**
-  * 函    数：GUI_CreateSensorCard
-  * 参    数：parent 父容器；x/y 坐标 px；w/h 尺寸 px；accent 色条颜色；labelText 标签；initVal 初值
-  * 返 回 值：数值 label 指针，供 1s 定时器刷新
-  */
+/* 建一张传感器卡片：图标 + 名称 + 数值。返回数值那个 label，
+ * 后续 1s 定时器直接改它的文字来刷新。 */
 static lv_obj_t *GUI_CreateSensorCard(lv_obj_t *parent, int16_t x, int16_t y,
                                       int16_t w, int16_t h,
                                       lv_color_t accent,
@@ -259,11 +248,7 @@ static lv_obj_t *GUI_CreateSensorCard(lv_obj_t *parent, int16_t x, int16_t y,
 }
 
 /*状态栏*/
-/**
-  * 函    数：GUI_CreateStatusBar
-  * 参    数：scr  目标屏幕，主屏对象
-  * 返 回 值：无
-  */
+/* 在主屏顶部建状态栏（WiFi 状态、时间之类）。 */
 static void GUI_CreateStatusBar(lv_obj_t *scr)
 {
   /* 底部细线分隔 */
@@ -286,11 +271,8 @@ static void GUI_CreateStatusBar(lv_obj_t *scr)
   lv_obj_align(labelClock, LV_ALIGN_TOP_RIGHT, -8, 5);
 }
 
-/**
-  * 函    数：LedSwitchEventCb
-  * 参    数：event  LVGL 事件对象，user_data 存的是 LEDColor
-  * 返 回 值：无
-  */
+/* 灯开关的事件回调：从 user_data 取出是哪个灯，投 LEDQueue，同时更新按钮外观。
+ * 实际点灯还是 LEDTask 干的，GUI 只负责把意图发出去。 */
 static void LedSwitchEventCb(lv_event_t *event)
 {
   lv_obj_t *sw = lv_event_get_target(event);
@@ -302,11 +284,7 @@ static void LedSwitchEventCb(lv_event_t *event)
   GUI_LedPost((LEDColor)color, target);
 }
 
-/**
-  * 函    数：GUI_CreateLedCard
-  * 参    数：parent 父对象；x/y 坐标 px；w/h 尺寸 px；onColor 开态指示色；color 灯枚举，存 user_data
-  * 返 回 值：容器 card 指针
-  */
+/* 建一张灯控卡片（开关 + 状态指示）。灯的颜色存在 user_data 里，供回调取用。 */
 static lv_obj_t *GUI_CreateLedCard(lv_obj_t *parent, int16_t x, int16_t y,
                                     int16_t w, int16_t h,
                                     lv_color_t onColor,
@@ -350,11 +328,7 @@ static lv_obj_t *GUI_CreateLedCard(lv_obj_t *parent, int16_t x, int16_t y,
 }
 
 /*LED 开关卡片*/
-/**
-  * 函    数：GUI_CreateButtons
-  * 参    数：scr  主屏对象
-  * 返 回 值：无
-  */
+/* 在主屏上建几个功能按钮（比如进 WiFi 配网页）。 */
 static void GUI_CreateButtons(lv_obj_t *scr)
 {
   /* LED 开关竖向排列在传感器框右下角 */
@@ -367,11 +341,7 @@ static void GUI_CreateButtons(lv_obj_t *scr)
 /*WiFi 入口*/
 static void WifiEntryEventCb(lv_event_t *event);   /* 前向声明 */
 
-/**
-  * 函    数：GUI_CreateWifiEntry
-  * 参    数：scr  主屏对象
-  * 返 回 值：无
-  */
+/* 在主屏放一个 WiFi 入口，显示当前状态，点进去是配网页。 */
 static void GUI_CreateWifiEntry(lv_obj_t *scr)
 {
   lv_obj_t *btn = lv_btn_create(scr);
@@ -388,11 +358,7 @@ static void GUI_CreateWifiEntry(lv_obj_t *scr)
 }
 
 /*主屏*/
-/**
-  * 函    数：GUI_CreateMainScreen
-  * 参    数：无，内部用 lv_scr_act() 取当前屏
-  * 返 回 值：无
-  */
+/* 把主屏整个搭起来：状态栏 + 传感器卡片 + 灯控卡片 + 功能按钮。 */
 static void GUI_CreateMainScreen(void)
 {
   lv_obj_t *scr = lv_scr_act();
@@ -427,11 +393,8 @@ static void GUI_CreateMainScreen(void)
 }
 
 /*传感器刷新*/
-/**
-  * 函    数：SensorRefreshTimerCb
-  * 参    数：timer  定时器句柄，未使用
-  * 返 回 值：无
-  */
+/* 1s 定时器回调：把全局 g_sensorData 的最新值刷到卡片上。
+ * 只读不写，所以不用加锁（单写多读，各字段单独原子）。 */
 static void SensorRefreshTimerCb(lv_timer_t *timer)
 {
   (void)timer;
@@ -502,21 +465,13 @@ static void ApItemEventCb(lv_event_t *event);
 static void WifiPwdHideReady(lv_anim_t *a);
 
 /* 动画执行回调包装:固定 selector=0 */
-/**
-  * 函    数：AnimSetTranslateY
-  * 参    数：var  动画目标对象；v  当前动画值 px
-  * 返 回 值：无
-  */
+/* 动画回调：按当前动画值设置对象的纵向偏移，用来做滑入滑出效果。 */
 static void AnimSetTranslateY(void *var, int32_t v)
 {
     lv_obj_set_style_translate_y((lv_obj_t *)var, v, 0);
 }
 
-/**
-  * 函    数：WifiList_Refresh
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 用最新的扫描结果重建热点列表。 */
 static void WifiList_Refresh(void)
 {
     uint8_t i;
@@ -566,22 +521,15 @@ static void WifiList_Refresh(void)
     }
 }
 
-/**
-  * 函    数：WifiReturnTimerCb
-  * 参    数：timer  一次性定时器句柄，进入即删除
-  * 返 回 值：无
-  */
+/* 一次性定时器回调：延时到点后把界面切回去，进函数先把自己删掉。 */
 static void WifiReturnTimerCb(lv_timer_t *timer)
 {
     lv_timer_del(timer);
     lv_scr_load_anim(s_mainScr, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
 }
 
-/**
-  * 函    数：WifiSubmitJoin
-  * 参    数：pwd  用户输入密码，开放网络传 ""
-  * 返 回 值：无
-  */
+/* 提交连接请求：把选中的 SSID 和用户输入的密码投给 WifiTask，不等结果。
+ * 开放网络密码传空串。 */
 static void WifiSubmitJoin(const char *pwd)
 {
     s_wifiBusy = 1U;
@@ -591,11 +539,7 @@ static void WifiSubmitJoin(const char *pwd)
     Wifi_PostJoin(s_selSsid, pwd);
 }
 
-/**
-  * 函    数：ApItemEventCb
-  * 参    数：event  LVGL 事件对象，user_data 为 aps 下标
-  * 返 回 值：无
-  */
+/* 点某个热点的事件回调：记下选中的下标，开放网络直接连，加密的弹密码框。 */
 static void ApItemEventCb(lv_event_t *event)
 {
     lv_obj_t *btn = lv_event_get_target(event);
@@ -634,11 +578,7 @@ static void ApItemEventCb(lv_event_t *event)
     lv_anim_start(&a);
 }
 
-/**
-  * 函    数：WifiRescanCb
-  * 参    数：event  未使用
-  * 返 回 值：无
-  */
+/* 点「重新扫描」：投一条扫描命令给 WifiTask。 */
 static void WifiRescanCb(lv_event_t *event)
 {
     (void)event;
@@ -652,11 +592,7 @@ static void WifiRescanCb(lv_event_t *event)
     Wifi_PostScan();
 }
 
-/**
-  * 函    数：WifiBackCb
-  * 参    数：event  未使用
-  * 返 回 值：无
-  */
+/* 点「返回」：从配网页退回主屏。 */
 static void WifiBackCb(lv_event_t *event)
 {
     (void)event;
@@ -664,11 +600,7 @@ static void WifiBackCb(lv_event_t *event)
     lv_scr_load_anim(s_mainScr, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
 }
 
-/**
-  * 函    数：WifiPwdOkCb
-  * 参    数：event  未使用
-  * 返 回 值：无
-  */
+/* 密码框点「确定」：取出输入内容并提交连接。 */
 static void WifiPwdOkCb(lv_event_t *event)
 {
     const char *pwd;
@@ -677,11 +609,7 @@ static void WifiPwdOkCb(lv_event_t *event)
     WifiSubmitJoin((pwd != NULL) ? pwd : "");
 }
 
-/**
-  * 函    数：WifiPwdCancelCb
-  * 参    数：event  未使用
-  * 返 回 值：无
-  */
+/* 密码框点「取消」：收起键盘和密码框，不连接。 */
 static void WifiPwdCancelCb(lv_event_t *event)
 {
     (void)event;
@@ -698,11 +626,7 @@ static void WifiPwdCancelCb(lv_event_t *event)
     lv_anim_start(&a);
 }
 
-/**
-  * 函    数：WifiPwdHideReady
-  * 参    数：a  动画描述，未使用
-  * 返 回 值：无
-  */
+/* 密码框隐藏动画结束时的回调，用来做收尾清理（比如把键盘也收掉）。 */
 static void WifiPwdHideReady(lv_anim_t *a)
 {
     (void)a;
@@ -710,11 +634,8 @@ static void WifiPwdHideReady(lv_anim_t *a)
     lv_obj_set_style_translate_y(s_pwdPanel, 0, 0);  /* 复位 translate,下次滑入从 0 开始 */
 }
 
-/**
-  * 函    数：WifiEventTimerCb
-  * 参    数：timer  未使用
-  * 返 回 值：无
-  */
+/* 定时器：轮询 WifiTask 的事件队列，处理「扫描完成」「连接成功/失败」。
+ * GUI 就是这样拿到 WiFi 的异步结果的。 */
 /*不在配网页时事件不取走，会一直堆在 evtQ，故进页时必须先清陈旧事件*/
 static void WifiEventTimerCb(lv_timer_t *timer)
 {
@@ -759,11 +680,7 @@ static void WifiEventTimerCb(lv_timer_t *timer)
     }
 }
 
-/**
-  * 函    数：WifiEntryEventCb
-  * 参    数：event  未使用
-  * 返 回 值：无
-  */
+/* 点主屏的 WiFi 入口：切到配网页，并发起一次扫描。 */
 static void WifiEntryEventCb(lv_event_t *event)
 {
     WifiEvent_t stale;
@@ -783,11 +700,7 @@ static void WifiEntryEventCb(lv_event_t *event)
 }
 
 /*创建 WiFi 配网页*/
-/**
-  * 函    数：GUI_CreateWifiScreen
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 把配网页搭起来：热点列表 + 密码输入框 + 软键盘。 */
 static void GUI_CreateWifiScreen(void)
 {
     lv_obj_t *lblTitle;
@@ -905,11 +818,8 @@ static void GUI_CreateWifiScreen(void)
 
 /*任务入口*/
 
-/**
-  * 函    数：StartGuiTask
-  * 参    数：argument  未使用，创建时传 NULL
-  * 返 回 值：无，死循环不返回
-  */
+/* GUI 主循环：初始化 LVGL → 建主屏 → 每 5ms 跑一次 lv_timer_handler 处理刷新和触摸。
+ * 死循环不返回。 */
 void StartGuiTask(void *argument)
 {
   (void)argument;
@@ -977,11 +887,7 @@ void StartGuiTask(void *argument)
   }
 }
 
-/**
-  * 函    数：GuiTask_Create
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 创建 GUI 任务，由 freertos.c 在启动调度器前调一次。 */
 void GuiTask_Create(void)
 {
   static const osThreadAttr_t guiTaskAttr = {

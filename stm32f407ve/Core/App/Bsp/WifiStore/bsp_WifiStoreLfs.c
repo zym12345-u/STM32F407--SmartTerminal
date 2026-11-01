@@ -13,11 +13,7 @@
 
 #define WIFI_LFS_PATH    "/wifi.conf"      /* LittleFS 内的凭据文件路径(只此一份) */
 
-/**
-  * 函    数：WifiLfs_CalcChecksum
-  * 参    数：c  WifiCred_t 指针，不能为空
-  * 返 回 值：前 102 字节的 32 位加和(最大约 26010)
-  */
+/* 算凭据校验和：前 102 字节按 32 位累加，用于读出时验证内容完整。 */
 static uint32_t WifiLfs_CalcChecksum(const WifiCred_t *c)
 {
     const uint8_t *p = (const uint8_t *)c;
@@ -32,11 +28,7 @@ static uint32_t WifiLfs_CalcChecksum(const WifiCred_t *c)
     return sum;
 }
 
-/**
-  * 函    数：WifiStoreLfs_Load
-  * 参    数：out  输出缓冲，不能为空，失败时清零
-  * 返 回 值：1=有合法凭据，0=文件不存在/长度不符/magic 或校验失败
-  */
+/* 读文件并校验长度、magic、校验和。任一项不符返回 0 并清空输出。 */
 uint8_t WifiStoreLfs_Load(WifiCred_t *out)
 {
     lfs_t      *lfs = LFS_Port_Handle();
@@ -77,11 +69,7 @@ uint8_t WifiStoreLfs_Load(WifiCred_t *out)
     return 1U;
 }
 
-/**
-  * 函    数：WifiStoreLfs_Save
-  * 参    数：in  待保存凭据，不能为空，ssid/pwd 超长部分截断
-  * 返 回 值：1=打开/写入/写满长度/sync 全部成功，0=任一步失败
-  */
+/* 写文件：打开 → 写满长度 → sync。任一步失败返回 0。超长字段截断。 */
 uint8_t WifiStoreLfs_Save(const WifiCred_t *in)
 {
     lfs_t      *lfs = LFS_Port_Handle();
@@ -137,11 +125,8 @@ uint8_t WifiStoreLfs_Save(const WifiCred_t *in)
     return 1U;
 }
 
-/**
-  * 函    数：WifiStoreLfs_Migrate
-  * 参    数：无
-  * 返 回 值：1=本次确实迁移了一条，0=无需迁移(LFS 已有/旧区为空/写失败)
-  */
+/* 一次性迁移：旧扇区里有凭据且 LittleFS 还没文件时，把它写进文件。
+ * 返回 1 表示这次确实搬了一条。 */
 uint8_t WifiStoreLfs_Migrate(void)
 {
     WifiCred_t legacy;

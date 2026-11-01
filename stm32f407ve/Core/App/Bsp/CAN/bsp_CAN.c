@@ -20,12 +20,8 @@ static CanStats_t         s_stats;          /* rx 由 ISR 写，tx 由 CanTask �
 
 /*内部工具*/
 
-/**
-  * 函    数：CAN_ApplyBaudrate
-  * 参    数：baud  目标波特率，单位 bit/s，仅支持 1M/500K/250K/125K
-  * 返 回 值：0 = 已写入，1 = 不支持，hcan1.Init 保持原值
-  * 注意事项：仅 CAN_BspInit 调用；APB1 = 42MHz，预分频按此计算
-  */
+/* 按目标波特率算出位时序写进 hcan1.Init（APB1 = 42MHz 为基准）。
+ * 只认 1M/500K/250K/125K 四档；不认识的返回 1 且不动原值。仅 CAN_BspInit 调。 */
 static uint8_t CAN_ApplyBaudrate(uint32_t baud)
 {
     switch (baud)
@@ -62,13 +58,9 @@ static uint8_t CAN_ApplyBaudrate(uint32_t baud)
 
 /*对外接口实现*/
 
-/**
-  * 函    数：CAN_BspInit
-  * 参    数：无
-  * 返 回 值：0 = 成功；1 = 波特率不支持；2 = HAL_CAN_Init 失败；3 = 过滤器配置失败；
-  *           4 = HAL_CAN_Start 失败；5 = 队列创建失败；6 = FIFO0 通知使能失败
-  * 注意事项：必须在任务上下文调用，内部会创建队列
-  */
+/* 把 CAN1 拉起来：配位时序 → 装过滤器 → 启动 → 建收发队列 → 开 FIFO0 通知。
+ * 必须在任务里调（内部要建队列）。返回 0 成功，非 0 是卡在哪一步：
+ * 1 波特率不支持、2 HAL_CAN_Init、3 过滤器、4 启动、5 队列、6 通知使能。 */
 uint8_t CAN_BspInit(void)
 {
     CAN_FilterTypeDef filter;
@@ -161,12 +153,9 @@ uint8_t CAN_BspInit(void)
     return 0U;
 }
 
-/**
-  * 函    数：CAN_Send
-  * 参    数：msg  待发送帧，不允许 NULL
-  * 返 回 值：0 = 已入队，1 = 参数非法或队列满
-  * 注意事项：只在任务上下文调用，不是 FromISR 版本；队列满立即返回不等待
-  */
+/* 把一帧放进 TX 队列就返回 —— 不碰硬件、不等待，真正发出去是 CAN_TxPump 的事。
+ * 返回 0 已入队；1 参数非法或队列满（满了直接丢，由调用方下次周期再发）。
+ * 只在任务里调，这是非 FromISR 版本。 */
 uint8_t CAN_Send(const CanMsg_t *msg)
 {
     if ((s_txQueue == NULL) || (msg == NULL))
@@ -181,13 +170,8 @@ uint8_t CAN_Send(const CanMsg_t *msg)
     return 0U;
 }
 
-/**
-  * 函    数：CAN_TxPop
-  * 参    数：msg  输出帧，不允许 NULL
-  * 参    数：timeoutMs  阻塞超时，单位 ms，建议 100，0 表示不阻塞
-  * 返 回 值：0 = 取到一帧，1 = 参数非法或超时
-  * 注意事项：仅供 CanTask 调用，超时是正常路径
-  */
+/* 从 TX 队列取一帧出来准备发送；队列空就阻塞到 timeoutMs（0 = 不阻塞）。
+ * 返回 0 取到一帧，1 参数非法或超时。超时属 CanTask 主循环的正常节奏，不是故障。 */
 uint8_t CAN_TxPop(CanMsg_t *msg, uint32_t timeoutMs)
 {
     if ((s_txQueue == NULL) || (msg == NULL))
@@ -201,12 +185,9 @@ uint8_t CAN_TxPop(CanMsg_t *msg, uint32_t timeoutMs)
     return 0U;
 }
 
-/**
-  * 函    数：CAN_TxPump
-  * 参    数：msg  待发送帧；ide=0 标准帧，ide!=0 扩展帧；dlc 超过 8 按 8 处理
-  * 返 回 值：0 = 已进邮箱，1 = 3 个邮箱全满本帧丢弃，2 = 参数非法或 HAL 发送失败
-  * 注意事项：仅供 CanTask 调用；tx_total/tx_drop/tx_error 只在这里写
-  */
+/* 真正写进硬件邮箱、发到总线上。ide=0 走标准帧；dlc 超过 8 按 8 截断。
+ * 返回 0 已进邮箱；1 三个邮箱全满、本帧丢弃；2 参数非法或 HAL 发送失败。
+ * tx_total / tx_drop / tx_error 三个计数只在这里写。 */
 uint8_t CAN_TxPump(const CanMsg_t *msg)
 {
     CAN_TxHeaderTypeDef hdr;
@@ -250,13 +231,8 @@ uint8_t CAN_TxPump(const CanMsg_t *msg)
     return 0U;
 }
 
-/**
-  * 函    数：CAN_RxPop
-  * 参    数：msg  输出帧，不允许 NULL
-  * 参    数：timeoutMs  阻塞超时，单位 ms，0 = 非阻塞排空
-  * 返 回 值：0 = 取到一帧，1 = 参数非法或队列为空
-  * 注意事项：仅供 CanTask 调用；ISR 在 HAL_CAN_RxFifo0MsgPendingCallback 里入队
-  */
+/* 从 RX 队列取一帧收到的数据（中断回调里已经投进队列）。
+ * timeoutMs = 0 表示不等待，用于一次性把队列排空。返回 0 取到，1 参数非法或队列空。 */
 uint8_t CAN_RxPop(CanMsg_t *msg, uint32_t timeoutMs)
 {
     if ((s_rxQueue == NULL) || (msg == NULL))
@@ -270,12 +246,8 @@ uint8_t CAN_RxPop(CanMsg_t *msg, uint32_t timeoutMs)
     return 0U;
 }
 
-/**
-  * 函    数：CAN_GetStats
-  * 参    数：stats  输出快照，不允许 NULL
-  * 返 回 值：无
-  * 注意事项：不关中断、不加锁，跨字段允许轻微不一致
-  */
+/* 拷一份统计快照：收发计数、TEC/REC、当前总线状态。
+ * 不关中断也不加锁，字段之间可能轻微对不上（快照本身非原子）—— 看日志够用，别为它加锁。 */
 void CAN_GetStats(CanStats_t *stats)
 {
     if (stats == NULL)
@@ -293,13 +265,8 @@ void CAN_GetStats(CanStats_t *stats)
     stats->rec      = s_stats.rec;
 }
 
-/**
-  * 函    数：CAN_FilterSet
-  * 参    数：stdId  标准帧 ID，11 位，范围 0x000~0x7FF
-  * 参    数：mask  掩码，位 = 1 表示该位必须匹配；0x7FF 精确匹配，0x000 全放行
-  * 返 回 值：0 = 配置成功，1 = HAL_CAN_ConfigFilter 失败
-  * 注意事项：重配会置 FMR.FINIT，期间到期的帧会丢，属 HAL 固有行为
-  */
+/* 重设过滤器。mask 位为 1 表示该位必须匹配：0x7FF 精确匹配一个 ID，0x000 全放行。
+ * 返回 0 成功，1 配置失败。重配会让硬件重建整个过滤组，这一瞬间到期的帧会丢。 */
 uint8_t CAN_FilterSet(uint32_t stdId, uint32_t mask)
 {
     CAN_FilterTypeDef filter;
@@ -321,12 +288,9 @@ uint8_t CAN_FilterSet(uint32_t stdId, uint32_t mask)
 
 /*状态更新*/
 
-/**
-  * 函    数：CAN_UpdateBusState
-  * 参    数：无
-  * 返 回 值：无，结果写入 s_stats.tec / s_stats.rec / s_stats.state
-  * 注意事项：仅供 CanTask 周期调用；判定顺序 BOFF > EPVF > EWGF，写反会误报
-  */
+/* 读错误状态寄存器更新内部总线状态（写进 s_stats 的 tec / rec / state）。
+ * 判定顺序必须是 BOFF > EPVF > EWGF，写反会误报（已 bus-off 却报 warning）。
+ * 由 CanTask 每秒调一次。 */
 void CAN_UpdateBusState(void)
 {
     uint32_t esr = hcan1.Instance->ESR;
@@ -360,12 +324,8 @@ void CAN_UpdateBusState(void)
 
 /*接收中断*/
 
-/**
-  * 函    数：HAL_CAN_RxFifo0MsgPendingCallback
-  * 参    数：hcan  触发回调的 CAN 句柄，只处理 Instance == CAN1
-  * 返 回 值：无
-  * 注意事项：ISR 上下文，只搬运不打印、不判业务、不喂狗；队列满只累加 rx_drop
-  */
+/* 收到帧的中断回调：把帧从硬件 FIFO 搬进 RX 队列就返回。
+ * 中断里只搬运 —— 不打印、不判业务、不喂狗。队列满时只累加 rx_drop 然后丢掉。 */
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
