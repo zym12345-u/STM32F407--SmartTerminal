@@ -1,6 +1,34 @@
 /* USER CODE BEGIN Header */
 /* usart.c
  * USART1/USART2/USART3 的 HAL 初始化，以及 USART1 的 DMA 发送和 printf 重定向。
+ *
+ * ══════ UART 的基础（理解波特率、帧格式、为什么用 DMA）══════
+ *
+ * ── 异步串口「异步」在哪 ──
+ *   UART 只有 TX / RX 两根线，【没有时钟线】。收发双方不发时钟，
+ *   全靠事先约定的【波特率】(每秒多少个位)来对齐。
+ *   所以两边波特率必须一致，而且误差要小（一般 < 2~3%），
+ *   否则收到第 8、9 位时就偏到隔壁位去了，表现为乱码或校验错。
+ *   对比：SPI/I2C 都有时钟线（同步），不存在这个问题 —— 这就是「同步/异步」的分界。
+ *
+ * ── 一帧长什么样 ──
+ *   空闲时 TX 保持【高】电平。要发数据了先拉低一位，这叫【起始位】：
+ *       起始位(1低) + 数据位(8) + [校验位] + 停止位(1高)
+ *   接收方就是靠那个「高→低」的下降沿来判断「一帧开始了」，并据此对齐采样时刻。
+ *   没有起始位的话，接收方不知道数据从哪一位开始数。
+ *
+ * ── 为什么发送要用 DMA ──
+ *   不用 DMA 的话，每发一个字节都要：查 TXE 标志 → 写 DR 寄存器 → 等下一个。
+ *   115200 下 1 个字节约 87us，CPU 就这么被占着做无意义的搬运。
+ *   DMA 的活是「替 CPU 把这些字节一个个搬进 DR」，CPU 只需要配好起点和长度就能走人。
+ *
+ * ── 【关键】DMA 完成 ≠ 数据发完 ──
+ *   DMA 搬完只代表「字节都塞进 USART 的发送寄存器了」，
+ *   最后那 1~2 个字节可能还躺在【移位寄存器】里，正一位一位地往线上送。
+ *   此时如果马上复用发送缓冲，尾巴就会被改掉。
+ *   所以必须再等 UART 的 TC（Transmission Complete）标志 —— 那才是真的发完了。
+ *   这就是 UART_Printf 里「等信号量 → 再查 DMA 计数和 TC」两重判断的原因。
+ *   （做 OTA 传固件时这点更致命：没等发完就发下一包，拷进去的固件就是坏的。）
  */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
@@ -304,21 +332,43 @@ static void UART1_DMA_Init(void)
 {
   __HAL_RCC_DMA2_CLK_ENABLE();
 
-  hdma_usart1_tx.Instance                 = DMA2_Stream7;   /*Channel4 = USART1_TX*/
+  /* 【Stream7 + Channel4 是焊死的，不能随便改】
+   * STM32F4 的 DMA 请求映射是芯片内部固定连线：每个外设的每个请求只能走指定的
+   * Stream/Channel 组合。USART1_TX 只有 DMA2 Stream7 Channel4 这一条路。
+   * 选错了不会报错，只会「DMA 配好了但一个字节都不发」—— 这是新手最容易卡住的地方。
+   * 查法：参考手册的 DMA 请求映射表（DMA1/DMA2 request mapping）。 */
+  hdma_usart1_tx.Instance                 = DMA2_Stream7;
   hdma_usart1_tx.Init.Channel             = DMA_CHANNEL_4;
-  hdma_usart1_tx.Init.Direction           = DMA_MEMORY_TO_PERIPH;
+
+  hdma_usart1_tx.Init.Direction           = DMA_MEMORY_TO_PERIPH;  /* 内存 -> 外设（发送方向） */
+
+  /* 两个递增标志的区别，理解 DMA 的关键：
+   *   PeriphInc = DISABLE → 外设地址【不动】：永远往 USART1->DR 这一个地址写，
+   *                          每写一次，USART 硬件自己就把数据取走发出去
+   *   MemInc    = ENABLE  → 内存地址【每次加 1】：依次读 buf[0]、buf[1]…
+   * 如果 MemInc 也关了，就会把同一个字节重复发 N 遍。 */
   hdma_usart1_tx.Init.PeriphInc           = DMA_PINC_DISABLE;
   hdma_usart1_tx.Init.MemInc              = DMA_MINC_ENABLE;
-  hdma_usart1_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+
+  hdma_usart1_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;  /* 按字节搬，串口是 8 位 */
   hdma_usart1_tx.Init.MemDataAlignment    = DMA_MDATAALIGN_BYTE;
+
+  /* NORMAL（单次）而不是 CIRCULAR（循环）：
+   * 循环模式传完一轮会自动从头再来，适合 ADC 连续采样、不适合「发一串就结束」的串口。 */
   hdma_usart1_tx.Init.Mode                = DMA_NORMAL;
   hdma_usart1_tx.Init.Priority            = DMA_PRIORITY_LOW;
-  hdma_usart1_tx.Init.FIFOMode            = DMA_FIFOMODE_DISABLE;
+  hdma_usart1_tx.Init.FIFOMode            = DMA_FIFOMODE_DISABLE;  /* 直通模式，不攒够一批再发 */
   (void)HAL_DMA_Init(&hdma_usart1_tx);
 
+  /* 把 DMA 句柄挂到 UART 上，之后 HAL_UART_Transmit_DMA 才知道用哪条流 */
   __HAL_LINKDMA(&huart1, hdmatx, hdma_usart1_tx);
 
-  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 5U, 0U);   /*5 = 最大 syscall 优先级，ISR 里才能 release 信号量*/
+  /* 【优先级必须是 5】FreeRTOS 里 configMAX_SYSCALL_INTERRUPT_PRIORITY = 5，
+   * 含义是：只有优先级【数值 >= 5】（即逻辑优先级不高于它）的中断，才允许调用
+   * xxxFromISR() 这类 API。本中断里要 release 信号量，所以必须 >= 5。
+   * 注意这里是反直觉的：数值越大 → 逻辑优先级越低。
+   * 设成 4 的话，编译不报错，但一进中断调 API 就会触发 configASSERT 卡死。 */
+  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 5U, 0U);
   HAL_NVIC_EnableIRQ(DMA2_Stream7_IRQn);
 
   /* 信号量初值 0，DMA 完成时 release */
