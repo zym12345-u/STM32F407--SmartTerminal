@@ -37,11 +37,18 @@ typedef struct
 
 /*对外接口*/
 
-/* 初始化 DHT11 引脚和 DWT 时基。恒返回 OK，掉线由首次读取超时暴露。 */
+/**
+  * 功    能：初始化 DHT11 引脚和 DWT 时基。恒返回 OK，掉线由首次读取超时暴露
+  * 参    数：无
+  * 返 回 值：恒为 DHT11_OK
+  */
 DHT11_Status_t DHT11_Init(void);
 
-/* 读一次温湿度：温度 0~50℃、湿度 20~90%RH。
- * 返回 OK 成功 / ERROR 参数空 / TIMEOUT 超时 / CHECKSUM_ERR 校验错。 */
+/**
+  * 功    能：读一次温湿度：温度 0~50℃、湿度 20~90%RH
+  * 参    数：data  输出，temperature 单位 °C(0~50)，humidity 单位 %RH(20~90)
+  * 返 回 值：DHT11_OK=成功，DHT11_ERROR=data 为空，DHT11_TIMEOUT=超时，DHT11_CHECKSUM_ERR=校验错
+  */
 DHT11_Status_t DHT11_Read(DHT11_Data_t *data);
 
 

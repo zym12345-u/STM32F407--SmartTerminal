@@ -40,8 +40,11 @@ static uint32_t      s_lastPrint = 0U;
 
 /*内部工具*/
 
-/* 把总线状态枚举翻成日志里用的短名：ok / warning / passive / off。
- * 返回的是静态字符串，调用方别去改它。 */
+/**
+  * 功    能：把总线状态枚举翻成日志里用的短名：ok / warning / passive / off
+  * 参    数：st  总线状态，CAN_BUS_OK ~ CAN_BUS_OFF
+  * 返 回 值：状态名静态字符串，调用方不得修改
+  */
 static const char *CAN_StateName(CanBusState_t st)
 {
     switch (st)
@@ -54,8 +57,12 @@ static const char *CAN_StateName(CanBusState_t st)
     }
 }
 
-/* 组心跳帧（0x701）：发送计数、运行秒数、TEC/REC、总线状态，8 字节全覆写。
- * 格式不是 CANopen 心跳（data[0] 放的是发送计数而非 NMT 状态），理由见 CanData.h。 */
+/**
+  * 功    能：组心跳帧（0x701）：发送计数、运行秒数、TEC/REC、总线状态，8 字节全覆写
+  * 参    数：msg  输出帧，8 字节全覆写；uptimeSec  上电秒数；st  统计快照
+  * 返 回 值：无
+  * 补    充：格式不是 CANopen 心跳（data[0] 放的是发送计数而非 NMT 状态），理由见 CanData.h
+  */
 static void CAN_BuildHeartbeat(CanMsg_t *msg, uint32_t uptimeSec, const CanStats_t *st)
 {
     msg->id        = CAN_ID_HEARTBEAT;
@@ -76,9 +83,13 @@ static void CAN_BuildHeartbeat(CanMsg_t *msg, uint32_t uptimeSec, const CanStats
     msg->data[CAN_HB_OFF_RSV]     = 0U;
 }
 
-/* 总线状态变了才打一行日志，用非对称去抖防止刷屏：
- * 恶化（ok→warning→passive→off）立刻报；恢复要连续 2 次稳定采样才报；
- * 状态没变则 2s 限流 —— TEC 在 96/128 阈值附近抖动时不会把日志刷爆。 */
+/**
+  * 功    能：总线状态变了才打一行日志，用非对称去抖防止刷屏：
+  * 参    数：cur  本次采样状态；tec/rec  错误计数 0~255；nowMs  当前毫秒
+  * 返 回 值：无
+  * 补    充：恶化（ok→warning→passive→off）立刻报；恢复要连续 2 次稳定采样才报；
+  *            状态没变则 2s 限流 —— TEC 在 96/128 阈值附近抖动时不会把日志刷爆
+  */
 static void CAN_PrintStateIfNeeded(CanBusState_t cur, uint8_t tec, uint8_t rec, uint32_t nowMs)
 {
     if (cur > s_lastState)
@@ -119,9 +130,13 @@ static void CAN_PrintStateIfNeeded(CanBusState_t cur, uint8_t tec, uint8_t rec, 
 /*LEDQueue 元素是指针：LEDTask 负责点灯并 vPortFree，本任务只当生产者*/
 extern osMessageQueueId_t LEDQueueHandle;
 
-/* 往 LEDQueue 投一条点灯指令，由 LEDTask 真正执行。
- * 队列元素是 LEDMessage 指针，所以要 malloc；堆耗尽或队列满就静默丢弃，
- * 不能让一次点灯失败拖累 CAN 应答。 */
+/**
+  * 功    能：往 LEDQueue 投一条点灯指令，由 LEDTask 真正执行
+  * 参    数：color  目标灯，LEDColor_Green / LEDColor_Blue；state  目标状态
+  * 返 回 值：无，堆或队列满时静默丢弃
+  * 补    充：队列元素是 LEDMessage 指针，所以要 malloc；堆耗尽或队列满就静默丢弃，
+  *            不能让一次点灯失败拖累 CAN 应答
+  */
 static void CAN_LedPost(LEDColor color, LEDState state)
 {
     LEDMessage *msg = (LEDMessage *)pvPortMalloc(sizeof(LEDMessage));
@@ -137,9 +152,13 @@ static void CAN_LedPost(LEDColor color, LEDState state)
     }
 }
 
-/* 组传感器帧（0x181）：读全局 g_sensorData，8 字节先清零再逐字段填。
- * 编码与 Modbus 的 MB_RegRead 完全一致（温湿度光照均 x10，无效填 0xFFFF），
- * 这样拿 Modbus Poll 和 PCAN-View 对照打时两边能一字不差。 */
+/**
+  * 功    能：组传感器帧（0x181）：读全局 g_sensorData，8 字节先清零再逐字段填
+  * 参    数：msg  输出帧，8 字节先清零再逐字段填
+  * 返 回 值：无
+  * 补    充：编码与 Modbus 的 MB_RegRead 完全一致（温湿度光照均 x10，无效填 0xFFFF），
+  *            这样拿 Modbus Poll 和 PCAN-View 对照打时两边能一字不差
+  */
 static void CAN_BuildSensorFrame(CanMsg_t *msg)
 {
     uint16_t temp10;
@@ -204,9 +223,13 @@ static void CAN_BuildSensorFrame(CanMsg_t *msg)
  * 时序：收到即处理并回帧，不重传、不超时判定
  */
 
-/* 执行一条下行命令（0x201），并把应答帧（0x281）组好。
- * rx 只读；ack 全部字段覆写，其中 data[1] 是结果码（0 成功 / 1 不支持 / 2 参数错）。
- * 注意 ack 是 DLC=4 但缓冲 8 字节，data[4..7] 必须清零，否则会露出上一帧尾巴。 */
+/**
+  * 功    能：执行一条下行命令（0x201），并把应答帧（0x281）组好
+  * 参    数：rx  收到的命令帧，只读；ack  输出应答帧，字段全覆写
+  * 返 回 值：无，结果写在 ack->data[1]
+  * 补    充：rx 只读；ack 全部字段覆写，其中 data[1] 是结果码（0 成功 / 1 不支持 / 2 参数错）
+  *            注意 ack 是 DLC=4 但缓冲 8 字节，data[4..7] 必须清零，否则会露出上一帧尾巴
+  */
 static void CAN_HandleCommand(const CanMsg_t *rx, CanMsg_t *ack)
 {
     uint8_t code  = rx->data[CAN_CMD_OFF_CODE];
@@ -263,9 +286,13 @@ static void CAN_HandleCommand(const CanMsg_t *rx, CanMsg_t *ack)
 
 /*任务主体*/
 
-/* CAN 任务主循环，每轮做五件事：排空收到的帧 → 该发心跳就发 →
- * 该发传感器就发 → 从 TX 队列取一帧交给硬件 → 每秒轮询一次总线状态。
- * argument 是 RTOS 传进来的，用不上。 */
+/**
+  * 功    能：CAN 任务主循环，每轮做五件事：排空收到的帧 → 该发心跳就发 →
+  * 参    数：argument  未使用，rtos 传入的 NULL
+  * 返 回 值：无
+  * 补    充：该发传感器就发 → 从 TX 队列取一帧交给硬件 → 每秒轮询一次总线状态
+  *            argument 是 RTOS 传进来的，用不上
+  */
 void StartCanTask(void *argument)
 {
     (void)argument;
@@ -380,7 +407,11 @@ void StartCanTask(void *argument)
 
 /*对外创建接口*/
 
-/* 创建 CAN 任务，由 freertos.c 在启动调度器前调一次。 */
+/**
+  * 功    能：创建 CAN 任务，由 freertos.c 在启动调度器前调一次
+  * 参    数：无
+  * 返 回 值：无
+  */
 void CanTask_Create(void)
 {
     const osThreadAttr_t attr = {

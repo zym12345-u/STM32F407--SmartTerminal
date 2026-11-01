@@ -9,14 +9,25 @@
 #include <stdint.h>
 #include "WifiNet.h"
 
-/* 从 LittleFS 的文件里读 WiFi 凭据。返回 1 成功，0 文件不存在或校验不过（输出会清零）。 */
+/**
+  * 功    能：从 LittleFS 的文件里读 WiFi 凭据。返回 1 成功，0 文件不存在或校验不过（输出会清零）
+  * 参    数：out  输出，不能为空，失败时清零
+  * 返 回 值：1=成功，0=不存在/校验失败
+  */
 uint8_t WifiStoreLfs_Load(WifiCred_t *out);
 
-/* 把 WiFi 凭据写进 LittleFS 文件。返回 1 成功、0 失败。 */
+/**
+  * 功    能：把 WiFi 凭据写进 LittleFS 文件。返回 1 成功、0 失败
+  * 参    数：in  待保存凭据，不能为空
+  * 返 回 值：1=成功，0=失败
+  */
 uint8_t WifiStoreLfs_Save(const WifiCred_t *in);
 
-/* 把老版本存在 Flash 扇区里的凭据搬到 LittleFS，只搬一次。
- * 返回 1 表示这次真搬了；0 表示不用搬（文件已存在或旧区是空的）。 */
+/**
+  * 功    能：把老版本存在 Flash 扇区里的凭据搬到 LittleFS，只搬一次
+  * 参    数：无
+  * 返 回 值：1=本次发生迁移，0=无需迁移(文件已存在或 sector11 为空)
+  */
 uint8_t WifiStoreLfs_Migrate(void);
 
 #endif /* __BSP_WIFI_STORE_LFS_H */

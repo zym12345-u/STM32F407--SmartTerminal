@@ -14,8 +14,12 @@
 /*队列句柄由 freertos.c 创建*/
 extern osMessageQueueId_t LEDQueueHandle;
 
-/* LED 任务主循环：阻塞等 LEDQueue 的消息，收到就去点灯，点完把消息释放掉。
- * 队列里传的是指针，所以释放这一步必须做，否则每次点灯都漏一块内存。 */
+/**
+  * 功    能：LED 任务主循环：阻塞等 LEDQueue 的消息，收到就去点灯，点完把消息释放掉
+  * 参    数：argument  未使用，任务参数
+  * 返 回 值：无
+  * 补    充：队列里传的是指针，所以释放这一步必须做，否则每次点灯都漏一块内存
+  */
 void StartLEDTask(void *argument)
 {
   (void)argument;

@@ -69,7 +69,11 @@ static uint8_t   readAdcXY(void);                 // 采样并滤波，结果存
 
 
 
-/* 微秒级软件延时（忙等）。触摸时序用得很死：位间隔 1us、转换等待 5us。 */
+/**
+  * 功    能：微秒级软件延时（忙等）。触摸时序用得很死：位间隔 1us、转换等待 5us
+  * 参    数：us  延时的微秒数，常用 1(位间隔)、5(转换等待)、800000(校准停留)
+  * 返 回 值：无
+  */
 static void delayUS(uint32_t us)
 {
     for (uint32_t i = 0; i < us; i++)
@@ -81,7 +85,11 @@ static void delayUS(uint32_t us)
 
 
 
-/* 发一个控制字选通道：0x90 选 Y+、0xD0 选 X+（都是 12 位、单端、内部参考）。 */
+/**
+  * 功    能：发一个控制字选通道：0x90 选 Y+、0xD0 选 X+（都是 12 位、单端、内部参考）
+  * 参    数：cmd  控制字，0x90=选 Y+ 通道，0xD0=选 X+ 通道(12 位、单端、内部参考)
+  * 返 回 值：无
+  */
 static void sendCMD(uint8_t cmd)
 {
     /* 本函数不碰 CS：发命令和收数据必须在同一次片选内完成，中途拉高 CS 本次转换作废 */
@@ -97,7 +105,11 @@ static void sendCMD(uint8_t cmd)
 
 
 
-/* 读回 12 位 ADC 原始值（通道由上一次 sendCMD 选好）。没触摸时读数没有意义。 */
+/**
+  * 功    能：读回 12 位 ADC 原始值（通道由上一次 sendCMD 选好）。没触摸时读数没有意义
+  * 参    数：无(通道已由上一次 sendCMD 选好)
+  * 返 回 值：12 位 ADC 原始值，0~4095(未触摸时读数无意义)
+  */
 static uint16_t receiveData(void)
 {
     uint16_t usBuf = 0;
@@ -123,7 +135,11 @@ static uint16_t receiveData(void)
 
 
 
-/* 读屏幕 X 方向的 12 位 ADC 原始值（0~4095），还没换算成像素。 */
+/**
+  * 功    能：读屏幕 X 方向的 12 位 ADC 原始值（0~4095），还没换算成像素
+  * 参    数：无
+  * 返 回 值：屏幕 X 方向的 12 位 ADC 原始值，0~4095
+  */
 static int16_t readADC_X(void)
 {
     if (xXPT2046.dir == 0)    sendCMD(XPT2046_CHANNEL_Y);  // 竖屏 X 方向走 Y+ 通道，交叉由电阻屏走线决定
@@ -133,7 +149,11 @@ static int16_t readADC_X(void)
 
 
 
-/* 读屏幕 Y 方向的 12 位 ADC 原始值（0~4095）。 */
+/**
+  * 功    能：读屏幕 Y 方向的 12 位 ADC 原始值（0~4095）
+  * 参    数：无
+  * 返 回 值：屏幕 Y 方向的 12 位 ADC 原始值，0~4095
+  */
 static int16_t readADC_Y(void)
 {
     if (xXPT2046.dir == 0)    sendCMD(XPT2046_CHANNEL_X);  // 竖屏 Y 方向走 X+ 通道
@@ -143,8 +163,11 @@ static int16_t readADC_Y(void)
 
 
 
-/* 一次把 X/Y 两个 ADC 值都读出来，顺便判断是不是真按下了。
- * 返回 1 成功（结果写进 adcX/adcY）；0 表示没按压或读数越界。 */
+/**
+  * 功    能：一次把 X/Y 两个 ADC 值都读出来，顺便判断是不是真按下了
+  * 参    数：无
+  * 返 回 值：1=成功，结果存入 xXPT2046.adcX/adcY；0=无按压或 ADC 越界
+  */
 static uint8_t readAdcXY()
 {
     static uint8_t  cnt = 0;
@@ -202,8 +225,12 @@ static uint8_t readAdcXY()
 
 
 
-/* 按校准系数把 ADC 原始值换算成 LCD 像素坐标（写进 lcdX/lcdY）。
- * 原始值到像素不是简单线性，所以必须带零偏和比例系数一起算。 */
+/**
+  * 功    能：按校准系数把 ADC 原始值换算成 LCD 像素坐标（写进 lcdX/lcdY）
+  * 参    数：无(读 xXPT2046.adcX/adcY，写 lcdX/lcdY)
+  * 返 回 值：无
+  * 补    充：原始值到像素不是简单线性，所以必须带零偏和比例系数一起算
+  */
 static void adcXYToLcdXY(void)
 {
     static int16_t lcdX = 0;
@@ -222,8 +249,11 @@ static void adcXYToLcdXY(void)
 
 
 
-/* 把校准算出来的换算系数（xfac/yfac）和零偏（xoff/yoff）记下来，后续坐标换算都用它。
- * 固定返回 0。 */
+/**
+  * 功    能：把校准算出来的换算系数（xfac/yfac）和零偏（xoff/yoff）记下来，后续坐标换算都用它
+  * 参    数：xfac/yfac  像素每 ADC 计数的换算系数；xoff/yoff  零点偏移，单位像素
+  * 返 回 值：固定 0
+  */
 static uint8_t writeCorrectingData(float xfac, float yfac, short xoff, short yoff)
 {
     xXPT2046.xfac = xfac; xXPT2046.yfac = yfac;   // 只写 RAM，掉电丢失，重启回到 Init 里的固定系数
@@ -232,8 +262,12 @@ static uint8_t writeCorrectingData(float xfac, float yfac, short xoff, short yof
 }
 
 
-/* 初始化触摸：配 SPI、GPIO 和 PENIRQ 中断，并把上次的校准系数读回来。
- * lcdWidth/lcdHeight 是屏幕像素尺寸；dir 0 = 竖屏、1 = 横屏。 */
+/**
+  * 功    能：初始化触摸：配 SPI、GPIO 和 PENIRQ 中断，并把上次的校准系数读回来
+  * 参    数：lcdWidth/lcdHeight  LCD 像素尺寸；dir  0=竖屏，1=横屏
+  * 返 回 值：无
+  * 补    充：lcdWidth/lcdHeight 是屏幕像素尺寸；dir 0 = 竖屏、1 = 横屏
+  */
 void XPT2046_Init(uint16_t lcdWidth, uint16_t lcdHeight, uint8_t dir)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -324,8 +358,11 @@ void XPT2046_Init(uint16_t lcdWidth, uint16_t lcdHeight, uint8_t dir)
 
 
 
-/* 重新校准触摸：屏幕上依次点几个十字，据此算出比例系数和零偏。
- * 返回 0 表示校准完成，随后会软复位让新系数生效。 */
+/**
+  * 功    能：重新校准触摸：屏幕上依次点几个十字，据此算出比例系数和零偏
+  * 参    数：无
+  * 返 回 值：0=校准完成(随后软复位，新系数生效)
+  */
 uint8_t  XPT2046_ReCalibration(void)
 {
     uint16_t pixelOff = 30;   // 十字离边框 30 像素，手指按上去不被边框挡住
@@ -447,7 +484,11 @@ uint8_t  XPT2046_ReCalibration(void)
 
 
 
-/* 开或关触摸检测：status 为 0 关闭、非 0 开启。 */
+/**
+  * 功    能：开或关触摸检测：status 为 0 关闭、非 0 开启
+  * 参    数：status  0=关闭触摸检测，非 0=开启
+  * 返 回 值：无
+  */
 void XPT2046_Cmd(uint8_t status)
 {
     if (status != 0)
@@ -462,7 +503,11 @@ void XPT2046_Cmd(uint8_t status)
 
 
 
-/* 查当前有没有按下。返回 1 时坐标已经同步更新到 lcdX/lcdY，可以直接取。 */
+/**
+  * 功    能：查当前有没有按下。返回 1 时坐标已经同步更新到 lcdX/lcdY，可以直接取
+  * 参    数：无
+  * 返 回 值：0=未按下，1=按下(坐标同时更新到 lcdX/lcdY)
+  */
 uint8_t XPT2046_IsPressed(void)
 {
     static uint8_t status = 0;
@@ -510,7 +555,11 @@ uint8_t XPT2046_IsPressed(void)
 
 
 
-/* 取上次触摸点的横坐标，单位像素。 */
+/**
+  * 功    能：取上次触摸点的横坐标，单位像素
+  * 参    数：无
+  * 返 回 值：触摸点横坐标(X)，单位像素
+  */
 uint16_t  XPT2046_GetX(void)
 {
     return xXPT2046.lcdX;
@@ -518,7 +567,11 @@ uint16_t  XPT2046_GetX(void)
 
 
 
-/* 取上次触摸点的纵坐标，单位像素。 */
+/**
+  * 功    能：取上次触摸点的纵坐标，单位像素
+  * 参    数：无
+  * 返 回 值：触摸点纵坐标(Y)，单位像素
+  */
 uint16_t  XPT2046_GetY(void)
 {
     return xXPT2046.lcdY;
@@ -526,7 +579,11 @@ uint16_t  XPT2046_GetY(void)
 
 
 
-/* 通知「按下了」：置按下标志，方便上层做按下沿的判断。 */
+/**
+  * 功    能：通知「按下了」：置按下标志，方便上层做按下沿的判断
+  * 参    数：无
+  * 返 回 值：无
+  */
 void XPT2046_TouchDown(void)
 {
 //    // 示例:在触摸处画一个黄色点
@@ -539,7 +596,11 @@ void XPT2046_TouchDown(void)
 
 
 
-/* 通知「抬起了」：清按下标志。 */
+/**
+  * 功    能：通知「抬起了」：清按下标志
+  * 参    数：无
+  * 返 回 值：无
+  */
 void XPT2046_TouchUp(void)
 {
 

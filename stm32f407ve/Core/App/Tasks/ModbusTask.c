@@ -53,8 +53,12 @@ static volatile uint16_t s_regBlue  = 0U;   /*蓝灯光态影子，本任务写�
 
 /*CRC16(Modbus)：多项式 0x8005 反射为 0xA001，初值 0xFFFF，发送时低字节在前*/
 /*位迭代法微秒级；查表法省 ~100us 但多占 512B Flash，不划算*/
-/* 算 Modbus RTU 的 CRC16（多项式 0xA001，初值 0xFFFF）。
- * 注意发到总线上时是低字节在前，和普通大端字段相反。 */
+/**
+  * 功    能：算 Modbus RTU 的 CRC16（多项式 0xA001，初值 0xFFFF）
+  * 参    数：data  待校验数据首地址(不含 CRC)；len  字节数，0~256
+  * 返 回 值：16 位 CRC，发往总线时低字节先发
+  * 补    充：注意发到总线上时是低字节在前，和普通大端字段相反
+  */
 static uint16_t MB_Crc16(const uint8_t *data, uint16_t len)
 {
     uint16_t crc = 0xFFFFU;
@@ -80,8 +84,11 @@ static uint16_t MB_Crc16(const uint8_t *data, uint16_t len)
 }
 
 /*寄存器读取*/
-/* 按寄存器地址取值：温湿度光照都是 ×10 定点、无效返回 0xFFFF；
- * 两个灯寄存器返回的是写入时记下的影子值（不是去问 LEDTask，避免阻塞）。 */
+/**
+  * 功    能：按寄存器地址取值：温湿度光照都是 ×10 定点、无效返回 0xFFFF；
+  * 参    数：reg  寄存器地址，0x0000~0x0011
+  * 返 回 值：温湿度/光照为 ×10 定点，无效 0xFFFF；0x0010/0x0011 返回影子值
+  */
 static uint16_t MB_RegRead(uint16_t reg)
 {
     switch (reg)
@@ -106,8 +113,12 @@ static uint16_t MB_RegRead(uint16_t reg)
 }
 
 /*LED 写入：经队列，生产者分配、消费者释放*/
-/* 处理主机的写灯请求：malloc 一条 LEDMessage 投给 LEDQueue，同时更新影子寄存器。
- * 队列满了就释放掉丢弃，不能因为一次点灯失败把 Modbus 应答也拖住。 */
+/**
+  * 功    能：处理主机的写灯请求：malloc 一条 LEDMessage 投给 LEDQueue，同时更新影子寄存器
+  * 参    数：reg  只接受 0x0010/0x0011；value  非 0=亮，0=灭
+  * 返 回 值：无
+  * 补    充：队列满了就释放掉丢弃，不能因为一次点灯失败把 Modbus 应答也拖住
+  */
 static void MB_LedWrite(uint16_t reg, uint16_t value)
 {
     LEDMessage *msg = pvPortMalloc(sizeof(LEDMessage));
@@ -127,8 +138,11 @@ static void MB_LedWrite(uint16_t reg, uint16_t value)
 }
 
 /*各功能码处理：入参为整帧(含地址与 CRC)，响应写 resp 并返回长度；广播只写不应答*/
-/* 处理 0x03 读保持寄存器：按起始地址和数量把值拷进响应缓冲。
- * 返回响应长度；地址越界时返回 3（异常帧）；帧长不对返回 0。CRC 由调用方补。 */
+/**
+  * 功    能：处理 0x03 读保持寄存器：按起始地址和数量把值拷进响应缓冲
+  * 参    数：req  请求整帧；reqLen  固定 8；resp  响应缓冲(CRC 由调用方补)
+  * 返 回 值：3+2×qty(qty 1~125 且 start+qty 不越 0x0012)；非法返回 3；帧长错返回 0
+  */
 static uint16_t MB_OnReadHolding(const uint8_t *req, uint16_t reqLen, uint8_t *resp)
 {
     uint16_t start, qty, i;
@@ -157,8 +171,11 @@ static uint16_t MB_OnReadHolding(const uint8_t *req, uint16_t reqLen, uint8_t *r
     return (uint16_t)(3U + qty * 2U);
 }
 
-/* 处理 0x06 写单个寄存器：只认两个灯寄存器，其它地址回异常码 3。
- * 返回 8 表示原样回显请求；广播帧不回应答，返回 0。 */
+/**
+  * 功    能：处理 0x06 写单个寄存器：只认两个灯寄存器，其它地址回异常码 3
+  * 参    数：req  请求整帧；reqLen  必须 8；resp  响应缓冲；isBroadcast  1=广播
+  * 返 回 值：8=回显请求；3=非法地址异常；0=广播或帧长错
+  */
 static uint16_t MB_OnWriteSingle(const uint8_t *req, uint16_t reqLen,
                                  uint8_t *resp, uint8_t isBroadcast)
 {
@@ -191,8 +208,11 @@ static uint16_t MB_OnWriteSingle(const uint8_t *req, uint16_t reqLen,
     return 0U;
 }
 
-/* 处理 0x10 写多个寄存器：逐个写灯寄存器。
- * 正常返回 6 字节响应；地址非法返回 3；广播或帧长错返回 0。 */
+/**
+  * 功    能：处理 0x10 写多个寄存器：逐个写灯寄存器
+  * 参    数：req  请求整帧；reqLen  必须 9+byteCnt；resp  响应缓冲；isBroadcast  1=广播
+  * 返 回 值：6=正常响应；3=异常；0=广播或帧长错
+  */
 static uint16_t MB_OnWriteMulti(const uint8_t *req, uint16_t reqLen,
                                 uint8_t *resp, uint8_t isBroadcast)
 {
@@ -240,8 +260,12 @@ static uint16_t MB_OnWriteMulti(const uint8_t *req, uint16_t reqLen,
 }
 
 /*帧处理入口*/
-/* 把已通过 CRC 校验的一帧分发给对应功能码处理，应答直接经 RS485 发出去。
- * 不认识的功能码在这里回异常，不往上抛。 */
+/**
+  * 功    能：把已通过 CRC 校验的一帧分发给对应功能码处理，应答直接经 RS485 发出去
+  * 参    数：frame  已通过 CRC 校验的整帧；len  帧长度，>= 4
+  * 返 回 值：无，应答经 RS485_Send 发出
+  * 补    充：不认识的功能码在这里回异常，不往上抛
+  */
 static void MB_ProcessFrame(const uint8_t *frame, uint16_t len)
 {
     uint8_t  resp[MB_FRAME_MAX];
@@ -293,8 +317,12 @@ static void MB_ProcessFrame(const uint8_t *frame, uint16_t len)
 }
 
 /*任务主体*/
-/* Modbus 从站主循环：等 RS485 收完一帧 → 校验 CRC → 处理 → 应答，
- * 期间按周期上报看门狗心跳。 */
+/**
+  * 功    能：Modbus 从站主循环：等 RS485 收完一帧 → 校验 CRC → 处理 → 应答，
+  * 参    数：argument  未使用，任务参数
+  * 返 回 值：无
+  * 补    充：期间按周期上报看门狗心跳
+  */
 void StartModbusTask(void *argument)
 {
     (void)argument;
@@ -369,7 +397,11 @@ void StartModbusTask(void *argument)
 }
 
 /*对外创建接口*/
-/* 创建 Modbus 从站任务，由 freertos.c 在启动调度器前调一次。句柄不保存。 */
+/**
+  * 功    能：创建 Modbus 从站任务，由 freertos.c 在启动调度器前调一次。句柄不保存
+  * 参    数：无
+  * 返 回 值：无，句柄不保存
+  */
 void ModbusTask_Create(void)
 {
     const osThreadAttr_t attr = {

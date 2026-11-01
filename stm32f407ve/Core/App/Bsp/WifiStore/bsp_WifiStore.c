@@ -19,8 +19,12 @@
  *   checksum   4B    102   前 102 字节的 32 位加和
  *   合计 108B(尾部含 2B 对齐填充)；写 WifiStore_Save / 读 WifiStore_Load
  * ------------------------------------------------------------------------- */
-/* 算凭据结构的校验和：前 102 字节按 32 位累加（最大约 26010）。
- * 用来在读出时判断这份记录有没有被写坏。 */
+/**
+  * 功    能：算凭据结构的校验和：前 102 字节按 32 位累加（最大约 26010）
+  * 参    数：c  WifiCred_t 指针，不能为空
+  * 返 回 值：前 102 字节的 32 位加和(最大约 26010)
+  * 补    充：用来在读出时判断这份记录有没有被写坏
+  */
 static uint32_t Wifi_CalcChecksum(const WifiCred_t *c)
 {
     const uint8_t *p = (const uint8_t *)c;
@@ -58,8 +62,12 @@ uint8_t WifiStore_Load(WifiCred_t *out)
     return 1U;
 }
 
-/* 擦除该扇区再写入凭据，最后回读比对。擦除/编程/回读任一失败都返回 0。
- * ssid/pwd 超长的部分会被截断。 */
+/**
+  * 功    能：擦除该扇区再写入凭据，最后回读比对。擦除/编程/回读任一失败都返回 0
+  * 参    数：in  待保存凭据，不能为空，ssid/pwd 超长部分截断
+  * 返 回 值：1=擦除+编程+回读全部成功，0=任一步失败
+  * 补    充：ssid/pwd 超长的部分会被截断
+  */
 uint8_t WifiStore_Save(const WifiCred_t *in)
 {
     FLASH_EraseInitTypeDef erase;

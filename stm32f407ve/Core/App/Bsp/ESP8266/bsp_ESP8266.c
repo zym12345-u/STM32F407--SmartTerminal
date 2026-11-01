@@ -35,8 +35,13 @@ static void ESP_RingFlush(void);
 static uint16_t ESP_RingCopy(uint8_t *out, uint16_t max);
 
 
-/* ESP8266 的串口中断：把收到的字节塞进环形缓冲。
- * 中断里不调 RTOS API；stm32f4xx_it.c 里不能再定义同名函数，否则链接冲突。 */
+/**
+  * 功    能：ESP8266 的串口中断：把收到的字节塞进环形缓冲
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：ISR 上下文，不调 RTOS API；stm32f4xx_it.c 不得再定义同名函数
+  *            中断里不调 RTOS API；stm32f4xx_it.c 里不能再定义同名函数，否则链接冲突
+  */
 void USART2_IRQHandler(void)
 {
     uint32_t isr = ESP_UART->SR;
@@ -59,7 +64,12 @@ void USART2_IRQHandler(void)
     }
 }
 
-/* 配 ESP8266 用的 GPIO、时钟和 NVIC，全在本文件完成，不依赖 CubeMX。重复调用无害。 */
+/**
+  * 功    能：配 ESP8266 用的 GPIO、时钟和 NVIC，全在本文件完成，不依赖 CubeMX。重复调用无害
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：GPIO/时钟/NVIC 都在本文件配置，不依赖 CubeMX；重复调用幂等
+  */
 static void ESP_GPIO_UART_Init(void)
 {
     GPIO_InitTypeDef gpio = {0};
@@ -90,16 +100,26 @@ static void ESP_GPIO_UART_Init(void)
     __HAL_UART_ENABLE_IT(&huart_esp, UART_IT_RXNE);
 }
 
-/* 清空接收环形缓冲（读写指针归零），丢掉所有已收内容。 */
+/**
+  * 功    能：清空接收环形缓冲（读写指针归零），丢掉所有已收内容
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：任务上下文调用；读写指针归零，丢弃全部已收内容
+  */
 static void ESP_RingFlush(void)
 {
     s_rxHead = 0U;
     s_rxTail = 0U;
 }
 
-/* 把环形缓冲里已有数据拷出来，但【不推进读指针】——
- * 这样同一段应答可以被反复解析，也能兜住「半个应答先到、后半截后到」的情况。
- * 返回实际拷贝字节数，不补结尾 \0。 */
+/**
+  * 功    能：把环形缓冲里已有数据拷出来，但【不推进读指针】——
+  * 参    数：out  输出缓冲，容量 >= max
+  *            max  最多拷贝字节数，通常取输出缓冲容量 - 1
+  * 返 回 值：实际拷贝字节数，范围 0~max；不写 '\0'
+  * 补    充：只拷贝不推进 s_rxTail，否则前半段应答找不回
+  *            这样同一段应答可以被反复解析，也能兜住「半个应答先到、后半截后到」的情况
+  */
 static uint16_t ESP_RingCopy(uint8_t *out, uint16_t max)
 {
     uint16_t n = 0U;
@@ -120,18 +140,29 @@ static uint8_t s_snap[ESP_RX_BUF_SIZE];
 
 
 /*对外接口*/
-/* 初始化 ESP8266 的串口和环形缓冲。只配本地，不探测模块在不在线。
- * 调度器启动前或任务里调一次。 */
+/**
+  * 功    能：初始化 ESP8266 的串口和环形缓冲。只配本地，不探测模块在不在线
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：调度器启动前或任务上下文调用一次；不探测模块在线
+  *            调度器启动前或任务里调一次
+  */
 void ESP8266_Init(void)
 {
     ESP_GPIO_UART_Init();
     ESP_RingFlush();
 }
 
-/* 发一条 AT 命令，等应答里出现 expect 子串（如 "OK"）。
- * 返回 1 匹配上了；0 超时、参数非法，或模块回了 FAIL/ERROR/busy。
- * cmd 要自带 \r\n；CWJAP 这类慢命令 timeoutMs 得给到 20s。
- * 等待期间每 500ms 报一次 WIFI 任务心跳，否则会被看门狗判成卡死。 */
+/**
+  * 功    能：发一条 AT 命令，等应答里出现 expect 子串（如 "OK"）
+  * 参    数：cmd  完整命令串，必须自带 "\r\n"，不允许 NULL
+  *            expect  成功标志子串，如 "OK"，不允许 NULL
+  *            timeoutMs  最长等待，单位 ms，常用 1000~20000，CWJAP 需 20s
+  * 返 回 值：1 = 已匹配 expect，0 = 超时、参数非法或模块返回 FAIL/ERROR/busy
+  * 补    充：仅 WifiTask 调用；等待期间每 500ms 上报一次 WDT_TASK_WIFI 心跳
+  *            cmd 要自带 \r\n；CWJAP 这类慢命令 timeoutMs 得给到 20s
+  *            等待期间每 500ms 报一次 WIFI 任务心跳，否则会被看门狗判成卡死
+  */
 uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs)
 {
     uint32_t startTick;
@@ -185,8 +216,12 @@ uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs)
     return 0U;
 }
 
-/* 解析最近一次 CIPSNTPTIME 的应答，取网络时间。已经按东八区换算好。
- * 返回 1 成功；0 有应答但内容无效；2 连 "OK" 都没收到。 */
+/**
+  * 功    能：解析最近一次 CIPSNTPTIME 的应答，取网络时间。已经按东八区换算好
+  * 参    数：out  输出时间，不允许 NULL，进入时先整体清 0
+  * 返 回 值：1 = 解析成功；0 = 有应答但无效（未同步或格式不符）；2 = 连 "OK" 都没收到
+  * 补    充：仅 WifiTask 调用；读 static 快照，不推进环形读指针；时区 8，已是北京时间
+  */
 uint8_t ESP8266_FetchTime(ESP8266_Time_t *out)
 {
     char     weekStr[4]  = {0};
@@ -264,8 +299,14 @@ uint8_t ESP8266_FetchTime(ESP8266_Time_t *out)
     return 1U;
 }
 
-/* 把最近的原始应答拷成字符串（调试看用），不推进读指针，可以重复调。
- * 最多拷 max-1 字节。 */
+/**
+  * 功    能：把最近的原始应答拷成字符串（调试看用），不推进读指针，可以重复调
+  * 参    数：out  调用方缓冲，不允许 NULL
+  *            max  缓冲容量，单位 byte，必须 > 0
+  * 返 回 值：实际拷贝字符数，不含结尾 '\0'；参数非法返回 0
+  * 补    充：不推进 s_rxTail，可重复调用；最多拷 max-1 字节
+  *            最多拷 max-1 字节
+  */
 uint16_t ESP8266_CopyResponse(char *out, uint16_t max)
 {
     uint16_t n;

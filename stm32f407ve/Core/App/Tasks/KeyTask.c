@@ -20,8 +20,12 @@ extern osMessageQueueId_t LEDQueueHandle;
 /*连续同电平确认次数，3 次约 30ms 消抖*/
 #define KEY_DEBOUNCE_CNT     3U
 
-/* 往 LEDQueue 投一条点灯指令：malloc 一条消息 → 填色和状态 → 投指针。
- * 队列满说明消息没送出去，要立刻 free，否则泄漏。 */
+/**
+  * 功    能：往 LEDQueue 投一条点灯指令：malloc 一条消息 → 填色和状态 → 投指针
+  * 参    数：color  目标灯，LEDColor_Green / LEDColor_Blue；state  目标状态，LEDState_On / LEDState_Off
+  * 返 回 值：无
+  * 补    充：队列满说明消息没送出去，要立刻 free，否则泄漏
+  */
 static void LED_PostMessage(LEDColor color, LEDState state)
 {
   LEDMessage *msg = pvPortMalloc(sizeof(LEDMessage));   /*生产者分配，LEDTask 消费后释放*/
@@ -36,8 +40,12 @@ static void LED_PostMessage(LEDColor color, LEDState state)
   }
 }
 
-/* 按键扫描任务：10ms 扫一次，连续 3 次同电平才认（消抖），
- * 确认按下后往 LEDQueue 投一条点灯指令。 */
+/**
+  * 功    能：按键扫描任务：10ms 扫一次，连续 3 次同电平才认（消抖），
+  * 参    数：argument  未使用，任务参数
+  * 返 回 值：无
+  * 补    充：确认按下后往 LEDQueue 投一条点灯指令
+  */
 void StartKeyTask(void *argument)
 {
   (void)argument;
