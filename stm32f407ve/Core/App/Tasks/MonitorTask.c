@@ -12,11 +12,9 @@
 
 #define MONITOR_INTERVAL_MS     500U    /*监控周期，单位 ms，本任务读*/
 
-/**
-  * 函    数：StartMonitorTask
-  * 参    数：argument  未使用，任务参数
-  * 返 回 值：无
-  */
+/* 系统监控任务：每 500ms 查一遍所有任务的心跳，全部在 3s 内上报过才喂狗。
+ * 只要有任务卡住就不喂，让独立看门狗把整机复位。
+ * 它不检查自己 —— 自己都挂了就没人喂狗，正好由 IWDG 兜底。 */
 void StartMonitorTask(void *argument)
 {
     (void)argument;
@@ -56,11 +54,7 @@ void StartMonitorTask(void *argument)
     }
 }
 
-/**
-  * 函    数：MonitorTask_Create
-  * 参    数：无
-  * 返 回 值：无，句柄不保存
-  */
+/* 创建系统监控任务，由 freertos.c 启动时调一次。句柄不保存。 */
 void MonitorTask_Create(void)
 {
     const osThreadAttr_t attr = {

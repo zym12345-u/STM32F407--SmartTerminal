@@ -60,11 +60,7 @@ static uint8_t    s_connected = 0U;
 
 
 /*队列 API*/
-/**
-  * 函    数：Wifi_PostScan
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 让任务去扫一遍热点：投一条命令进队列就返回，不等结果。 */
 void Wifi_PostScan(void)
 {
     WifiCmd_t cmd;
@@ -81,11 +77,8 @@ void Wifi_PostScan(void)
     }
 }
 
-/**
-  * 函    数：Wifi_PostJoin
-  * 参    数：ssid  热点名，最长 32 字节，超长截断；pwd  密码，最长 64 字节，开放网络传 ""
-  * 返 回 值：无
-  */
+/* 让任务去连指定热点：投命令进队列就返回。
+ * ssid 最长 32 字节、pwd 最长 64 字节，超出部分截断；开放网络密码传空串。 */
 void Wifi_PostJoin(const char *ssid, const char *pwd)
 {
     WifiCmd_t cmd;
@@ -110,11 +103,8 @@ void Wifi_PostJoin(const char *ssid, const char *pwd)
 }
 
 /*超时 0 轮询：GUI 必须持续刷界面，不能阻塞等事件*/
-/**
-  * 函    数：Wifi_TryGetEvent
-  * 参    数：ev  输出缓冲，必须非 NULL
-  * 返 回 值：1=取到事件，0=队列空或参数非法
-  */
+/* 非阻塞取一个 WiFi 事件（扫描完成 / 连接成功 / 连接失败）。
+ * 返回 1 取到、0 队列空或参数非法。 */
 uint8_t Wifi_TryGetEvent(WifiEvent_t *ev)
 {
     if ((s_evtQ != NULL) && (ev != NULL) &&
@@ -125,21 +115,13 @@ uint8_t Wifi_TryGetEvent(WifiEvent_t *ev)
     return 0U;
 }
 
-/**
-  * 函    数：Wifi_PostEvent
-  * 参    数：ev  事件码，WIFI_EV_SCAN_DONE / JOIN_OK / JOIN_FAIL
-  * 返 回 值：无
-  */
+/* 往事件队列里投一个事件码，供 GUI 那边轮询取。 */
 static void Wifi_PostEvent(WifiEvent_t ev)
 {
     (void)osMessageQueuePut(s_evtQ, &ev, 0U, 0U);
 }
 
-/**
-  * 函    数：Wifi_SetStatus
-  * 参    数：st  目标状态，WIFI_ST_IDLE ~ WIFI_ST_CONNECTED
-  * 返 回 值：无
-  */
+/* 更新 WiFi 状态，状态有变化才打日志（GUI 的状态栏也是读这个值显示）。 */
 static void Wifi_SetStatus(WifiStatus_t st)
 {
     g_wifiScan.status = (uint8_t)st;
@@ -147,21 +129,13 @@ static void Wifi_SetStatus(WifiStatus_t st)
 
 
 /*本地走秒*/
-/**
-  * 函    数：IsLeapYear
-  * 参    数：year  公元年份，如 2026
-  * 返 回 值：1=闰年，0=平年
-  */
+/* 判断闰年，日期进位时用：能被 4 整除但不能被 100 整除，或能被 400 整除。 */
 static uint8_t IsLeapYear(uint16_t year)
 {
     return (((year % 4U == 0U) && (year % 100U != 0U)) || (year % 400U == 0U)) ? 1U : 0U;
 }
 
-/**
-  * 函    数：DaysInMonth
-  * 参    数：year  年份，仅 2 月闰年判断用；month  月份 1~12，越界会读越界
-  * 返 回 值：当月天数 28/29/30/31
-  */
+/* 返回某年某月有多少天。2 月要看是不是闰年；month 越界会读越界，调用方保证 1~12。 */
 static uint8_t DaysInMonth(uint16_t year, uint8_t month)
 {
     static const uint8_t days[12] = {31U, 28U, 31U, 30U, 31U, 30U,
@@ -173,11 +147,8 @@ static uint8_t DaysInMonth(uint16_t year, uint8_t month)
     return days[month - 1U];
 }
 
-/**
-  * 函    数：Clock_TickOneSecond
-  * 参    数：t  待进位的时钟实体，调用方传栈上的 now
-  * 返 回 值：无
-  */
+/* 时钟每秒进一位：秒进分、分进时、时进日、日进月、月进年，逐级处理进位。
+ * t 传的是调用方栈上的副本，进完位由调用方发布出去。 */
 static void Clock_TickOneSecond(ClockData_t *t)
 {
     t->sec++;
@@ -201,11 +172,7 @@ static void Clock_TickOneSecond(ClockData_t *t)
 
 
 /*AT 连接与对时*/
-/**
-  * 函    数：WiFi_Ready
-  * 参    数：无
-  * 返 回 值：1=模块有响应，0=3 次探测均失败
-  */
+/* 探测模块在不在线：发 AT 最多试 3 次。返回 1 有响应、0 全都失败。 */
 static uint8_t WiFi_Ready(void)
 {
     uint8_t i;
@@ -220,11 +187,8 @@ static uint8_t WiFi_Ready(void)
     return 0U;
 }
 
-/**
-  * 函    数：WiFi_JoinAp
-  * 参    数：ssid  热点名，32 字节内；pwd  密码，64 字节内，开放网络传空串
-  * 返 回 值：1=连上，0=设模式失败或 3 次 CWJAP 均失败
-  */
+/* 连热点：先切成 STA 模式，再用 CWJAP 连（最多试 3 次）。返回 1 连上。
+ * 这一步最长会等到 20s，所以里面必须周期报心跳，否则会被看门狗判死。 */
 static uint8_t WiFi_JoinAp(const char *ssid, const char *pwd)
 {
     char joinCmd[128];
@@ -249,11 +213,7 @@ static uint8_t WiFi_JoinAp(const char *ssid, const char *pwd)
     return 0U;
 }
 
-/**
-  * 函    数：WiFi_WaitSync
-  * 参    数：now  输出时钟，调用方传入已清零的栈变量
-  * 返 回 值：1=对时成功，0=SNTP 配置失败/超时/模块掉线
-  */
+/* 配好 SNTP 并等模块回时间，解析成功就写进 now。返回 1 对时成功。 */
 static uint8_t WiFi_WaitSync(ClockData_t *now)
 {
     ESP8266_Time_t net;
@@ -294,11 +254,8 @@ static uint8_t WiFi_WaitSync(ClockData_t *now)
     return 0U;                 /* 一直 1970,对时超时 */
 }
 
-/**
-  * 函    数：WiFi_FullConnect
-  * 参    数：ssid  热点名；pwd  密码；now  输出时钟，仅对时成功时填充
-  * 返 回 值：1=三步全成功，0=任一步失败
-  */
+/* 完整的上线流程：探测模块 → 连热点 → 网络对时，三步都成功才返回 1。
+ * 任一步失败就停在那里，不会硬着头皮往下走。 */
 static uint8_t WiFi_FullConnect(const char *ssid, const char *pwd, ClockData_t *now)
 {
     if (WiFi_Ready() == 0U)
@@ -325,11 +282,7 @@ static uint8_t WiFi_FullConnect(const char *ssid, const char *pwd, ClockData_t *
 static WifiAp_t s_top[WIFI_AP_MAX];
 static uint8_t  s_topN;
 
-/**
-  * 函    数：TopList_Insert
-  * 参    数：ssid  热点名，最长 32 字节；rssi  信号强度 dBm；sec  CWLAP 的 ecn，0=开放
-  * 返 回 值：无
-  */
+/* 把扫到的一个热点放进候选表（连同信号强度和加密方式）。 */
 static void TopList_Insert(const char *ssid, int rssi, uint8_t sec)
 {
     uint8_t i;
@@ -378,11 +331,7 @@ static void TopList_Insert(const char *ssid, int rssi, uint8_t sec)
     }
 }
 
-/**
-  * 函    数：TopList_Sort
-  * 参    数：无，直接操作静态数组 s_top / s_topN
-  * 返 回 值：无
-  */
+/* 对候选表按信号强度从强到弱排序，界面上信号好的排前面。 */
 /* 简单选择排序:信号从强到弱 */
 static void TopList_Sort(void)
 {
@@ -406,11 +355,7 @@ static void TopList_Sort(void)
     }
 }
 
-/**
-  * 函    数：DumpRespHead
-  * 参    数：tag  日志标签；n  应答总字节数，内部自动截到 79 字节
-  * 返 回 值：无
-  */
+/* 打印应答的前若干字节，调试用。内部自动截到 79 字节，避免把一行刷爆。 */
 static void DumpRespHead(const char *tag, uint16_t n)
 {
     char head[80];
@@ -420,11 +365,7 @@ static void DumpRespHead(const char *tag, uint16_t n)
     UART_Printf("[WIFI] %s, %d bytes: %s\r\n", tag, (int)n, head);
 }
 
-/**
-  * 函    数：DoScan
-  * 参    数：无
-  * 返 回 值：无，结果经 g_wifiScan 与 WIFI_EV_SCAN_DONE 发布
-  */
+/* 执行一次扫描（AT+CWLAP）：解析结果整理成列表，再发「扫描完成」事件给 GUI。 */
 static void DoScan(void)
 {
     char *p;
@@ -518,11 +459,7 @@ static void DoScan(void)
 
 
 /*屏幕提交的连接命令*/
-/**
-  * 函    数：DoJoinCmd
-  * 参    数：cmd  命令体，ssid/pwd 为用户选定热点与密码
-  * 返 回 值：无，结果经 g_wifiScan.status 与 evtQ 发布
-  */
+/* 执行连接命令：跑完整上线流程，结果同时更新状态和事件队列。 */
 static void DoJoinCmd(const WifiCmd_t *cmd)
 {
     ClockData_t now;
@@ -560,11 +497,8 @@ static void DoJoinCmd(const WifiCmd_t *cmd)
 
 
 /*任务入口*/
-/**
-  * 函    数：StartWifiTask
-  * 参    数：argument  未使用，创建时传 NULL
-  * 返 回 值：无，死循环不返回
-  */
+/* WiFi 任务主循环：等命令队列 → 处理扫描/连接 → 走时钟 → 报心跳。死循环不返回。
+ * 取命令带超时，所以没命令时也会按周期报心跳，不会被判卡死。 */
 void StartWifiTask(void *argument)
 {
     (void)argument;
@@ -675,11 +609,7 @@ void StartWifiTask(void *argument)
 }
 
 
-/**
-  * 函    数：WifiTask_Create
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 创建 WiFi 任务，由 freertos.c 在启动调度器前调一次。 */
 void WifiTask_Create(void)
 {
     static const osThreadAttr_t wifiTaskAttr = {

@@ -58,11 +58,7 @@ volatile typedef struct                                     // LCD地址结构�
 
 
 
-/**
-  * 函    数：delay_us
-  * 参    数：times  延时的微秒数，取值 1~几百，单次不超过 1000
-  * 返 回 值：无
-  */
+/* 微秒级忙等延时。单次别超过 1000us，长了占用 CPU 太狠。 */
 static void delay_us(volatile uint32_t times)
 {
     times = times * 20;                         // 1us≈20 次空循环(168MHz 实测)，换主频需重新标定
@@ -72,11 +68,7 @@ static void delay_us(volatile uint32_t times)
 
 
 
-/**
-  * 函    数：delay_ms
-  * 参    数：ms  延时的毫秒数
-  * 返 回 值：无
-  */
+/* 毫秒级延时。 */
 static volatile uint32_t ulTimesMS;         // volatile 防止 -O3 把延时循环优化掉
 static void delay_ms(uint16_t ms)
 {
@@ -87,11 +79,7 @@ static void delay_ms(uint16_t ms)
 
 
 
-/**
-  * 函    数：readReg
-  * 参    数：LCD_Reg  寄存器命令码 0x00~0xFF，例如 0xD3 读 ID4
-  * 返 回 值：寄存器数据(按 16 位总线读，高字节通常无意义)
-  */
+/* 读 LCD 的某个寄存器：先发命令码再读回数据。比如 0xD3 读 ID4，可用来确认芯片型号。 */
 uint16_t  readReg(uint16_t  LCD_Reg)
 {
     LCD->LCD_REG = LCD_Reg;                 // 写入要读的寄存器号
@@ -101,11 +89,7 @@ uint16_t  readReg(uint16_t  LCD_Reg)
 
 
 
-/**
-  * 函    数：LCD_BGR2RGB
-  * 参    数：c  BGR565 颜色值，位域 b[4:0]、g[10:5]、r[15:11]
-  * 返 回 值：RGB565 颜色值，位域 r[15:11]、g[10:5]、b[4:0]
-  */
+/* 把 BGR565 的颜色值转成 RGB565。两种排布的位域正好相反，屏幕发色不对时先查这里。 */
 uint16_t  LCD_BGR2RGB(uint16_t  c)
 {
     uint16_t   r, g, b, rgb;
@@ -118,11 +102,7 @@ uint16_t  LCD_BGR2RGB(uint16_t  c)
 
 
 
-/**
-  * 函    数：LCD_Init
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 初始化 ILI9341：硬复位 → 读 ID 确认 → 配像素格式和时序 → 开显示。 */
 void LCD_Init(void)
 {
     xLCD.FlagInit = 0;                                       // LCD初始化完成标志; 0-未初始化完成, 1-初始化完成
@@ -376,11 +356,8 @@ void LCD_Init(void)
 
 
 
-/**
-  * 函    数：LCD_SetDir
-  * 参    数：dir  0=竖屏 1=横屏(内部换算成 6)；改方向后触摸必须重新校准
-  * 返 回 值：无
-  */
+/* 切横竖屏（dir 0 竖屏、1 横屏，内部会换算成寄存器值 6）。
+ * 【改完方向必须重新校准触摸】—— 触摸的坐标换算和屏幕方向是绑死的，不重校就会点哪都不对。 */
 void LCD_SetDir(uint8_t dir)
 {
     uint16_t  regval = 0;
@@ -447,11 +424,8 @@ void LCD_SetDir(uint8_t dir)
 
 
 
-/**
-  * 函    数：setCursor
-  * 参    数：Xpos  列坐标，竖屏 0~239、横屏 0~319；Ypos  页坐标，竖屏 0~319、横屏 0~239
-  * 返 回 值：无
-  */
+/* 把显存写入指针移到指定坐标：之后连续写像素就从这一点开始向右、向下铺。
+ * 坐标范围随方向变（竖屏 240 宽 / 横屏 320 宽），传错会写飞。 */
 static void setCursor(uint16_t  Xpos, uint16_t  Ypos)
 {
     LCD->LCD_REG = 0X2A;           // 0x2A 列地址，只发起始=结束，窗口压成 1 像素
@@ -464,11 +438,7 @@ static void setCursor(uint16_t  Xpos, uint16_t  Ypos)
 
 
 
-/**
-  * 函    数：LCD_DrawPoint
-  * 参    数：x,y  坐标；_color  RGB565 颜色
-  * 返 回 值：无
-  */
+/* 在 (x,y) 画一个像素点。 */
 void LCD_DrawPoint(uint16_t  x, uint16_t  y, uint16_t _color)
 {
     LCD->LCD_REG = 0X2A;        // 0x2A 设置 x 坐标
@@ -485,11 +455,7 @@ void LCD_DrawPoint(uint16_t  x, uint16_t  y, uint16_t _color)
 
 
 
-/**
-  * 函    数：LCD_Fill
-  * 参    数：startX/startY 起点；endX/endY 终点(含端点)；color 填充色
-  * 返 回 值：无
-  */
+/* 用纯色填一块矩形区域，起止坐标都包含在内。 */
 void LCD_Fill(uint16_t startX, uint16_t startY, uint16_t endX, uint16_t endY, uint16_t color)
 {
     uint16_t  xlen = 0;
@@ -505,11 +471,7 @@ void LCD_Fill(uint16_t startX, uint16_t startY, uint16_t endX, uint16_t endY, ui
 
 
 
-/**
-  * 函    数：drawAscii
-  * 参    数：x,y 起始坐标；num 字符 0x20~0x7E；size 字号 12/16/24/32；bColor 背景色；fColor 前景色
-  * 返 回 值：无
-  */
+/* 在指定位置画一个 ASCII 字符（内部函数）。字号支持 12/16/24/32。 */
 static void drawAscii(uint16_t x, uint16_t y, uint8_t num, uint8_t size, uint32_t bColor, uint32_t fColor)
 {
     static uint8_t temp = 0;
@@ -550,11 +512,7 @@ static void drawAscii(uint16_t x, uint16_t y, uint8_t num, uint8_t size, uint32_
 
 
 
-/**
-  * 函    数：LCD_String
-  * 参    数：x,y 起始坐标；pFont 字符串，仅 ASCII；size 12/16/24/32；fColor 前景色；bColor 背景色
-  * 返 回 值：无
-  */
+/* 画一串 ASCII 字符。只支持 ASCII —— 中文要走 LVGL 那边的 GBK 字体。 */
 void LCD_String(uint16_t x, uint16_t y, char *pFont, uint8_t size, uint32_t fColor, uint32_t bColor)
 {
     if (xLCD .FlagInit == 0) return;
@@ -585,11 +543,7 @@ void LCD_String(uint16_t x, uint16_t y, char *pFont, uint8_t size, uint32_t fCol
 
 
 
-/**
-  * 函    数：LCD_DisplayOn
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 打开显示输出。 */
 void LCD_DisplayOn(void)
 {
     LCD->LCD_REG = 0X29;                // 0x29 开显示
@@ -598,11 +552,7 @@ void LCD_DisplayOn(void)
 
 
 
-/**
-  * 函    数：LCD_DisplayOff
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 关闭显示输出。画面内容还在，只是不再刷新出来。 */
 void LCD_DisplayOff(void)
 {
     LCD->LCD_REG = 0X28;                                // 0x28 关显示
@@ -611,11 +561,7 @@ void LCD_DisplayOff(void)
 
 
 
-/**
-  * 函    数：LCD_GetWidth
-  * 参    数：无
-  * 返 回 值：当前方向下的宽度(像素)，竖屏 240、横屏 320
-  */
+/* 当前方向下的屏幕宽度：竖屏 240，横屏 320。 */
 uint16_t LCD_GetWidth(void)
 {
     return xLCD.width;
@@ -624,11 +570,7 @@ uint16_t LCD_GetWidth(void)
 
 
 
-/**
-  * 函    数：LCD_GetHeight
-  * 参    数：无
-  * 返 回 值：当前方向下的高度(像素)，竖屏 320、横屏 240
-  */
+/* 当前方向下的屏幕高度：竖屏 320，横屏 240。 */
 uint16_t LCD_GetHeight(void)
 {
     return xLCD.height;
@@ -636,11 +578,7 @@ uint16_t LCD_GetHeight(void)
 
 
 
-/**
-  * 函    数：LCD_GetDir
-  * 参    数：无
-  * 返 回 值：0=竖屏 1=横屏
-  */
+/* 当前是竖屏还是横屏：0 竖屏、1 横屏。 */
 uint8_t  LCD_GetDir(void)
 {
     return xLCD.dir;
@@ -648,11 +586,7 @@ uint8_t  LCD_GetDir(void)
 
 
 
-/**
-  * 函    数：LCD_Line
-  * 参    数：xStart,yStart 起点；xEnd,yEnd 终点(含端点)；_color RGB565 颜色
-  * 返 回 值：无
-  */
+/* 画一条直线，起止点都包含在内。 */
 void LCD_Line(uint16_t xStart, uint16_t yStart, uint16_t xEnd, uint16_t yEnd, uint16_t _color)
 {
     uint16_t  t;
@@ -699,11 +633,7 @@ void LCD_Line(uint16_t xStart, uint16_t yStart, uint16_t xEnd, uint16_t yEnd, ui
 
 
 
-/**
-  * 函    数：LCD_Circle
-  * 参    数：Xpos,Ypos 圆心坐标；Radius 半径(像素)；_color 颜色
-  * 返 回 值：无
-  */
+/* 画一个圆（圆心 + 半径），只画轮廓。 */
 void LCD_Circle(uint16_t Xpos, uint16_t Ypos, uint16_t Radius, uint16_t _color)
 {
     int16_t mx = Xpos, my = Ypos, x = 0, y = Radius;
@@ -733,11 +663,7 @@ void LCD_Circle(uint16_t Xpos, uint16_t Ypos, uint16_t Radius, uint16_t _color)
 
 
 
-/**
-  * 函    数：LCD_Rectangle
-  * 参    数：x,y 左上角；width/height 宽高(像素)；color 颜色；filled 0=空心 1=实心
-  * 返 回 值：无
-  */
+/* 画矩形：filled 传 0 画空心框、传 1 填实心。 */
 void LCD_Rectangle(uint16_t x, uint16_t y, uint16_t width, uint16_t height, uint16_t color, uint8_t filled)
 {
     if (filled)                                          // 0=空心 1=实心
@@ -755,11 +681,7 @@ void LCD_Rectangle(uint16_t x, uint16_t y, uint16_t width, uint16_t height, uint
 
 
 
-/**
-  * 函    数：LCD_Image
-  * 参    数：x,y 左上角；width/height 像素宽高；image RGB565 数组，每像素 2 字节
-  * 返 回 值：无
-  */
+/* 画一张 RGB565 位图，每个像素占 2 字节。左上角 + 宽高 + 数据指针。 */
 void LCD_Image(uint16_t x, uint16_t y, uint16_t width, uint16_t height, const uint8_t *image)
 {
     for (uint16_t i = 0; i < height; i++)           // 逐行写入
@@ -781,11 +703,7 @@ void LCD_Image(uint16_t x, uint16_t y, uint16_t width, uint16_t height, const ui
 
 
 
-/**
-  * 函    数：LCD_Cross
-  * 参    数：x,y 中心坐标；len 十字总长(像素)；fColor 颜色
-  * 返 回 值：无
-  */
+/* 画一个十字标记 —— 触摸校准时的靶标就是它。 */
 void LCD_Cross(uint16_t x, uint16_t y, uint16_t len, uint32_t fColor)
 {
     uint16_t temp = len / 2;                        // 半臂长
@@ -796,11 +714,7 @@ void LCD_Cross(uint16_t x, uint16_t y, uint16_t len, uint32_t fColor)
 
 
 
-/**
-  * 函    数：LCD_ReadPoint
-  * 参    数：x,y 坐标，超出屏幕直接返回 0
-  * 返 回 值：RGB565 颜色值
-  */
+/* 读某个像素的颜色（RGB565）。坐标超出屏幕直接返回 0。 */
 uint16_t  LCD_ReadPoint(uint16_t  x, uint16_t  y)
 {
     uint16_t  r = 0, g = 0, b = 0;
@@ -824,11 +738,7 @@ uint16_t  LCD_ReadPoint(uint16_t  x, uint16_t  y)
 
 
 
-/**
-  * 函    数：LCD_DMA_Init
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 配好刷屏用的 DMA（DMA2 Stream5），这样整块填色不用 CPU 一个像素一个像素搬。 */
 static void LCD_DMA_Init(void)
 {
     __HAL_RCC_DMA2_CLK_ENABLE();                              // 开 DMA2 时钟
@@ -853,21 +763,15 @@ static void LCD_DMA_Init(void)
         lcdDmaDoneSem = osSemaphoreNew(1U, 1U, NULL);  /* 初值 1 = DMA 空闲; flush 时 acquire, 完成中断 release */
 }
 
-/**
-  * 函    数：LCD_SetFlushDoneCallback
-  * 参    数：cb  DMA 完成回调，传 NULL 表示取消；回调在中断上下文执行
-  * 返 回 值：无
-  */
+/* 注册「DMA 刷完了」的回调，LVGL 靠它知道什么时候能复用那块缓冲。
+ * 传 NULL 取消注册。注意回调是在中断上下文里跑的，里头不能调阻塞 API。 */
 void LCD_SetFlushDoneCallback(void (*cb)(void))
 {
     lcdFlushDoneCb = cb;                      // 回调里不能调阻塞型 API，只能置标志或释放信号量
 }
 
-/**
-  * 函    数：LCD_DispFlush
-  * 参    数：x,y 左上角；width/height 右下角坐标 x2/y2(不是宽高)；pData RGB565 像素数组
-  * 返 回 值：无
-  */
+/* 把一块 RGB565 数据刷到屏幕上（LVGL 的 flush 走这里）。
+ * 【参数名有坑】width/height 实际是右下角坐标 x2/y2，不是宽和高 —— 按宽高传会画歪。 */
 void LCD_DispFlush(uint16_t x, uint16_t y, uint16_t width, uint16_t height, const uint16_t *pData)
 {
     /*等待上次 DMA 搬完，再发命令*/
@@ -902,11 +806,7 @@ void LCD_DispFlush(uint16_t x, uint16_t y, uint16_t width, uint16_t height, cons
     s->CR  |= DMA_SxCR_EN;                           // 启动
 }
 
-/**
-  * 函    数：DMA2_Stream5_IRQHandler
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* DMA2 Stream5 中断入口 —— 这条流是 LCD 刷屏用的，转给 HAL 处理。 */
 void DMA2_Stream5_IRQHandler(void)
 {
     /*传输完成标志在 HISR 的 bit11(TCIF5)*/

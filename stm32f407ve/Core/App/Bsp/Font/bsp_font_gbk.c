@@ -17,11 +17,8 @@
 
 static uint8_t s_glyphBuf[GBK16_GLYPH_BYTES];
 
-/**
-  * 函    数：gbk16_uni_to_code
-  * 参    数：uni  Unicode 码点 0x0000~0xFFFF，超出直接失败
-  * 返 回 值：GB2312 双字节码，表中没有返回 0
-  */
+/* 把 Unicode 码点翻成 GB2312 双字节码，查表用。
+ * 表里没有（或码点超过 0xFFFF）返回 0 表示不认。 */
 static uint16_t gbk16_uni_to_code(uint32_t uni)
 {
     uint16_t lo;
@@ -55,11 +52,8 @@ static uint16_t gbk16_uni_to_code(uint32_t uni)
     return 0U;
 }
 
-/**
-  * 函    数：gbk16_glyph_addr
-  * 参    数：gbk  GB2312 码，高字节 0x81~0xFE，低字节 0x40~0xFE(0x7F 除外)
-  * 返 回 值：字模地址 0x00A00000 + 0x0008C460 + idx*32，非法码返回 0xFFFFFFFF
-  */
+/* 由 GB2312 码算出这个字的点阵在外部 Flash 字库里的地址：
+ * 基址 + 偏移 + 序号×32 字节。码不合法返回 0xFFFFFFFF。 */
 static uint32_t gbk16_glyph_addr(uint16_t gbk)
 {
     uint8_t  hi = (uint8_t)(gbk >> 8);
@@ -77,11 +71,8 @@ static uint32_t gbk16_glyph_addr(uint16_t gbk)
     return GBK_FONT_BASE + GBK16_SECTION_OFS + idx * GBK16_GLYPH_BYTES;        /* 0xA00000+0x8C460+idx*32 */
 }
 
-/**
-  * 函    数：gbk16_transpose
-  * 参    数：buf  32 字节点阵，输入列式，原地输出行式
-  * 返 回 值：无
-  */
+/* 把 32 字节点阵从「列式」转成「行式」，原地转。
+ * 字库里存的是列扫描格式，LVGL 要的是按行排的。 */
 static void gbk16_transpose(uint8_t *buf)
 {
     uint8_t  src[GBK16_GLYPH_BYTES];
@@ -106,11 +97,8 @@ static void gbk16_transpose(uint8_t *buf)
     }
 }
 
-/**
-  * 函    数：gbk16_get_dsc
-  * 参    数：font 不使用；dsc 输出字形描述；letter Unicode 码点；letter_next 不使用
-  * 返 回 值：true=本字库有此字形，false=交给 fallback 字体
-  */
+/* LVGL 字体回调之一：告诉它这个字有没有字形、字宽多少。
+ * 返回 true 用外挂 GBK 字体，false 交给 fallback（ASCII 走 montserrat_16）。 */
 static bool gbk16_get_dsc(const lv_font_t *font, lv_font_glyph_dsc_t *dsc,
                           uint32_t letter, uint32_t letter_next)
 {
@@ -133,11 +121,8 @@ static bool gbk16_get_dsc(const lv_font_t *font, lv_font_glyph_dsc_t *dsc,
     return true;
 }
 
-/**
-  * 函    数：gbk16_get_bitmap
-  * 参    数：font 不使用；letter Unicode 码点
-  * 返 回 值：指向 static 32 字节缓冲的行式点阵；查表失败/地址越界/SPI 读失败返回 NULL
-  */
+/* LVGL 字体回调之一：取这个字的点阵数据。走 SPI 从外部 Flash 读，再转成行式。
+ * 查表失败、地址越界或 Flash 读失败都返回 NULL，LVGL 会自动跳过这个字。 */
 static const uint8_t *gbk16_get_bitmap(const lv_font_t *font, uint32_t letter)
 {
     uint16_t gbk;
@@ -181,21 +166,14 @@ static const lv_font_t s_gbk16 = {
 #endif
 };
 
-/**
-  * 函    数：BSP_Font_Gbk16
-  * 参    数：无
-  * 返 回 值：字体对象指针，指向文件内静态对象
-  */
+/* 取外挂 GBK 16px 字体对象，交给 LVGL 设字体用。返回的是文件内的静态对象。 */
 const lv_font_t *BSP_Font_Gbk16(void)
 {
     return &s_gbk16;
 }
 
-/**
-  * 函    数：BSP_Font_SelfTest
-  * 参    数：无
-  * 返 回 值：1=读取成功且点亮位数在 1~255，0=读失败或全 0/全 1
-  */
+/* 字库自检：从 Flash 读一个已知字的点阵，看点亮位数是否在 1~255 之间。
+ * 全 0 说明没烧字库、全 1 说明 Flash 是空片（0xFF）。返回 1 正常、0 异常。 */
 uint8_t BSP_Font_SelfTest(void)
 {
     const uint16_t gbk  = 0xD6D0U;        /* "中" */

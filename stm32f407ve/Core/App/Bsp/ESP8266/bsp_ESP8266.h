@@ -24,38 +24,18 @@ typedef struct
 } ESP8266_Time_t;
 
 
-/**
-  * 函    数：ESP8266_Init
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 初始化 ESP8266 的串口和环形缓冲，不探测模块是否在线。 */
 void ESP8266_Init(void);
 
-/**
-  * 函    数：ESP8266_Cmd
-  * 参    数：cmd  完整命令字符串，需自带 "\r\n"，如 "AT\r\n"
-  * 参    数：expect  成功标志，如 "OK"/"ready"，不允许 NULL
-  * 参    数：timeoutMs  超时，单位 ms，每 10ms 检查一次
-  * 返 回 值：1 = 收到 expect，0 = 超时或模块返回 FAIL/ERROR
-  * 注意事项：仅 WifiTask 调用，等待期间 osDelay 让出 CPU
-  */
+/* 发 AT 命令并等应答标志子串。返回 1 收到、0 超时或被模块拒绝。
+ * 只给 WifiTask 用，等待期间会用 osDelay 让出 CPU。 */
 uint8_t ESP8266_Cmd(const char *cmd, const char *expect, uint32_t timeoutMs);
 
-/**
-  * 函    数：ESP8266_FetchTime
-  * 参    数：out  解析成功时输出时间
-  * 返 回 值：1 = 成功；0 = 有应答但时间无效；2 = 连 "OK" 都没收到（模块掉线）
-  * 注意事项：时区已设 8，输出即北京时间
-  */
+/* 取网络时间（已换算成北京时间）。返回 1 成功、0 应答无效、2 连 OK 都没收到。 */
 uint8_t ESP8266_FetchTime(ESP8266_Time_t *out);
 
-/**
-  * 函    数：ESP8266_CopyResponse
-  * 参    数：out  调用方缓冲，自动补 '\0'
-  * 参    数：max  缓冲容量
-  * 返 回 值：实际拷贝字节数，不含结尾 '\0'
-  * 注意事项：不推进读位置，可重复调用；仅 WifiTask 使用
-  */
+/* 把最近的原始应答拷成字符串（调试用），不推进读指针，可以重复调。
+ * 最多拷 max-1 字节，返回实际字符数。 */
 uint16_t ESP8266_CopyResponse(char *out, uint16_t max);
 
 

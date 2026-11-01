@@ -24,11 +24,8 @@ static volatile uint32_t s_lastBeat[WDT_TASK_MAX] = {0U};
  *   喂狗者    仅 MonitorTask，且 Watchdog_CheckAllAlive() 返回 1
  * ------------------------------------------------------------------------- */
 
-/**
-  * 函    数：IWDG_Init
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 启动独立看门狗：LSI 约 32kHz，重装值 125 对应约 1s 超时。
+ * 启动后无法关闭，所以要等系统确认能正常喂狗之后再调。 */
 void IWDG_Init(void)
 {
     /*使能 LSI，等 LSIRDY 置位后再写 IWDG，否则写入无效*/
@@ -54,22 +51,16 @@ void IWDG_Init(void)
     IWDG_Refresh();
 }
 
-/**
-  * 函    数：IWDG_Refresh
-  * 参    数：无
-  * 返 回 值：无
-  */
+/* 喂一次狗：往键寄存器写 0xAAAA 重装计数。喂晚了直接复位，
+ * 所以只允许 MonitorTask 在确认所有任务都活着之后调用。 */
 void IWDG_Refresh(void)
 {
     /*喂狗 0xAAAA；只有 MonitorTask 在全任务存活时调用*/
     IWDG->KR = 0xAAAAU;
 }
 
-/**
-  * 函    数：IWDG_SetReload
-  * 参    数：rlr  重装载值 1~4095；T ≈ 256*rlr/32000 s，125≈1s，500≈4s
-  * 返 回 值：无
-  */
+/* 改看门狗的超时窗口：T ≈ 256 × rlr / 32000 秒，rlr=125 约 1s、500 约 4s。
+ * 需要给 Flash 擦除这类长操作留余量时用它，而不是靠中途偷偷喂狗。 */
 void IWDG_SetReload(uint16_t rlr)
 {
     IWDG->KR  = 0x5555U;            /* 0x5555 解锁 PR/RLR */
@@ -78,11 +69,8 @@ void IWDG_SetReload(uint16_t rlr)
     IWDG->KR  = 0xAAAAU;            /* 立即喂一次, 新窗口起算 */
 }
 
-/**
-  * 函    数：Watchdog_Heartbeat
-  * 参    数：taskId  任务编号 0~WDT_TASK_MAX-1，越界忽略
-  * 返 回 值：无
-  */
+/* 登记「我还活着」：把当前 tick 记进对应任务的槽位。
+ * 每个任务在自己的主循环里调；taskId 越界直接忽略，不会写坏数组。 */
 void Watchdog_Heartbeat(WDT_TaskId_t taskId)
 {
     if (taskId < WDT_TASK_MAX)
@@ -91,11 +79,8 @@ void Watchdog_Heartbeat(WDT_TaskId_t taskId)
     }
 }
 
-/**
-  * 函    数：Watchdog_CheckAllAlive
-  * 参    数：无
-  * 返 回 值：1=全部存活，0=有任务超过 3000ms 未上报(调用方不得喂狗)
-  */
+/* 逐个比对各任务最后上报的时间，超过 3000ms 就算卡死（MONITOR 自己不查）。
+ * 返回 1 表示全部存活、可以喂狗；返回 0 说明有任务卡住，绝不能喂。 */
 uint8_t Watchdog_CheckAllAlive(void)
 {
     uint32_t now = xTaskGetTickCount();
@@ -123,11 +108,8 @@ uint8_t Watchdog_CheckAllAlive(void)
     return 1U;
 }
 
-/**
-  * 函    数：Watchdog_GetLastBeat
-  * 参    数：taskId  任务编号 0~WDT_TASK_MAX-1
-  * 返 回 值：tick 值(1kHz，单位 ms)；越界或从未上报返回 0
-  */
+/* 取某个任务最后一次心跳的时刻（tick，1kHz 即 ms）。
+ * 卡死告警时用它打印出到底是哪几个任务没动静；越界或从未上报返回 0。 */
 uint32_t Watchdog_GetLastBeat(WDT_TaskId_t taskId)
 {
     if (taskId < WDT_TASK_MAX)
