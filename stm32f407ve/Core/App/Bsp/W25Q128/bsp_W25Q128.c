@@ -82,21 +82,28 @@ static uint8_t W25Q_SpiByte(uint8_t tx)
     return rx;
 }
 
+/*每毫秒对应的 DWT 周期数，168MHz 下是 168000*/
+#define W25Q_CYCLES_PER_MS   (SystemCoreClock / 1000U)
+
 /**
-  * 功    能：用 DWT 周期数算毫秒。不能用 HAL_GetTick：boot 阶段调度器还没起，tick 根本不前进
+  * 功    能：取 DWT 的周期计数，顺带确保 CYCCNT 已经开起来
   * 参    数：无
-  * 返 回 值：自复位起的毫秒数，32 位 @168MHz 约 25.5s 回绕，调用方用无符号差分算间隔
-  * 补    充：走 DWT 周期计数，不依赖 HAL tick；boot 阶段调度器未启动时 HAL_GetTick 不前进
-  *            32 位约 25.5s 回绕一次，调用方要用无符号差分算间隔
+  * 返 回 值：CPU 周期数，32 位，@168MHz 约 25.5 秒回绕一次
+  * 补    充：等待超时一律比较【周期差】，不要先除成毫秒 ——
+  *            CYCCNT/168000 得到的是一个 0~25565 的短计数器，每 25.5 秒回绕；
+  *            若起点采在回绕前、终点采在回绕后，毫秒差会算成天文数字，
+  *            把还在忙的擦除误判成超时（2026-11-01 真机踩到：误判后紧跟的读全是 0xFF，
+  *            LittleFS 被判空白自动格式化，WiFi 凭据被擦）
+  *            周期差在无符号 32 位下能跨一次回绕，所以等待时长必须远小于 25.5 秒
   */
-static uint32_t W25Q_Millis(void)
+static uint32_t W25Q_NowCycles(void)
 {
     if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U)
     {
         CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
         DWT->CTRL      |= DWT_CTRL_CYCCNTENA_Msk;
     }
-    return DWT->CYCCNT / (SystemCoreClock / 1000U);   /* 每毫秒 = SystemCoreClock/1000 个周期 */
+    return DWT->CYCCNT;
 }
 
 /**
@@ -107,8 +114,9 @@ static uint32_t W25Q_Millis(void)
   */
 static void W25Q_DelayMsBoot(uint32_t ms)
 {
-    uint32_t start = W25Q_Millis();
-    while ((W25Q_Millis() - start) < ms) { }
+    uint32_t t0     = W25Q_NowCycles();
+    uint32_t cycles = ms * W25Q_CYCLES_PER_MS;
+    while ((W25Q_NowCycles() - t0) < cycles) { }
 }
 
 /**
@@ -157,7 +165,8 @@ uint8_t W25Q128_ReadStatus1(void)
 HAL_StatusTypeDef W25Q128_WaitReady(uint32_t timeoutMs)
 {
     uint8_t  st;
-    uint32_t t0 = W25Q_Millis();
+    uint32_t t0      = W25Q_NowCycles();
+    uint32_t timeout = timeoutMs * W25Q_CYCLES_PER_MS;   /*超时换算成周期数，全程比较周期差*/
 
     /*入口必报：只在循环里报时，快响应路径全程零心跳*/
     Watchdog_Heartbeat(WDT_TASK_STORAGE);
@@ -170,15 +179,15 @@ HAL_StatusTypeDef W25Q128_WaitReady(uint32_t timeoutMs)
         if ((st & 0x01U) == 0U)                 /* BUSY 清零 */
         {
             W25Q_CS_HIGH();
-            s_lastBusyMs = W25Q_Millis() - t0;
+            s_lastBusyMs = (W25Q_NowCycles() - t0) / W25Q_CYCLES_PER_MS;
             return HAL_OK;
         }
         Watchdog_Heartbeat(WDT_TASK_STORAGE);   /* 长等待期间补报心跳 */
         W25Q_Delay1ms();
-    } while ((W25Q_Millis() - t0) < timeoutMs);
+    } while ((W25Q_NowCycles() - t0) < timeout);
 
     W25Q_CS_HIGH();
-    s_lastBusyMs = W25Q_Millis() - t0;
+    s_lastBusyMs = (W25Q_NowCycles() - t0) / W25Q_CYCLES_PER_MS;
     return HAL_TIMEOUT;                         /* 超时返回，不死等 */
 }
 
