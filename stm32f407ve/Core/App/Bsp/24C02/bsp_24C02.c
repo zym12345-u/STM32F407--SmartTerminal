@@ -129,8 +129,13 @@ uint8_t AT24C02_Init(void)
 
 #if AT24C02_SELFTEST
     {
-        /* 自检 = 写保留区一页 + 读回比对。整段在锁内，
-         * 中间 ACK 轮询也持锁 —— 粒度是"一次完整业务事务"。 */
+        /* 自检 = 写保留区一页 + 读回比对。
+         * 【这里绝对不能再包一层 I2CBus_Lock()！】
+         * WriteBytes/ReadBytes 内部各自拿锁；osMutexNew(NULL) 建的是【非递归锁】，
+         * 任务对自己已持有的锁再次 acquire 会永远阻塞 —— 2026-11-02 真机上就是
+         * 这么把 SensorTask 卡死在初始化里的(现象: 启动日志打了 BH1750 init ok 后
+         * 再无 24C02/DHT11 输出, 任务列表里 SensorTask 运行计数冻结)。
+         * 写与读回之间不需要原子性: 此时全系统只有 SensorTask 一个 I2C 用户。 */
         static const uint8_t pattern[AT24C02_PAGE_SIZE] =
         {
             0x11U, 0x22U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U
@@ -138,7 +143,6 @@ uint8_t AT24C02_Init(void)
         uint8_t rd[AT24C02_PAGE_SIZE];
         uint8_t i, fail = 0U;
 
-        I2CBus_Lock();
         if (AT24C02_WriteBytes(AT24C02_SELFTEST_ADDR, pattern,
                                AT24C02_PAGE_SIZE) != 0U)
         {
@@ -160,7 +164,6 @@ uint8_t AT24C02_Init(void)
                 }
             }
         }
-        I2CBus_Unlock();
 
         if (fail != 0U)
         {
