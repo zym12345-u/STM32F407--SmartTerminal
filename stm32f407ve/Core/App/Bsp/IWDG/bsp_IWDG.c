@@ -11,6 +11,8 @@
 #define IWDG_PRESCALER_256  6U          /* PR 寄存器值 6 对应 256 分频 */
 #define IWDG_RELOAD         125U        /* T = 256 * 125 / 32000 ≈ 1.00s */
 #define WDT_HEARTBEAT_TIMEOUT_MS   3000U   /* 任务心跳超时: 3s 未更新视为卡死 */
+#define WDT_FIRSTBEAT_GRACE_MS   30000U   /* 首跳宽限: 上电 30s 内还没报过心跳不判死,
+                                           * 超过则认为卡死在初始化里(见 CheckAllAlive) */
 
 /* 各任务最后心跳时间戳(tick) */
 static volatile uint32_t s_lastBeat[WDT_TASK_MAX] = {0U};
@@ -117,11 +119,24 @@ uint8_t Watchdog_CheckAllAlive(void)
         {
             continue;
         }
-        /*心跳为 0 表示从未上报(尚未启动)，暂不判死*/
-        if (s_lastBeat[i] != 0U &&
-            (now - s_lastBeat[i]) > pdMS_TO_TICKS(WDT_HEARTBEAT_TIMEOUT_MS))
+        /*心跳为 0：任务还没跑过主循环(初始化阶段)。分两种情况：
+         *  a) 开机不到 30s(首跳宽限期) —— 真在慢慢初始化，不判死；
+         *  b) 开机超过 30s 仍是 0 —— 它卡死/死在初始化里了，判死。
+         * 旧逻辑对"从未上报"一律豁免，盲区在于：任务若挂在 init 里
+         *  (如 2026-11-02 的 24C02 自死锁事故)，心跳恒为 0，看门狗
+         *  永远看不见它 —— 挂了 60 多秒系统照样喂狗，毫无反应。
+         *  加宽限期后：这种任务会在 30s 后触发 task stuck 打印 + 停止
+         *  喂狗 → 1s 后复位，每次复位前都能打印出"哪个 task 恒为 0"。 */
+        if (s_lastBeat[i] == 0U)
         {
-            return 0U;                          /* 任务 i 卡死 */
+            if (now > pdMS_TO_TICKS(WDT_FIRSTBEAT_GRACE_MS))
+            {
+                return 0U;                  /* 上电 30s 还没跳过一次：卡在初始化里 */
+            }
+        }
+        else if ((now - s_lastBeat[i]) > pdMS_TO_TICKS(WDT_HEARTBEAT_TIMEOUT_MS))
+        {
+            return 0U;                      /* 任务 i 卡死 */
         }
     }
     return 1U;

@@ -61,6 +61,9 @@ void Watchdog_Heartbeat(WDT_TaskId_t taskId);
   * 功    能：检查所有任务的心跳是否都在 3s 内更新过（MONITOR 自己除外，它卡死由 IWDG 兜底）
   * 参    数：无
   * 返 回 值：1=全部存活，0=有任务卡死(调用方不得喂狗)
+  * 补    充：两类判死——①心跳超 3s 没更新(卡在主循环里)；②上电超 30s 心跳
+  *            仍为 0(卡在初始化里，见 bsp_IWDG.c 的首跳宽限说明)。
+  *            STORAGE 槽位无常驻上报者，跳过。
   */
 uint8_t Watchdog_CheckAllAlive(void);
 
