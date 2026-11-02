@@ -7,6 +7,7 @@
 #include "task.h"
 #include "bsp_BH1750.h"
 #include "bsp_DHT11.h"
+#include "bsp_24C02.h"
 #include "bsp_IWDG.h"
 #include "SensorData.h"
 #include "usart.h"
@@ -42,6 +43,11 @@ void StartSensorTask(void *argument)
     UART_Printf("[SENSOR] BH1750 init ok\r\n");
   else
     UART_Printf("[SENSOR] BH1750 init FAILED\r\n");
+
+  /*板载 24C02：与 BH1750 同一条 I2C1，自检结果直接打在启动日志里。
+   * 失败不挂启动——它只是"参数存储"，主业务(温湿度/光照)不依赖它 */
+  if (AT24C02_Init() != 0)
+    UART_Printf("[SENSOR] 24C02 not ready (I2C addr 0x50 no ACK)\r\n");
 
   DHT11_Init();
   UART_Printf("[SENSOR] DHT11 init ok\r\n");
