@@ -219,7 +219,7 @@ def wait_port_appear(port: str, timeout_s: float) -> bool:
 
 def main():
     ap = argparse.ArgumentParser(description='STM32F407 串口 IAP 升级')
-    ap.add_argument('bin', help='App 镜像 .bin 文件路径')
+    ap.add_argument('bin', nargs='?', help='App 镜像 .bin 文件路径（--erase-only 时可省略）')
     ap.add_argument('-p', '--port', default='COM3', help='串口号（默认 COM3）')
     ap.add_argument('--baud', type=int, default=115200)
     ap.add_argument('--wait-port', type=float, default=180,
@@ -227,29 +227,37 @@ def main():
     ap.add_argument('--wait-boot', type=float, default=150,
                     help='等板子复位/握手的秒数（默认 150）')
     ap.add_argument('--chunk', type=int, default=128, help='每帧数据字节数（默认 128）')
+    ap.add_argument('--erase-only', action='store_true',
+                    help='只擦除 App 区并清升级标志，不写数据（用于模拟出厂空片）')
     args = ap.parse_args()
 
     self_test()
 
-    try:
-        with open(args.bin, 'rb') as f:
-            img = f.read()
-    except OSError:
-        print(f'FAIL: 打不开镜像文件 {args.bin}')
+    img = b''
+    if args.bin:
+        try:
+            with open(args.bin, 'rb') as f:
+                img = f.read()
+        except OSError:
+            print(f'FAIL: 打不开镜像文件 {args.bin}')
+            return 1
+        if len(img) < 8 or len(img) > (APP_LIMIT - APP_BASE):
+            print(f'FAIL: 镜像大小 {len(img)} 字节不对（App 区最大 {APP_LIMIT - APP_BASE} 字节）')
+            return 1
+        msp = int.from_bytes(img[0:4], 'little')
+        reset = int.from_bytes(img[4:8], 'little')
+        if not (SRAM_BASE <= msp < SRAM_LIMIT) or (msp & 7) != 0:
+            print(f'FAIL: 镜像向量表不像 App: MSP=0x{msp:08X}')
+            return 1
+        if not (APP_BASE <= reset < APP_LIMIT) or (reset & 1) != 1:
+            print(f'FAIL: 镜像向量表不像 App: reset=0x{reset:08X}')
+            return 1
+        print(f'镜像 {len(img)} 字节, MSP=0x{msp:08X} reset=0x{reset:08X}')
+    elif not args.erase_only:
+        print('FAIL: 没给镜像文件（或者用 --erase-only 只擦除）')
         return 1
-    if len(img) < 8 or len(img) > (APP_LIMIT - APP_BASE):
-        print(f'FAIL: 镜像大小 {len(img)} 字节不对（App 区最大 {APP_LIMIT - APP_BASE} 字节）')
-        return 1
-    msp = int.from_bytes(img[0:4], 'little')
-    reset = int.from_bytes(img[4:8], 'little')
-    if not (SRAM_BASE <= msp < SRAM_LIMIT) or (msp & 7) != 0:
-        print(f'FAIL: 镜像向量表不像 App: MSP=0x{msp:08X}')
-        return 1
-    if not (APP_BASE <= reset < APP_LIMIT) or (reset & 1) != 1:
-        print(f'FAIL: 镜像向量表不像 App: reset=0x{reset:08X}')
-        return 1
-
-    print(f'镜像 {len(img)} 字节, MSP=0x{msp:08X} reset=0x{reset:08X}')
+    else:
+        print('擦除模式：不写数据，只清空 App 区')
     print(f'等待 {args.port} 出现（最长 {args.wait_port:.0f} 秒，可插拔 USB 或复位板子）...')
     if not wait_port_appear(args.port, args.wait_port):
         print(f'FAIL: {args.port} 一直没出现')
@@ -301,6 +309,17 @@ def main():
         return 1
     print(f'擦除成功，耗时 {(time.monotonic() - t0) * 1000:.0f} ms '
           f'(0x{APP_BASE:08X}~0x{APP_LIMIT:08X})')
+
+    # ── 只擦除模式：发结束命令清掉 24C02 的升级标志，设备自检 App 后会停在升级模式 ──
+    # 不发结束命令的话标志还在，断电重上电会直接回升级模式，看不到闪灯
+    if args.erase_only:
+        link.send(CMD_END)
+        st = link.wait_ack(CMD_END, 5000)
+        print(f'结束命令状态={st}（同时清掉了升级标志）')
+        if link.wait_text('app invalid', 3000):
+            print('设备已确认 App 区无效，停在升级模式')
+        print('下一步：给板子断电重上电，应看到 window 3s → window closed 后绿灯闪烁')
+        return 0
 
     # ── 数据块：128B 一帧，停等。无应答只等不重发，再发握手做存活探测 ──
     off, frames = 0, 0
