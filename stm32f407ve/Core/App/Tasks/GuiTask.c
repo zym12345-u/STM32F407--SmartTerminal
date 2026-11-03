@@ -51,6 +51,7 @@
 #include "ClockData.h"
 #include "WifiNet.h"
 #include "bsp_font_gbk.h"   /*中文走外挂字库，内部 262KB 字库已关闭*/
+#include "bsp_24C02.h"      /*固件升级入口：写 BootLoader 认的升级标志*/
 #include "usart.h"
 #include "PowerMgr.h"
 #include <stdio.h>
@@ -419,6 +420,67 @@ static void GUI_CreateWifiEntry(lv_obj_t *scr)
   lv_obj_center(lbl);
 }
 
+/*固件升级入口：写 24C02 标志后软复位，交给 BootLoader*/
+#define OTA_FLAG_ADDR   0xF0U   /*与 BootLoader 的 EE_OTA_MEM 是同一页*/
+
+/**
+  * 功    能：点击「固件升级」：把升级标志写进 24C02 再软复位，让 BootLoader 接管
+  * 参    数：event  LVGL 事件（取按钮对象用来改文字）
+  * 返 回 值：无（成功时不返回，直接复位）
+  * 补    充：写的是 0xF0 页 8 字节：'U''P''G''2' + 已写字节数 0。
+  *            magic 与 BootLoader 的 EE_OTA_MAGIC(0x32475055) 是同一个值（小端序），
+  *            BootLoader 上电读到它就跳过 3 秒窗口、直接进升级模式等 PC 发数据。
+  *            为什么用 24C02 而不是内部 Flash：见 BootLoader/main.c 顶部注释——
+  *            字节级直写、不用擦除、断电不丢，正好存这种「随时要改」的标志。
+  *            写失败就不复位：否则复位后标志不在，BootLoader 会照常把旧 App 跑起来，
+  *            用户会以为"点了没用"。
+  */
+static void FwUpdateEventCb(lv_event_t *event)
+{
+  lv_obj_t *btn = lv_event_get_target(event);
+  uint8_t flag[8] = { 'U', 'P', 'G', '2', 0U, 0U, 0U, 0U };
+
+  if (AT24C02_WriteBytes(OTA_FLAG_ADDR, flag, sizeof(flag)) != 0U)
+  {
+    /* EEPROM 不在位或写失败：原地提示，不改布局也不复位 */
+    lv_label_set_text(lv_obj_get_child(btn, 0), "EEPROM error, retry");
+    return;
+  }
+
+  /* 让用户看到反馈再复位：lv_refr_now 直接刷一帧，不等下一轮 5ms 的 handler */
+  lv_obj_t *lbl = lv_label_create(lv_scr_act());
+  lv_label_set_text(lbl, "Rebooting to upgrade...");
+  lv_obj_set_style_text_color(lbl, COLOR_ACCENT_GREEN, 0);
+  lv_obj_center(lbl);
+  lv_refr_now(NULL);
+  osDelay(300);
+
+  NVIC_SystemReset();
+  for (;;)
+  {
+  }
+}
+
+/**
+  * 功    能：主屏底部放「固件升级」入口按钮
+  * 参    数：scr 主屏对象
+  * 返 回 值：无
+  */
+static void GUI_CreateFwEntry(lv_obj_t *scr)
+{
+  lv_obj_t *btn = lv_btn_create(scr);
+  lv_obj_remove_style_all(btn);
+  lv_obj_add_style(btn, &s_styleBtnWifi, 0);
+  lv_obj_set_style_bg_opa(btn, LV_OPA_60, LV_STATE_PRESSED);
+  lv_obj_set_size(btn, 304, 28);   /*屏宽 320，左右各留 8px；底部空区 206~234*/
+  lv_obj_set_pos(btn, 8, 206);
+  lv_obj_add_event_cb(btn, FwUpdateEventCb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t *lbl = lv_label_create(btn);
+  lv_label_set_text(lbl, LV_SYMBOL_DOWNLOAD "  Firmware Update");
+  lv_obj_center(lbl);
+}
+
 /*主屏*/
 /**
   * 功    能：把主屏整个搭起来：状态栏 + 传感器卡片 + 灯控卡片 + 功能按钮
@@ -456,6 +518,7 @@ static void GUI_CreateMainScreen(void)
 
   GUI_CreateButtons(scr);
   GUI_CreateWifiEntry(scr);
+  GUI_CreateFwEntry(scr);
 }
 
 /*传感器刷新*/

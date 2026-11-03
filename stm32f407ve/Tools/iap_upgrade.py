@@ -43,7 +43,8 @@ except ImportError:
 # ── 协议常量：与 BootLoader/main.c 里的 #define 一一对应 ──
 SYNC0, SYNC1 = 0xA5, 0x5A
 CMD_HANDSHAKE, CMD_DATA, CMD_END, CMD_ERASE = 0x01, 0x02, 0x03, 0x04
-ST_OK, ST_RANGE, ST_FLASH = 0, 1, 2
+CMD_PROGRESS = 0x05        # 查询已写字节数（断电续传）
+ST_OK, ST_RANGE, ST_FLASH, ST_CRC = 0, 1, 2, 3
 
 APP_BASE = 0x08010000      # App 区起点（sector 4）
 APP_LIMIT = 0x08080000     # App 区上界（不含）
@@ -150,6 +151,32 @@ class IapSerial:
                     return i
         return -1
 
+    def query_progress(self, timeout_ms: int = 2500, poll_ms: int = 5) -> int:
+        """发进度查询，解析带 4 字节数据的应答帧；返回已写字节数，失败返回 -1。
+
+        应答帧长度字段是 4（不是状态字节的 1），所以不能复用 find_ack。
+        帧长 = 2(帧头) + 1(命令) + 1(长度) + 4(数据) + 4(CRC) = 12 字节。
+        """
+        want = CMD_PROGRESS | 0x80
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            try:
+                self.pump()
+            except LinkLost:
+                return -1
+            n = len(self.acc)
+            for i in range(0, n - 11):
+                if self.acc[i] == SYNC0 and self.acc[i + 1] == SYNC1 \
+                        and self.acc[i + 2] == want and self.acc[i + 3] == 4:
+                    body = bytes(self.acc[i + 2:i + 8])      # 命令+长度+4B 数据
+                    recv = int.from_bytes(self.acc[i + 8:i + 12], 'little')
+                    if crc32(body) == recv:
+                        val = int.from_bytes(self.acc[i + 4:i + 8], 'little')
+                        del self.acc[:i + 12]
+                        return val
+            time.sleep(poll_ms / 1000)
+        return -1
+
     def wait_ack(self, cmd: int, timeout_ms: int, poll_ms: int = 5) -> int:
         """停等核心：拿到应答返回状态字节；超时返回 -1；串口掉线返回 -2。
         轮询间隔默认 5ms：Windows 下 in_waiting 每次都走 ClearCommError 系统调用，
@@ -252,7 +279,13 @@ def main():
         if not (APP_BASE <= reset < APP_LIMIT) or (reset & 1) != 1:
             print(f'FAIL: 镜像向量表不像 App: reset=0x{reset:08X}')
             return 1
-        print(f'镜像 {len(img)} 字节, MSP=0x{msp:08X} reset=0x{reset:08X}')
+        # 补齐到 4 字节：设备按字写 Flash，续传偏移 written 必须是 4 的倍数，
+        # 否则断电时缓冲里那 1~3 个半字没法复原。CRC 也按补齐后的长度算。
+        pad = (-len(img)) & 3
+        if pad:
+            img += b'\x00' * pad
+        print(f'镜像 {len(img)} 字节' + (f'（含 {pad} 字节对齐填充）' if pad else '')
+              + f', MSP=0x{msp:08X} reset=0x{reset:08X}')
     elif not args.erase_only:
         print('FAIL: 没给镜像文件（或者用 --erase-only 只擦除）')
         return 1
@@ -273,42 +306,53 @@ def main():
         return 1
     print('握手成功，已进升级模式')
 
-    # ── 擦除 App 区（sector 4~7）。擦除最久要十几秒，给 45 秒 ──
-    # 这一步可以放心重连重发：擦除是幂等的，多发一遍只是再擦一次，不会写坏任何东西
-    erase = APP_BASE.to_bytes(4, 'little') + APP_LIMIT.to_bytes(4, 'little')
-    st = None
-    for attempt in range(1, 4):
-        try:
-            if st == -2:
-                print(f'串口掉线，第 {attempt} 次重连（等设备重新枚举，最长 30 秒）...')
-                if not link.reopen(30):
-                    print('FAIL: 串口没能重新打开')
-                    return 1
-                if not handshake(link, 15):
-                    print('FAIL: 重连后握手不成功（板子可能已复位且不在升级模式）')
-                    return 1
-                print('重连成功，重新发擦除')
-            t0 = time.monotonic()
-            link.send(CMD_ERASE, erase)
-            st = link.wait_ack(CMD_ERASE, 45000, poll_ms=10)
-        except LinkLost:
-            st = -2
-        if st != -2:
-            break
-    if st == -2:
-        print('FAIL: 擦除阶段串口反复掉线，重连 3 次都失败')
-        return 1
-    if st == -1:
-        print('FAIL: 擦除无应答（45 秒）')
-        return 1
-    if st == ST_RANGE:
-        print('FAIL: 擦除被拒：地址越界或没按扇区对齐')
-        return 1
-    if st == ST_FLASH:
-        print('FAIL: 擦除失败：Flash 报了错误标志')
-        return 1
-    print(f'擦除成功，耗时 {(time.monotonic() - t0) * 1000:.0f} ms '
-          f'(0x{APP_BASE:08X}~0x{APP_LIMIT:08X})')
+    # ── 先问设备写到哪了：断电续传靠这个决定要不要擦除 ──
+    img_len = len(img) if args.bin else 0
+    link.send(CMD_PROGRESS)
+    resume = link.query_progress()
+    if resume < 0:
+        resume = 0
+    if 0 < resume < img_len:
+        print(f'检测到断点：设备已写 {resume}/{img_len} 字节，跳过擦除直接续传')
+    else:
+        resume = 0
+
+        # ── 擦除 App 区（sector 4~7）。擦除最久要十几秒，给 45 秒 ──
+        # 这一步可以放心重连重发：擦除是幂等的，多发一遍只是再擦一次，不会写坏任何东西
+        erase = APP_BASE.to_bytes(4, 'little') + APP_LIMIT.to_bytes(4, 'little')
+        st = None
+        for attempt in range(1, 4):
+            try:
+                if st == -2:
+                    print(f'串口掉线，第 {attempt} 次重连（等设备重新枚举，最长 30 秒）...')
+                    if not link.reopen(30):
+                        print('FAIL: 串口没能重新打开')
+                        return 1
+                    if not handshake(link, 15):
+                        print('FAIL: 重连后握手不成功（板子可能已复位且不在升级模式）')
+                        return 1
+                    print('重连成功，重新发擦除')
+                t0 = time.monotonic()
+                link.send(CMD_ERASE, erase)
+                st = link.wait_ack(CMD_ERASE, 45000, poll_ms=10)
+            except LinkLost:
+                st = -2
+            if st != -2:
+                break
+        if st == -2:
+            print('FAIL: 擦除阶段串口反复掉线，重连 3 次都失败')
+            return 1
+        if st == -1:
+            print('FAIL: 擦除无应答（45 秒）')
+            return 1
+        if st == ST_RANGE:
+            print('FAIL: 擦除被拒：地址越界或没按扇区对齐')
+            return 1
+        if st == ST_FLASH:
+            print('FAIL: 擦除失败：Flash 报了错误标志')
+            return 1
+        print(f'擦除成功，耗时 {(time.monotonic() - t0) * 1000:.0f} ms '
+              f'(0x{APP_BASE:08X}~0x{APP_LIMIT:08X})')
 
     # ── 只擦除模式：发结束命令清掉 24C02 的升级标志，设备自检 App 后会停在升级模式 ──
     # 不发结束命令的话标志还在，断电重上电会直接回升级模式，看不到闪灯
@@ -322,7 +366,7 @@ def main():
         return 0
 
     # ── 数据块：128B 一帧，停等。无应答只等不重发，再发握手做存活探测 ──
-    off, frames = 0, 0
+    off, frames = resume, 0
     t0 = time.monotonic()
     while off < len(img):
         part = img[off:off + args.chunk]
@@ -361,11 +405,19 @@ def main():
     spent = time.monotonic() - t0
     print(f'全部数据发完: {off} 字节 {frames} 帧, 耗时 {spent:.1f} s ({off / spent:.0f} 字节/秒)')
 
-    # ── 结束：设备校验写入规模后就跳 App ──
-    link.send(CMD_END)
-    st = link.wait_ack(CMD_END, 5000)
+    # ── 结束：把整包 CRC 一起送过去，设备自己算一遍比对 ──
+    # zlib.crc32 与上面的 crc32() 是同一个算法（反射、初值 0xFFFFFFFF、末尾取反），
+    # 但由 C 实现，300KB 算得飞快；逐位版留给几十字节的帧用。
+    import zlib
+    img_crc = zlib.crc32(img) & 0xFFFFFFFF
+    print(f'整包 CRC32: 0x{img_crc:08X}')
+    link.send(CMD_END, img_crc.to_bytes(4, 'little'))
+    st = link.wait_ack(CMD_END, 6000)   # 设备要算 CRC + 擦写 sector3，留足时间
     if st != ST_OK:
-        print(f'FAIL: 结束命令失败, 状态={st}')
+        if st == ST_CRC:
+            print('FAIL: 整包 CRC 不匹配——设备里写的内容和镜像不一致，请重跑升级')
+        else:
+            print(f'FAIL: 结束命令失败, 状态={st}')
         return 1
     print('结束命令已应答')
 
