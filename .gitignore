@@ -12,6 +12,8 @@ build_log.txt
 JLinkLog.txt
 
 # ===== 编译中间文件 =====
+__pycache__/
+*.pyc
 *.o
 *.d
 *.crf
