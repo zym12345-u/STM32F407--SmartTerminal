@@ -122,6 +122,7 @@
 #define CMD_DATA          0x02U      /*数据块，设备按顺序往后追加写入*/
 #define CMD_END           0x03U      /*结束，长度 0*/
 #define CMD_ERASE         0x04U      /*擦除，数据 8 字节：起始地址 + 结束地址(不含)*/
+#define CMD_PROGRESS      0x05U      /*查询已写字节数，长度 0；应答带 4 字节数据（断电续传用）*/
 #define CMD_ACK_FLAG      0x80U      /*应答帧的命令号 = 原命令号 | 0x80*/
 #define FRAME_DATA_MAX    128U       /*一帧最多 128 字节数据，正好 32 个字*/
 
@@ -129,6 +130,11 @@
 #define ST_OK             0x00U      /*成功*/
 #define ST_RANGE          0x01U      /*地址越界 / 长度不对 / 没按扇区对齐*/
 #define ST_FLASH          0x02U      /*擦除或编程失败（写前发现没擦干净也算）*/
+#define ST_CRC            0x03U      /*整包 CRC 校验不通过：写入内容与 PC 送的不一致*/
+
+/* 元数据区（sector 3，16KB）布局：只写前 16 字节，其余留空白给将来扩展 */
+#define META_MAGIC        0x4154454DUL  /*'M''E''T''A'：元数据有效的标记*/
+#define META_VERSION      1UL           /*元数据格式版本；改布局时加 1，BootLoader 据此判断*/
 
 /* 内部 Flash 解锁序列，少写一个字节解不了锁，顺序也不能反 */
 #define FLASH_KEY1        0x45670123UL
@@ -184,6 +190,8 @@ static uint8_t  flash_sector_of(uint32_t addr);
 static uint8_t  upgrade_erase(const uint8_t *data, uint8_t len);
 static uint8_t  upgrade_write(const uint8_t *data, uint8_t len);
 static uint8_t  upgrade_finish(void);
+static uint32_t app_crc32(uint32_t len);
+static int      meta_write(uint32_t size, uint32_t crc);
 static void systick_start_1ms(void);
 static void systick_stop(void);
 static void led_init(void);
@@ -205,6 +213,7 @@ static int  ee_read8(uint8_t mem, uint8_t *buf);
 static void ota_mark(uint32_t written);
 static void ota_clear(void);
 static int  ota_is_marked(void);
+static uint32_t ota_read_written(void);
 static void rst_cause_dump(void);
 
 int main(void)
@@ -219,9 +228,28 @@ int main(void)
 
   if (ota_is_marked() != 0)
   {
-    /*上次升级中途断电：App 区不可信，跳过窗口直接进升级模式等 PC 重传*/
+    /*上次升级中途断电、或 App 里的「固件升级」按钮主动请求：跳过窗口直接进升级模式*/
     uart1_send_str("[BOOT] ota flag found, resume upgrade\r\n");
-    upgrade_loop();
+
+    if (app_is_valid())
+    {
+      /* App 区是完整的 —— 说明标志是 App 自己写的，不是断电丢的。
+       * 这里必须限时：误点一下按钮却没人发数据，标志就一直留着，
+       * 每次上电都进升级模式，按 RST 也出不来，板子等于变砖。
+       * 60 秒够 PC 端打开串口并握手；超时就清标志、把旧 App 跑起来。*/
+      uart1_send_str("[BOOT] app valid, wait 60s for PC\r\n");
+      if (uart1_wait_handshake(60000UL) != 0)
+      {
+        upgrade_loop();
+      }
+      ota_clear();
+      uart1_send_str("[BOOT] no PC, flag cleared, back to app\r\n");
+    }
+    else
+    {
+      /* App 不完整（真断电升级中）：绝不能跳转，无限等 PC 重传*/
+      upgrade_loop();
+    }
   }
 
   if (uart1_wait_handshake(UART_WINDOW_MS))
@@ -1003,6 +1031,67 @@ static uint8_t upgrade_finish(void)
 }
 
 /**
+  * 功    能：对 App 区前 len 字节算 CRC32（算法与帧 CRC 完全一致，初值 0xFFFFFFFF，末尾取反）
+  * 参    数：len 字节数——就是 PC 本次实际送来的长度（g_written）
+  * 返 回 值：CRC32 值
+  * 补    充：只在升级结束时算这一次（约 300KB，逐位算法在 168MHz 下几百毫秒）。
+  *            不在每次上电都算：那会把正常启动也拖慢，而断电场景已经由 24C02
+  *            标志兜底，重复计算没有额外收益，只是白等。
+  */
+static uint32_t app_crc32(uint32_t len)
+{
+  uint32_t crc = 0xFFFFFFFFUL;
+  uint32_t addr;
+
+  for (addr = APP_BASE_ADDR; addr < (APP_BASE_ADDR + len); addr++)
+  {
+    crc = crc32_update(crc, *(volatile uint8_t *)addr);
+  }
+  return crc ^ 0xFFFFFFFFUL;
+}
+
+/**
+  * 功    能：把本次升级结果写进元数据区（sector 3）
+  * 参    数：size 镜像字节数；crc 整包 CRC32（已核对通过的值）
+  * 返 回 值：1 成功；0 擦除或编程失败
+  * 补    充：写 16 字节：magic('META') + size + crc + version。
+  *            只有升级完整走完才会调用它，所以「元数据存在」就等于
+  *            「上一次升级是完整结束的」，这就是它最核心的价值。
+  *            sector 3 整扇区擦除约 1 秒，只在成功时发生一次，不影响升级速度。
+  *            【这块区域升级命令永远碰不到】：upgrade_erase 只许 s4~s7。
+  */
+static int meta_write(uint32_t size, uint32_t crc)
+{
+  uint32_t buf[4];
+  uint8_t  snb;
+  uint8_t  i;
+
+  buf[0] = META_MAGIC;
+  buf[1] = size;
+  buf[2] = crc;
+  buf[3] = META_VERSION;
+
+  snb = flash_sector_of(META_BASE_ADDR);
+
+  flash_unlock();
+  if (!flash_erase_sector(snb))
+  {
+    flash_lock();
+    return 0;
+  }
+  for (i = 0U; i < 4U; i++)
+  {
+    if (!flash_program_word(META_BASE_ADDR + (4UL * (uint32_t)i), buf[i]))
+    {
+      flash_lock();
+      return 0;
+    }
+  }
+  flash_lock();
+  return 1;
+}
+
+/**
   * 功    能：升级模式主循环：一直收命令，按命令号分发
   * 参    数：无
   * 返 回 值：无（结束命令校验通过就跳 App；没通过就继续留在这儿等重传）
@@ -1020,6 +1109,20 @@ static void upgrade_loop(void)
   g_write_addr = APP_BASE_ADDR;
   g_word_n     = 0U;
   g_written    = 0UL;
+
+  /*断电续传：标志还在就按 24C02 里记的进度把游标接上。
+   * 只有 PC 真的从断点开始发数据才用得到；PC 若改发擦除命令，这两个值会被清 0。
+   * 要求 written 是 4 的倍数：Flash 只能按字写，不对齐的那几个字节没法复原，
+   * 这种情况宁可让 PC 重擦重发（PC 端镜像已经补齐到 4 字节，正常不会触发）。*/
+  if (ota_is_marked() != 0)
+  {
+    uint32_t w = ota_read_written();
+    if ((w > 0UL) && (w < (APP_LIMIT_ADDR - APP_BASE_ADDR)) && ((w & 3UL) == 0UL))
+    {
+      g_written    = w;
+      g_write_addr = APP_BASE_ADDR + w;
+    }
+  }
 
   led_init();
   led_on();   /*绿灯常亮 = 停在 BootLoader，没跳 App*/
@@ -1064,8 +1167,72 @@ static void upgrade_loop(void)
       frame_reply(CMD_ERASE, st);
       break;
 
+    case CMD_PROGRESS:
+    {
+      uint8_t buf[4];
+
+      if (p.len != 0U)
+      {
+        frame_reply(CMD_PROGRESS, ST_RANGE);
+        break;
+      }
+      buf[0] = (uint8_t)(g_written & 0xFFUL);
+      buf[1] = (uint8_t)((g_written >> 8U) & 0xFFUL);
+      buf[2] = (uint8_t)((g_written >> 16U) & 0xFFUL);
+      buf[3] = (uint8_t)((g_written >> 24U) & 0xFFUL);
+      /*这条应答的「数据」是进度值而不是状态字节，所以不能走 frame_reply*/
+      frame_send(CMD_PROGRESS | CMD_ACK_FLAG, buf, 4U);
+      break;
+    }
+
     case CMD_END:
+    {
+      uint32_t want_crc = 0UL;
+      uint32_t want_len = g_written;   /*补字会挪游标，但 g_written 始终是 PC 送来的长度*/
+      int      check    = 0;
+
+      /* 结束命令带 4 字节 = PC 对整包算的 CRC，要核对；带 0 字节 = 老脚本，跳过校验 */
+      if (p.len == 4U)
+      {
+        want_crc = (uint32_t)p.data[0] | ((uint32_t)p.data[1] << 8U) |
+                   ((uint32_t)p.data[2] << 16U) | ((uint32_t)p.data[3] << 24U);
+        check = 1;
+      }
+      else if (p.len != 0U)
+      {
+        frame_reply(CMD_END, ST_RANGE);
+        break;
+      }
+
       st = upgrade_finish();
+
+      if ((st == ST_OK) && (check != 0))
+      {
+        uart1_send_str("[BOOT] crc check ");
+        if (app_crc32(want_len) != want_crc)
+        {
+          uart1_send_str("mismatch, image corrupted\r\n");
+          st = ST_CRC;   /*整包不可信：不清标志、不写元数据，让 PC 重传*/
+        }
+        else
+        {
+          uart1_send_str("ok\r\n");
+        }
+      }
+
+      if ((st == ST_OK) && (check != 0))
+      {
+        if (meta_write(want_len, want_crc) == 0)
+        {
+          uart1_send_str("[BOOT] meta write failed\r\n");
+          st = ST_FLASH;
+        }
+        else
+        {
+          uart1_send_str("[BOOT] meta saved\r\n");
+        }
+      }
+
       frame_reply(CMD_END, st);
       if (st == ST_OK)
       {
@@ -1084,6 +1251,7 @@ static void upgrade_loop(void)
         uart1_send_str("[BOOT] app invalid, stay in upgrade mode\r\n");
       }
       break;
+    }
 
     default:
       frame_reply(p.cmd, ST_RANGE);   /*不认识的命令也回一句，PC 不会一直干等*/
@@ -1494,6 +1662,38 @@ static int ota_is_marked(void)
   magic = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8U) |
           ((uint32_t)buf[2] << 16U) | ((uint32_t)buf[3] << 24U);
   return (magic == EE_OTA_MAGIC) ? 1 : 0;
+}
+
+/**
+  * 功    能：从 24C02 读回「已写字节数」，断电续传用
+  * 参    数：无
+  * 返 回 值：已写字节数；标志不存在或 EEPROM 不在位时返回 0
+  * 补    充：magic 不核对就不能信后面 4 字节——自检页残留或总线噪声都可能
+  *            拼出一个像模像样的数字，拿它当偏移会把数据写到错误位置。
+  *            代价只是多读一次同一个 8 字节页。
+  */
+static uint32_t ota_read_written(void)
+{
+  uint8_t  buf[8];
+  uint32_t magic;
+
+  if (g_ee_ok == 0U)
+  {
+    return 0UL;
+  }
+  if (ee_read8(EE_OTA_MEM, buf) != 0)
+  {
+    g_ee_ok = 0U;
+    return 0UL;
+  }
+  magic = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8U) |
+          ((uint32_t)buf[2] << 16U) | ((uint32_t)buf[3] << 24U);
+  if (magic != EE_OTA_MAGIC)
+  {
+    return 0UL;
+  }
+  return (uint32_t)buf[4] | ((uint32_t)buf[5] << 8U) |
+         ((uint32_t)buf[6] << 16U) | ((uint32_t)buf[7] << 24U);
 }
 
 /* SysTick 当毫秒计时器用：只计数不产生中断，省掉写中断服务函数和管 NVIC 的麻烦 */
