@@ -22,13 +22,13 @@
 
 /* ---- 地址与容量 ---- */
 #define LFS_FLASH_BASE   0x00000000UL
-/* 2559 块: 0x00000000 ~ 0x009FEFFF, 末块 0x009FF000 起留给 boot 自测扇区,
- * 不越过 0x00A00000 的 GBK 字库区(驱动层写保护) */
-#define LFS_BLOCK_COUNT  ((lfs_size_t)((W25Q128_GBK_BASE - W25Q128_SECTOR_SIZE) / W25Q128_SECTOR_SIZE))
+/* 2048 块(8MB): 0x00000000 ~ 0x007FFFFF, 给尾部两个 448KB 固件槽让出空间;
+ * 0x00800000 起是槽 A/B, 0x009FF000 仍留给 boot 自测扇区, 不越过 0x00A00000 的 GBK 字库区 */
+#define LFS_BLOCK_COUNT  ((lfs_size_t)(W25Q128_FW_SLOT_A_ADDR / W25Q128_SECTOR_SIZE))
 
 /* ---- 缓冲区(全部静态, 共 512*3 + 512 = 2KB .bss) ---- */
 #define LFS_CACHE_SIZE       512U
-#define LFS_LOOKAHEAD_SIZE   512U   /* 1 bit/块, 512B 可覆盖 4096 块 > 2559 */
+#define LFS_LOOKAHEAD_SIZE   512U   /* 1 bit/块, 512B 可覆盖 4096 块 > 2048 */
 
 static uint8_t s_readBuf[LFS_CACHE_SIZE];
 static uint8_t s_progBuf[LFS_CACHE_SIZE];
@@ -240,6 +240,20 @@ uint8_t LFS_Port_Mount(void)
 
     /* 2. 挂载 */
     err = lfs_mount(&s_lfs, &s_cfg);
+    if (err == LFS_ERR_INVAL)
+    {
+        /* 分区缩容: superblock 里还是旧的 2559 块, 与现在的 2048 块不符。
+         * 只对这一种"容量配置变化"重建一次; IO 错误不走这里,
+         * 避免瞬时读失败把还在用的数据抹掉。重建后 WiFi 凭据需要重新输入。*/
+        UART_Printf("[LFS] block count changed (%lu -> %lu), reformat repartition\r\n",
+                    (unsigned long)((W25Q128_GBK_BASE - W25Q128_SECTOR_SIZE) / W25Q128_SECTOR_SIZE),
+                    (unsigned long)LFS_BLOCK_COUNT);
+        err = lfs_format(&s_lfs, &s_cfg);
+        if (err == LFS_ERR_OK)
+        {
+            err = lfs_mount(&s_lfs, &s_cfg);
+        }
+    }
     if (err != LFS_ERR_OK)
     {
         UART_Printf("[LFS] mount FAIL err=%d (not formatted or corrupted)\r\n", err);

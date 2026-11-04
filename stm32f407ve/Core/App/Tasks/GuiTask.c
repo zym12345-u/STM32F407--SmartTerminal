@@ -52,6 +52,7 @@
 #include "WifiNet.h"
 #include "bsp_font_gbk.h"   /*中文走外挂字库，内部 262KB 字库已关闭*/
 #include "bsp_24C02.h"      /*固件升级入口：写 BootLoader 认的升级标志*/
+#include "bsp_W25Q128.h"    /*固件备份：把内部 App 区整段写进外部 Flash 槽 A*/
 #include "CanData.h"        /*固件版本号的编译期常量，元数据不可信时退回它*/
 #include "usart.h"
 #include "PowerMgr.h"
@@ -574,41 +575,268 @@ static void GUI_CreateWifiEntry(lv_obj_t *scr)
   lv_obj_center(lbl);
 }
 
-/*固件升级入口：写 24C02 标志后软复位，交给 BootLoader*/
+/* ══════ 固件备份：内部 App 区整段 → W25Q 槽 A ══════
+ *
+ * ── 为什么按整区 448KB 备份，而不是只备份"实际镜像大小" ──
+ *   回滚时 BootLoader 的做法是「整段擦掉 App 区、整段写回」，
+ *   备份也按同样粒度存，两边的长度、偏移、CRC 口径就永远一致，
+ *   不用再在槽里维护一份"这份镜像到底多少字节"的额外信息。
+ *   多抄的尾部 0xFF 不影响回滚结果，代价只是多花一秒左右。
+ *
+ * ── 记录为什么最后写，而且记录 CRC 最后写 ──
+ *   判断"槽里有可用备份"只看首 4KB 的 magic + 记录 CRC。
+ *   如果先写记录再写镜像，中途断电会留下一条"记录说完整、镜像却只写了一半"的假备份，
+ *   BootLoader 拿它回滚就把 App 写坏。所以顺序是：擦记录扇区 → 写镜像 → 回读校验 → 才写记录。
+ *   记录内部同理：前 5 个字的 CRC 放在第 6 个字，最后落盘，写完这条记录才算数。
+ */
+#define BK_APP_BASE     0x08010000UL   /*App 区起点，与 BootLoader 的 APP_BASE_ADDR 同值*/
+#define BK_APP_SIZE     0x00070000UL   /*448KB，整区备份*/
+#define BK_SECTOR       0x1000UL       /*W25Q128 4KB 扇区*/
+#define BK_CHUNK        256U           /*W25Q128 页大小*/
+#define BK_SECTORS      (BK_APP_SIZE / BK_SECTOR)
+#define BK_PAGES        (BK_SECTOR / BK_CHUNK)
+
+/**
+  * 功    能：逐字节更新 CRC32（多项式 0xEDB88320，初值/终值 0xFFFFFFFF）
+  * 参    数：crc 当前值；buf 数据；n 字节数
+  * 返 回 值：更新后的 CRC32
+  * 补    充：与 BootLoader 的 crc32_update、iap_upgrade.py 的 crc32 同一算法
+  */
+static uint32_t BK_Crc32Bytes(uint32_t crc, const uint8_t *buf, uint32_t n)
+{
+  uint32_t i;
+  uint8_t  bit;
+
+  for (i = 0UL; i < n; i++)
+  {
+    crc ^= (uint32_t)buf[i];
+    for (bit = 0U; bit < 8U; bit++)
+    {
+      if ((crc & 1UL) != 0UL)
+      {
+        crc = (crc >> 1U) ^ 0xEDB88320UL;
+      }
+      else
+      {
+        crc >>= 1U;
+      }
+    }
+  }
+  return crc;
+}
+
+/**
+  * 功    能：检查 App 区开头是否像一个能跑的程序
+  * 参    数：无
+  * 返 回 值：1 = 向量表合理；0 = 空白/写了一半
+  * 补    充：判据与 BootLoader 跳转前一致：栈顶在 SRAM 且 8 字节对齐，
+  *            复位向量落在 App 区内且 bit0=1（Thumb）。备份前先拦一次，
+  *            免得把一份坏镜像当宝贝存进槽里。
+  */
+static uint8_t BK_AppVectorOk(void)
+{
+  uint32_t sp = *(volatile const uint32_t *)BK_APP_BASE;
+  uint32_t pc = *(volatile const uint32_t *)(BK_APP_BASE + 4UL);
+
+  if ((sp < 0x20000000UL) || (sp > 0x20020000UL) || ((sp & 7UL) != 0UL))
+  {
+    return 0U;
+  }
+  if ((pc < BK_APP_BASE) || (pc >= (BK_APP_BASE + BK_APP_SIZE)) || ((pc & 1UL) == 0UL))
+  {
+    return 0U;
+  }
+  return 1U;
+}
+
+/**
+  * 功    能：往槽首 4KB 写镜像记录（32B，前 6 字有效）
+  * 参    数：slot 槽基址；size 镜像字节数；crc 镜像 CRC32；ver 版本号(主<<8|次)
+  * 返 回 值：1 = 写入成功；0 = 失败
+  * 补    充：magic 先写、记录自身 CRC 最后写；调用前记录扇区必须已擦成全 0xFF
+  */
+static uint8_t BK_WriteHeader(uint32_t slot, uint32_t size, uint32_t crc, uint32_t ver)
+{
+  uint32_t hdr[8];
+  uint32_t i;
+
+  for (i = 0UL; i < 8UL; i++)
+  {
+    hdr[i] = 0xFFFFFFFFUL;
+  }
+  hdr[0] = W25Q128_FW_MAGIC;
+  hdr[1] = 1UL;                       /*记录格式 1：整区备份*/
+  hdr[2] = ver;
+  hdr[3] = size;
+  hdr[4] = crc;
+  hdr[5] = BK_Crc32Bytes(0xFFFFFFFFUL, (const uint8_t *)hdr, 20UL) ^ 0xFFFFFFFFUL;
+
+  if (W25Q128_WriteRange(slot, (const uint8_t *)hdr, 32UL) != HAL_OK)
+  {
+    UART_Printf("[BK] header write FAIL at 0x%08lX\r\n", (unsigned long)slot);
+    return 0U;
+  }
+  UART_Printf("[BK] header written: slot=0x%08lX ver=%lu.%lu size=0x%lX crc=0x%08lX\r\n",
+              (unsigned long)slot,
+              (unsigned long)((ver >> 8U) & 0xFFUL), (unsigned long)(ver & 0xFFUL),
+              (unsigned long)size, (unsigned long)crc);
+  return 1U;
+}
+
+/**
+  * 功    能：把内部 App 区 448KB 整段备份到 W25Q 指定槽，并回读校验
+  * 参    数：slot 槽基址（W25Q128_FW_SLOT_A_ADDR / B）；lbl 进度标签；ver 版本号(主<<8|次)
+  * 返 回 值：1 = 备份且校验通过；0 = 任一步失败
+  * 补    充：逐扇区擦、逐页写；每扇区补报 GUI 心跳（否则 8 秒的长操作会被 MonitorTask 判卡死）；
+  *            每 8 个扇区刷一次进度。整段回读 CRC 与写入时累计的内部 CRC 必须一致。
+  */
+static uint8_t GUI_BackupFwToSlot(uint32_t slot, lv_obj_t *lbl, uint32_t ver)
+{
+  static uint32_t buf[BK_CHUNK / 4U];   /*256B 页缓冲，放静态区不占任务栈*/
+  uint32_t sect;
+  uint32_t page;
+  uint32_t i;
+  uint32_t src;
+  uint32_t dst;
+  uint32_t imgBase = slot + W25Q128_FW_HDR_SIZE;
+  uint32_t crc = 0xFFFFFFFFUL;
+  uint32_t readCrc;
+  uint32_t t0;
+  char     txt[32];
+
+  if (BK_AppVectorOk() == 0U)
+  {
+    UART_Printf("[BK] app vector invalid, abort\r\n");
+    return 0U;
+  }
+  if (W25Q128_ReadJedecId() != W25Q128_JEDEC_ID_EXPECT)
+  {
+    UART_Printf("[BK] W25Q not ready, abort\r\n");
+    return 0U;
+  }
+
+  UART_Printf("[BK] start slot=0x%08lX size=0x%lX ver=%lu.%lu\r\n",
+              (unsigned long)slot, (unsigned long)BK_APP_SIZE,
+              (unsigned long)((ver >> 8U) & 0xFFUL), (unsigned long)(ver & 0xFFUL));
+  t0 = HAL_GetTick();
+
+  lv_label_set_text(lbl, "Backup 0%");
+  lv_refr_now(NULL);
+
+  /*记录扇区先擦空：镜像全部校验通过后才往里写记录*/
+  if (W25Q128_EraseRange(slot, W25Q128_FW_HDR_SIZE) != HAL_OK)
+  {
+    UART_Printf("[BK] erase header sector FAIL\r\n");
+    return 0U;
+  }
+
+  for (sect = 0UL; sect < BK_SECTORS; sect++)
+  {
+    src = BK_APP_BASE + (sect * BK_SECTOR);
+    dst = imgBase + (sect * BK_SECTOR);
+
+    if (W25Q128_SectorErase4K(dst) != HAL_OK)
+    {
+      UART_Printf("[BK] erase FAIL at 0x%08lX\r\n", (unsigned long)dst);
+      return 0U;
+    }
+
+    for (page = 0UL; page < BK_PAGES; page++)
+    {
+      uint32_t off = page * BK_CHUNK;
+      const volatile uint32_t *s32 = (const volatile uint32_t *)(src + off);
+
+      /*内部 Flash 是内存映射，按字搬比按字节快；同时顺手累计内部镜像的 CRC*/
+      for (i = 0UL; i < (BK_CHUNK / 4U); i++)
+      {
+        buf[i] = s32[i];
+      }
+      crc = BK_Crc32Bytes(crc, (const uint8_t *)buf, BK_CHUNK);
+
+      if (W25Q128_PageProgram(dst + off, (const uint8_t *)buf, BK_CHUNK) != HAL_OK)
+      {
+        UART_Printf("[BK] program FAIL at 0x%08lX\r\n", (unsigned long)(dst + off));
+        return 0U;
+      }
+    }
+
+    Watchdog_Heartbeat(WDT_TASK_GUI);
+    if (((sect + 1UL) % 8UL) == 0UL)
+    {
+      snprintf(txt, sizeof(txt), "Backup %lu%%",
+               (unsigned long)(((sect + 1UL) * 100UL) / BK_SECTORS));
+      lv_label_set_text(lbl, txt);
+      lv_refr_now(NULL);
+    }
+  }
+  crc ^= 0xFFFFFFFFUL;
+
+  /*回读整段再算一遍 CRC：擦/写/读三条链路任何一处出错都会在这里暴露*/
+  readCrc = W25Q128_Crc32Range(imgBase, BK_APP_SIZE);
+  UART_Printf("[BK] crc internal=0x%08lX readback=0x%08lX\r\n",
+              (unsigned long)crc, (unsigned long)readCrc);
+  if (crc != readCrc)
+  {
+    UART_Printf("[BK] FAIL: crc mismatch\r\n");
+    return 0U;
+  }
+
+  if (BK_WriteHeader(slot, BK_APP_SIZE, crc, ver) != 1U)
+  {
+    return 0U;
+  }
+
+  UART_Printf("[BK] PASS %lu ms\r\n", (unsigned long)(HAL_GetTick() - t0));
+  lv_label_set_text(lbl, "Backup 100%");
+  lv_refr_now(NULL);
+  return 1U;
+}
+
+/*固件升级入口：先备份到槽 A，再写 24C02 标志后软复位，交给 BootLoader*/
 #define OTA_FLAG_ADDR   0xF0U   /*与 BootLoader 的 EE_OTA_MEM 是同一页*/
 
 /**
-  * 功    能：点击「固件升级」：把升级标志写进 24C02 再软复位，让 BootLoader 接管
+  * 功    能：点击「固件升级」：先把当前 App 备份到 W25Q 槽 A，成功后再写标志并复位
   * 参    数：event  LVGL 事件（取按钮对象用来改文字）
   * 返 回 值：无（成功时不返回，直接复位）
-  * 补    充：写的是 0xF0 页 8 字节：'U''P''G''2' + 已写字节数 0。
-  *            magic 与 BootLoader 的 EE_OTA_MAGIC(0x32475055) 是同一个值（小端序），
-  *            BootLoader 上电读到它就跳过 3 秒窗口、直接进升级模式等 PC 发数据。
-  *            为什么用 24C02 而不是内部 Flash：见 BootLoader/main.c 顶部注释——
-  *            字节级直写、不用擦除、断电不丢，正好存这种「随时要改」的标志。
-  *            写失败就不复位：否则复位后标志不在，BootLoader 会照常把旧 App 跑起来，
-  *            用户会以为"点了没用"。
+  * 补    充：备份失败就停在原地、不写 24C02、不复位——否则进了升级模式又没有可回滚的镜像，
+  *            等于把最后一层保险也丢了。写的是 0xF0 页 8 字节：'U''P''G''2' + 已写字节数 0，
+  *            magic 与 BootLoader 的 EE_OTA_MAGIC(0x32475055) 是同一个值（小端序）。
   */
 static void FwUpdateEventCb(lv_event_t *event)
 {
   lv_obj_t *btn = lv_event_get_target(event);
+  lv_obj_t *lbl = lv_obj_get_child(btn, 0);
   uint8_t flag[8] = { 'U', 'P', 'G', '2', 0U, 0U, 0U, 0U };
+  uint8_t major;
+  uint8_t minor;
+  uint8_t fromMeta;
+  uint32_t ver;
 
-  if (AT24C02_WriteBytes(OTA_FLAG_ADDR, flag, sizeof(flag)) != 0U)
+  GUI_GetFwVersion(&major, &minor, &fromMeta);
+  (void)fromMeta;   /*备份记录里只关心版本号本身，来源不影响回滚*/
+  ver = (((uint32_t)major & 0xFFUL) << 8U) | ((uint32_t)minor & 0xFFUL);
+
+  if (GUI_BackupFwToSlot(W25Q128_FW_SLOT_A_ADDR, lbl, ver) == 0U)
   {
-    /* EEPROM 不在位或写失败：原地提示，不改布局也不复位 */
-    lv_label_set_text(lv_obj_get_child(btn, 0), "EEPROM error, retry");
+    lv_label_set_text(lbl, "Backup failed, retry");
+    lv_refr_now(NULL);
     return;
   }
 
   /* 让用户看到反馈再复位：lv_refr_now 直接刷一帧，不等下一轮 5ms 的 handler */
-  lv_obj_t *lbl = lv_label_create(lv_scr_act());
-  lv_label_set_text(lbl, "Rebooting to upgrade...");
-  lv_obj_set_style_text_color(lbl, COLOR_ACCENT_GREEN, 0);
-  lv_obj_center(lbl);
+  lv_label_set_text(lbl, "Backup OK, rebooting...");
   lv_refr_now(NULL);
-  osDelay(300);
 
+  if (AT24C02_WriteBytes(OTA_FLAG_ADDR, flag, sizeof(flag)) != 0U)
+  {
+    /* EEPROM 不在位或写失败：原地提示，不改布局也不复位；槽里的备份仍然有效 */
+    lv_label_set_text(lbl, "EEPROM error, retry");
+    lv_refr_now(NULL);
+    return;
+  }
+
+  osDelay(300);
   NVIC_SystemReset();
   for (;;)
   {
