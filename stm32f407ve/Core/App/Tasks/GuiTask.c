@@ -52,6 +52,7 @@
 #include "WifiNet.h"
 #include "bsp_font_gbk.h"   /*中文走外挂字库，内部 262KB 字库已关闭*/
 #include "bsp_24C02.h"      /*固件升级入口：写 BootLoader 认的升级标志*/
+#include "CanData.h"        /*固件版本号的编译期常量，元数据不可信时退回它*/
 #include "usart.h"
 #include "PowerMgr.h"
 #include <stdio.h>
@@ -84,6 +85,16 @@ static lv_obj_t *labelLight;
 /* 顶部状态栏 */
 static lv_obj_t *labelClock;
 static lv_obj_t *labelWifiIcon;
+static lv_obj_t *labelFwVer;
+
+/* 升级元数据（sector 3）：布局与 BootLoader/main.c 的 meta_write 一一对应
+ *   [0] magic  [1] 格式版本  [2] 固件版本(主<<8|次)  [3] 镜像字节数  [4] 整包 CRC32 */
+#define OTA_META_ADDR     0x0800C000UL
+#define OTA_META_MAGIC    0x4154454DUL  /*'M''E''T''A'*/
+#define OTA_META_FMT      2UL
+#define OTA_META_END      0x444E454DUL  /*'M''E''N''D'：镜像末尾标记*/
+#define OTA_APP_BASE      0x08010000UL
+#define OTA_APP_SIZE      0x00070000UL  /*448KB，与 BootLoader 的 APP_SIZE 同值*/
 
 /* WiFi 配网页控件 */
 static lv_obj_t *s_mainScr;
@@ -292,6 +303,48 @@ static lv_obj_t *GUI_CreateSensorCard(lv_obj_t *parent, int16_t x, int16_t y,
 
 /*状态栏*/
 /**
+  * 功    能：取当前固件版本：元数据可信就用它，否则退回 CanData.h 的编译期版本
+  * 参    数：major/minor 输出版本号；fromMeta 输出 1=读自元数据 0=编译期常量
+  * 返 回 值：无
+  * 补    充：为什么不是直接用元数据：Keil 直接烧 App 时不会更新 sector 3，
+  *            旧元数据里的版本号和大小会留在那儿。判据是「格式对 + 大小合理 +
+  *            镜像末尾标记 'MEND' 在位」——标记由 IAP 写完镜像后写，Keil 烧录擦不出它，
+  *            标记不在就说明这份元数据不是当前这份镜像的，退回编译期版本才不会显示错。
+  */
+static void GUI_GetFwVersion(uint8_t *major, uint8_t *minor, uint8_t *fromMeta)
+{
+  uint32_t fmt  = *(volatile uint32_t *)(OTA_META_ADDR + 4UL);
+  uint32_t ver  = *(volatile uint32_t *)(OTA_META_ADDR + 8UL);
+  uint32_t size = *(volatile uint32_t *)(OTA_META_ADDR + 12UL);
+
+  *fromMeta = 0U;
+  *major    = CAN_FW_VER_MAJOR;
+  *minor    = CAN_FW_VER_MINOR;
+
+  if (*(volatile uint32_t *)OTA_META_ADDR != OTA_META_MAGIC)
+  {
+    return;
+  }
+  if (fmt != OTA_META_FMT)
+  {
+    return;
+  }
+  if ((size < 8UL) || (size > OTA_APP_SIZE) || ((size & 3UL) != 0UL))
+  {
+    return;
+  }
+  if ((size < OTA_APP_SIZE) &&
+      (*(volatile uint32_t *)(OTA_APP_BASE + size) != OTA_META_END))
+  {
+    return;   /*标记不在：元数据是上一轮升级留下的，不可信*/
+  }
+
+  *major    = (uint8_t)((ver >> 8U) & 0xFFUL);
+  *minor    = (uint8_t)(ver & 0xFFUL);
+  *fromMeta = 1U;
+}
+
+/**
   * 功    能：在主屏顶部建状态栏（WiFi 状态、时间之类）
   * 参    数：scr  目标屏幕，主屏对象
   * 返 回 值：无
@@ -310,6 +363,26 @@ static void GUI_CreateStatusBar(lv_obj_t *scr)
   lv_label_set_text(labelWifiIcon, "WiFi");
   lv_obj_add_style(labelWifiIcon, &s_styleStatus, 0);
   lv_obj_set_pos(labelWifiIcon, 8, 5);
+
+  /* 固件版本：放 WiFi 右边，宽度够 "v1.4"；不可信时自动退回编译期版本 */
+  {
+    uint8_t major;
+    uint8_t minor;
+    uint8_t fromMeta;
+    char    buf[16];
+
+    GUI_GetFwVersion(&major, &minor, &fromMeta);
+    snprintf(buf, sizeof(buf), "v%u.%u", (unsigned)major, (unsigned)minor);
+
+    labelFwVer = lv_label_create(scr);
+    lv_label_set_text(labelFwVer, buf);
+    lv_obj_add_style(labelFwVer, &s_styleStatus, 0);
+    lv_obj_set_pos(labelFwVer, 44, 5);
+
+    /*上电日志留证：读完元数据后能看出这个版本号是从哪来的*/
+    UART_Printf("[GUI] fw v%u.%u (%s)\n", (unsigned)major, (unsigned)minor,
+                (fromMeta != 0U) ? "meta" : "compile");
+  }
 
   /* 时钟(右对齐) */
   labelClock = lv_label_create(scr);

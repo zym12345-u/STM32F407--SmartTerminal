@@ -76,6 +76,18 @@
  *   所以分工是：「升级中标志 + 已写字节数」放 24C02(随时变)；
  *   版本/大小/CRC 这类升级成功后才写一次的元数据，将来放 sector 3。
  *
+ * ── 元数据 v2 加了什么，为什么 ──
+ *   v1 只有 magic/size/crc，能证明「上次升级完整结束」，但回答不了两个问题：
+ *   现在跑的是哪个版本；Flash 里的内容和记录的大小还对不对得上。
+ *   v2 在原来 4 个字之外加了两样：
+ *     固件版本：PC 在结束帧里带上来（--fw-ver 1.4），App 读出来显示；
+ *     镜像末尾标记 'MEND'：写在镜像最后一个字节之后的那个字上，
+ *     0xFFFFFFFF 被换成 'MEND'，说明「元数据记的 size 就是 Flash 里这份镜像的真实大小」。
+ *   【为什么标记不拦启动】用 Keil 直接烧 App 时元数据不会跟着更新，标记必然对不上；
+ *   若据此拒跳，改完代码一烧板子就只会闪灯。所以 BootLoader 只把对不上的记成
+ *   stale 照常启动，App 端再据此决定「信元数据里的版本，还是退回编译期版本号」。
+ *   【v1 旧格式】只读出来打日志，不做大小校验，避免上一轮升级过的板子变砖。
+ *
  * ── 启动时先查标志再决定干什么 ──
  *   升级中途断电，App 区是个写了一半的镜像 —— 向量表校验"碰巧合法"是可能的
  *   (只要前 8 字节刚好写完)，直接跳过去照样跑飞。
@@ -120,7 +132,7 @@
 #define FRAME_SYNC1       0x5AU      /*帧头第 2 字节*/
 #define CMD_HANDSHAKE     0x01U      /*握手，长度 0*/
 #define CMD_DATA          0x02U      /*数据块，设备按顺序往后追加写入*/
-#define CMD_END           0x03U      /*结束，长度 0*/
+#define CMD_END           0x03U      /*结束，长度 6：整包 CRC32 + 固件版本(主,次)；长度 0 = 只擦除模式*/
 #define CMD_ERASE         0x04U      /*擦除，数据 8 字节：起始地址 + 结束地址(不含)*/
 #define CMD_PROGRESS      0x05U      /*查询已写字节数，长度 0；应答带 4 字节数据（断电续传用）*/
 #define CMD_ACK_FLAG      0x80U      /*应答帧的命令号 = 原命令号 | 0x80*/
@@ -132,9 +144,16 @@
 #define ST_FLASH          0x02U      /*擦除或编程失败（写前发现没擦干净也算）*/
 #define ST_CRC            0x03U      /*整包 CRC 校验不通过：写入内容与 PC 送的不一致*/
 
-/* 元数据区（sector 3，16KB）布局：只写前 16 字节，其余留空白给将来扩展 */
-#define META_MAGIC        0x4154454DUL  /*'M''E''T''A'：元数据有效的标记*/
-#define META_VERSION      1UL           /*元数据格式版本；改布局时加 1，BootLoader 据此判断*/
+/* 元数据区（sector 3，16KB）v2 布局：只写前 5 个字，其余保持 0xFF
+ *   [0] magic      [1] 格式版本=2       [2] 固件版本(主字节 << 8 | 次字节)
+ *   [3] 镜像字节数(4 对齐)               [4] 整包 CRC32
+ * v1 旧布局（magic, size, crc, 1）只读不写，兼容上一轮已升级过的板子 */
+#define META_MAGIC          0x4154454DUL  /*'M''E''T''A'：元数据有效的标记*/
+#define META_VERSION        2UL           /*当前元数据格式版本；改布局时加 1*/
+#define META_VERSION_V1     1UL           /*旧格式：没有版本号和结束标记*/
+#define APP_END_MAGIC       0x444E454DUL  /*内存里读出 'M''E''N''D'：镜像末尾标记*/
+#define APP_SIZE            (APP_LIMIT_ADDR - APP_BASE_ADDR)
+#define FW_VER_PACK(maj, min) ((((uint32_t)(maj) & 0xFFUL) << 8U) | ((uint32_t)(min) & 0xFFUL))
 
 /* 内部 Flash 解锁序列，少写一个字节解不了锁，顺序也不能反 */
 #define FLASH_KEY1        0x45670123UL
@@ -191,7 +210,12 @@ static uint8_t  upgrade_erase(const uint8_t *data, uint8_t len);
 static uint8_t  upgrade_write(const uint8_t *data, uint8_t len);
 static uint8_t  upgrade_finish(void);
 static uint32_t app_crc32(uint32_t len);
-static int      meta_write(uint32_t size, uint32_t crc);
+static int      meta_read(uint32_t *fmt, uint32_t *size, uint32_t *crc, uint32_t *fw_ver);
+static int      meta_size_ok(uint32_t size);
+static int      app_end_mark_ok(uint32_t size);
+static int      app_end_mark_write(uint32_t size);
+static void     boot_meta_report(void);
+static int      meta_write(uint32_t size, uint32_t crc, uint32_t fw_ver);
 static void systick_start_1ms(void);
 static void systick_stop(void);
 static void led_init(void);
@@ -259,6 +283,8 @@ int main(void)
   }
 
   uart1_send_str("[BOOT] window closed\r\n");
+
+  boot_meta_report();   /*把 sector 3 里记的版本/大小打出来，只报告不拦启动*/
 
   if (!app_is_valid())
   {
@@ -1051,25 +1077,167 @@ static uint32_t app_crc32(uint32_t len)
 }
 
 /**
+  * 功    能：检查镜像字节数是否落在合理范围：至少一个向量表、不超过 App 区、4 字节对齐
+  * 参    数：size 元数据里记的镜像字节数
+  * 返 回 值：1 合理；0 不可能
+  * 补    充：这是「大小校验」的第一道：越界的大小说明元数据本身坏了，不能采信；
+  *            4 对齐是因为 Flash 按字编程，PC 端送数据前也已补齐到 4 字节
+  */
+static int meta_size_ok(uint32_t size)
+{
+  if (size < 8UL)             /*连向量表都不够，不可能是镜像*/
+  {
+    return 0;
+  }
+  if (size > APP_SIZE)        /*超出 App 区，地址根本不存在*/
+  {
+    return 0;
+  }
+  if ((size & 3UL) != 0UL)    /*按字编程的单位对不上*/
+  {
+    return 0;
+  }
+  return 1;
+}
+
+/**
+  * 功    能：读元数据并识别格式（v2 新布局 / v1 旧布局）
+  * 参    数：fmt 输出格式版本；size/crc/fw_ver 输出对应字段
+  * 返 回 值：1 读到可用元数据；0 没有或不可信
+  * 补    充：先看 magic 再看格式，避免把 sector 3 里上一轮残留的旧 App 代码当成元数据。
+  *            v2 用「格式版本=2 且 size 合理」双条件，防止旧布局的第 4 个字恰好是 1 时误判
+  */
+static int meta_read(uint32_t *fmt, uint32_t *size, uint32_t *crc, uint32_t *fw_ver)
+{
+  uint32_t m0 = *(volatile uint32_t *)META_BASE_ADDR;
+  uint32_t m1 = *(volatile uint32_t *)(META_BASE_ADDR + 4UL);
+  uint32_t m2 = *(volatile uint32_t *)(META_BASE_ADDR + 8UL);
+  uint32_t m3 = *(volatile uint32_t *)(META_BASE_ADDR + 12UL);
+  uint32_t m4 = *(volatile uint32_t *)(META_BASE_ADDR + 16UL);
+
+  if (m0 != META_MAGIC)
+  {
+    return 0;
+  }
+
+  if ((m1 == META_VERSION) && (meta_size_ok(m3) != 0))
+  {
+    *fmt    = META_VERSION;
+    *fw_ver = m2;
+    *size   = m3;
+    *crc    = m4;
+    return 1;
+  }
+
+  /*v1 旧布局：第 4 个字才是格式版本；size 也要过一遍范围检查*/
+  if ((m3 == META_VERSION_V1) && (meta_size_ok(m1) != 0))
+  {
+    *fmt    = META_VERSION_V1;
+    *fw_ver = 0UL;
+    *size   = m1;
+    *crc    = m2;
+    return 1;
+  }
+
+  return 0;
+}
+
+/**
+  * 功    能：检查镜像末尾标记是否与元数据记录的大小对应
+  * 参    数：size 元数据里的镜像字节数
+  * 返 回 值：1 标记在位；0 标记不在
+  * 补    充：镜像顶满整个 App 区时后面没有空位写标记，按通过处理（这种镜像极少见）
+  */
+static int app_end_mark_ok(uint32_t size)
+{
+  if (size >= APP_SIZE)
+  {
+    return 1;
+  }
+  return (*(volatile uint32_t *)(APP_BASE_ADDR + size) == APP_END_MAGIC) ? 1 : 0;
+}
+
+/**
+  * 功    能：在镜像最后一个字节之后写 'MEND' 结束标记
+  * 参    数：size 本次实际写入的镜像字节数（已 4 对齐）
+  * 返 回 值：1 成功；0 编程失败
+  * 补    充：擦除阶段已把 s4~s7 整片清成 0xFF，这个位置必定可写；
+  *            写完标记才算「Flash 内容与元数据对得上」，所以必须在 meta_write 之前做
+  */
+static int app_end_mark_write(uint32_t size)
+{
+  int ok;
+
+  if (size >= APP_SIZE)
+  {
+    return 1;   /*没有多余的字可写，跳过*/
+  }
+
+  flash_unlock();
+  ok = flash_program_word(APP_BASE_ADDR + size, APP_END_MAGIC);
+  flash_lock();
+  return ok;
+}
+
+/**
+  * 功    能：上电时打印元数据里的固件版本、镜像大小、CRC 和结束标记状态
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：只报告、不拦启动。结束标记对不上最常见的原因是「用 Keil 直接烧了 App」，
+  *            此时旧元数据留在 sector 3、标记已被擦掉；拒绝启动会让开发流程直接卡死。
+  *            真正拦启动的仍是 app_is_valid() 的向量表校验和 24C02 的升级中标志
+  */
+static void boot_meta_report(void)
+{
+  uint32_t fmt;
+  uint32_t size;
+  uint32_t crc;
+  uint32_t fw_ver;
+
+  if (meta_read(&fmt, &size, &crc, &fw_ver) == 0)
+  {
+    uart1_send_str("[BOOT] meta none, vector check only\r\n");
+    return;
+  }
+
+  uart1_send_str("[BOOT] meta v");
+  uart1_send_dec(fmt);
+  if (fmt == META_VERSION)
+  {
+    uart1_send_str(" fw=");
+    uart1_send_dec((fw_ver >> 8U) & 0xFFUL);
+    uart1_send_str(".");
+    uart1_send_dec(fw_ver & 0xFFUL);
+    uart1_send_str((app_end_mark_ok(size) != 0) ? " mark ok" : " mark stale");
+  }
+  uart1_send_str(" size=");
+  uart1_send_dec(size);
+  uart1_send_str(" crc=0x");
+  uart1_send_hex32(crc);
+  uart1_send_str("\r\n");
+}
+
+/**
   * 功    能：把本次升级结果写进元数据区（sector 3）
-  * 参    数：size 镜像字节数；crc 整包 CRC32（已核对通过的值）
+  * 参    数：size 镜像字节数；crc 整包 CRC32（已核对通过的值）；fw_ver 固件版本（主<<8 | 次）
   * 返 回 值：1 成功；0 擦除或编程失败
-  * 补    充：写 16 字节：magic('META') + size + crc + version。
+  * 补    充：写 20 字节：magic + 格式版本 + 固件版本 + 大小 + CRC。
   *            只有升级完整走完才会调用它，所以「元数据存在」就等于
   *            「上一次升级是完整结束的」，这就是它最核心的价值。
   *            sector 3 整扇区擦除约 1 秒，只在成功时发生一次，不影响升级速度。
   *            【这块区域升级命令永远碰不到】：upgrade_erase 只许 s4~s7。
   */
-static int meta_write(uint32_t size, uint32_t crc)
+static int meta_write(uint32_t size, uint32_t crc, uint32_t fw_ver)
 {
-  uint32_t buf[4];
+  uint32_t buf[5];
   uint8_t  snb;
   uint8_t  i;
 
   buf[0] = META_MAGIC;
-  buf[1] = size;
-  buf[2] = crc;
-  buf[3] = META_VERSION;
+  buf[1] = META_VERSION;
+  buf[2] = fw_ver;
+  buf[3] = size;
+  buf[4] = crc;
 
   snb = flash_sector_of(META_BASE_ADDR);
 
@@ -1079,7 +1247,7 @@ static int meta_write(uint32_t size, uint32_t crc)
     flash_lock();
     return 0;
   }
-  for (i = 0U; i < 4U; i++)
+  for (i = 0U; i < 5U; i++)
   {
     if (!flash_program_word(META_BASE_ADDR + (4UL * (uint32_t)i), buf[i]))
     {
@@ -1188,14 +1356,16 @@ static void upgrade_loop(void)
     case CMD_END:
     {
       uint32_t want_crc = 0UL;
+      uint32_t want_ver = 0UL;
       uint32_t want_len = g_written;   /*补字会挪游标，但 g_written 始终是 PC 送来的长度*/
       int      check    = 0;
 
-      /* 结束命令带 4 字节 = PC 对整包算的 CRC，要核对；带 0 字节 = 老脚本，跳过校验 */
-      if (p.len == 4U)
+      /* 结束命令带 6 字节 = 整包 CRC32(4) + 固件版本(主,次)；带 0 字节 = 只擦除模式，跳过校验 */
+      if (p.len == 6U)
       {
         want_crc = (uint32_t)p.data[0] | ((uint32_t)p.data[1] << 8U) |
                    ((uint32_t)p.data[2] << 16U) | ((uint32_t)p.data[3] << 24U);
+        want_ver = FW_VER_PACK(p.data[4], p.data[5]);
         check = 1;
       }
       else if (p.len != 0U)
@@ -1222,14 +1392,24 @@ static void upgrade_loop(void)
 
       if ((st == ST_OK) && (check != 0))
       {
-        if (meta_write(want_len, want_crc) == 0)
+        /*先写镜像末尾标记，再写元数据：两者都成功才算「内容和记录对得上」*/
+        if (app_end_mark_write(want_len) == 0)
+        {
+          uart1_send_str("[BOOT] end mark write failed\r\n");
+          st = ST_FLASH;
+        }
+        else if (meta_write(want_len, want_crc, want_ver) == 0)
         {
           uart1_send_str("[BOOT] meta write failed\r\n");
           st = ST_FLASH;
         }
         else
         {
-          uart1_send_str("[BOOT] meta saved\r\n");
+          uart1_send_str("[BOOT] meta saved, fw v");
+          uart1_send_dec((want_ver >> 8U) & 0xFFUL);
+          uart1_send_str(".");
+          uart1_send_dec(want_ver & 0xFFUL);
+          uart1_send_str("\r\n");
         }
       }
 
