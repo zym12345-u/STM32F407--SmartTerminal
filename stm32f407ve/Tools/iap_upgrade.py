@@ -6,13 +6,14 @@
 # 用法：
 #   python iap_upgrade.py app.bin                 # 默认 COM3，等端口出现 180 秒
 #   python iap_upgrade.py app.bin -p COM5
+#   python iap_upgrade.py app.bin --fw-ver 1.4    # 固件版本随结束帧下发，写入 sector 3 元数据
 #   python iap_upgrade.py app.bin --wait-port 0   # 不等端口，直接开（报错即退出）
 #
 # ── 与 BootLoader 的协议对应关系（改协议两边必须一起改）──
 #   帧格式：A5 5A | 命令 | 长度 | 数据(0~128B) | CRC32(4B 小端)
 #   CRC32：多项式 0xEDB88320 逐位，初值/终值 0xFFFFFFFF，只覆盖【命令+长度+数据】
-#   命令：01 握手 / 02 数据块 / 03 结束 / 04 擦除(8B 起止地址，结束地址不含)
-#   应答：命令号|0x80，数据 1 字节状态：0 成功 / 1 越界 / 2 Flash 出错
+#   命令：01 握手 / 02 数据块 / 03 结束(6B：CRC32+版本主/次) / 04 擦除(8B 起止地址，结束地址不含)
+#   应答：命令号|0x80，数据 1 字节状态：0 成功 / 1 越界 / 2 Flash 出错 / 3 整包 CRC 不符
 #
 # ── 为什么先等 COM 出现再打开 ──
 #   断电续升级场景：板子重上电后 USB 转串口要重新枚举，设备管理器里 COM 口
@@ -66,6 +67,20 @@ def make_frame(cmd: int, data: bytes = b'') -> bytes:
     body = bytes([cmd, len(data)]) + data
     c = crc32(body)
     return bytes([SYNC0, SYNC1]) + body + c.to_bytes(4, 'little')
+
+
+def parse_fw_ver(text: str):
+    """把 --fw-ver 解析成 (主, 次)，每段必须 0~255；结束帧长度只有 1 字节，写不下更大的数"""
+    parts = text.split('.')
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError('版本号格式应为 主.次，如 1.4')
+    try:
+        major, minor = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise argparse.ArgumentTypeError('版本号两段都必须是十进制数字')
+    if not (0 <= major <= 255 and 0 <= minor <= 255):
+        raise argparse.ArgumentTypeError('版本号每段范围 0~255')
+    return major, minor
 
 
 def self_test():
@@ -254,6 +269,9 @@ def main():
     ap.add_argument('--wait-boot', type=float, default=150,
                     help='等板子复位/握手的秒数（默认 150）')
     ap.add_argument('--chunk', type=int, default=128, help='每帧数据字节数（默认 128）')
+    ap.add_argument('--fw-ver', type=parse_fw_ver, default=(1, 4),
+                    help='固件版本 主.次（默认 1.4）；随结束帧下发并写入 sector 3 元数据，'
+                         'App 界面和上电日志都读它')
     ap.add_argument('--erase-only', action='store_true',
                     help='只擦除 App 区并清升级标志，不写数据（用于模拟出厂空片）')
     args = ap.parse_args()
@@ -405,13 +423,15 @@ def main():
     spent = time.monotonic() - t0
     print(f'全部数据发完: {off} 字节 {frames} 帧, 耗时 {spent:.1f} s ({off / spent:.0f} 字节/秒)')
 
-    # ── 结束：把整包 CRC 一起送过去，设备自己算一遍比对 ──
+    # ── 结束：把整包 CRC 和固件版本一起送过去，设备自己算一遍比对 ──
     # zlib.crc32 与上面的 crc32() 是同一个算法（反射、初值 0xFFFFFFFF、末尾取反），
     # 但由 C 实现，300KB 算得飞快；逐位版留给几十字节的帧用。
+    # 版本号由设备写进 sector 3 元数据：App 界面显示、上电日志打印都靠它。
     import zlib
     img_crc = zlib.crc32(img) & 0xFFFFFFFF
-    print(f'整包 CRC32: 0x{img_crc:08X}')
-    link.send(CMD_END, img_crc.to_bytes(4, 'little'))
+    ver_major, ver_minor = args.fw_ver
+    print(f'整包 CRC32: 0x{img_crc:08X}, 固件版本: v{ver_major}.{ver_minor}')
+    link.send(CMD_END, img_crc.to_bytes(4, 'little') + bytes([ver_major, ver_minor]))
     st = link.wait_ack(CMD_END, 6000)   # 设备要算 CRC + 擦写 sector3，留足时间
     if st != ST_OK:
         if st == ST_CRC:
