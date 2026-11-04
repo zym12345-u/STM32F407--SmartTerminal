@@ -4,9 +4,9 @@
 # 依赖：pip install pyserial
 #
 # 用法：
-#   python iap_upgrade.py app.bin                 # 默认 COM3，等端口出现 180 秒
+#   python iap_upgrade.py app.bin                 # 默认 COM3，版本自动取 CanData.h 的 CAN_FW_VER_*
 #   python iap_upgrade.py app.bin -p COM5
-#   python iap_upgrade.py app.bin --fw-ver 1.4    # 固件版本随结束帧下发，写入 sector 3 元数据
+#   python iap_upgrade.py app.bin --fw-ver 1.5    # 手动指定版本（临时改版本、或头文件不在原路径时）
 #   python iap_upgrade.py app.bin --wait-port 0   # 不等端口，直接开（报错即退出）
 #
 # ── 与 BootLoader 的协议对应关系（改协议两边必须一起改）──
@@ -31,8 +31,10 @@
 #   （能回说明设备还活着，是丢帧；不回说明死机/复位），然后报错交给人判断。
 
 import argparse
+import re
 import sys
 import time
+from pathlib import Path
 
 try:
     import serial
@@ -50,6 +52,9 @@ ST_OK, ST_RANGE, ST_FLASH, ST_CRC = 0, 1, 2, 3
 APP_BASE = 0x08010000      # App 区起点（sector 4）
 APP_LIMIT = 0x08080000     # App 区上界（不含）
 SRAM_BASE, SRAM_LIMIT = 0x20000000, 0x20020000
+
+# App 的编译期版本常量所在文件。脚本据此自动取版本，避免手填 --fw-ver 和固件内常量对不上
+CANDATA_H = Path(__file__).resolve().parents[1] / 'Core' / 'App' / 'Types' / 'CanData.h'
 
 
 def crc32(data: bytes) -> int:
@@ -81,6 +86,23 @@ def parse_fw_ver(text: str):
     if not (0 <= major <= 255 and 0 <= minor <= 255):
         raise argparse.ArgumentTypeError('版本号每段范围 0~255')
     return major, minor
+
+
+def read_fw_ver_from_header(path=CANDATA_H):
+    """从 CanData.h 读 CAN_FW_VER_MAJOR/MINOR，返回 (主, 次)。
+    版本号在固件里只有一处定义，脚本跟着它走，就不会出现"界面显示 1.5、CAN 上报 1.4"。
+    头文件被挪走或改了写法时直接报错，让人用 --fw-ver 显式指定，不猜。"""
+    text = Path(path).read_text(encoding='utf-8', errors='replace')
+    values = {}
+    for name in ('CAN_FW_VER_MAJOR', 'CAN_FW_VER_MINOR'):
+        m = re.search(rf'#define\s+{name}\s+(0x[0-9A-Fa-f]+|\d+)\s*U?', text)
+        if m is None:
+            raise ValueError(f'{Path(path).name} 里没找到 {name}')
+        v = int(m.group(1), 0)
+        if not 0 <= v <= 255:
+            raise ValueError(f'{name}={v} 超出 0~255（结束帧只有 1 字节）')
+        values[name] = v
+    return values['CAN_FW_VER_MAJOR'], values['CAN_FW_VER_MINOR']
 
 
 def self_test():
@@ -269,14 +291,28 @@ def main():
     ap.add_argument('--wait-boot', type=float, default=150,
                     help='等板子复位/握手的秒数（默认 150）')
     ap.add_argument('--chunk', type=int, default=128, help='每帧数据字节数（默认 128）')
-    ap.add_argument('--fw-ver', type=parse_fw_ver, default=(1, 4),
-                    help='固件版本 主.次（默认 1.4）；随结束帧下发并写入 sector 3 元数据，'
-                         'App 界面和上电日志都读它')
+    ap.add_argument('--fw-ver', type=parse_fw_ver, default=None,
+                    help='固件版本 主.次；不给则自动取 CanData.h 的 CAN_FW_VER_MAJOR/MINOR。'
+                         '随结束帧下发并写入 sector 3 元数据，App 界面和上电日志都读它')
     ap.add_argument('--erase-only', action='store_true',
                     help='只擦除 App 区并清升级标志，不写数据（用于模拟出厂空片）')
     args = ap.parse_args()
 
     self_test()
+
+    # ── 版本号先定下来：不给 --fw-ver 就跟 CanData.h 走 ──
+    # 放在擦除之前解析，头文件有问题就在动 Flash 之前退出，不会留下半个升级现场
+    fw_ver, ver_note = None, ''
+    if not args.erase_only:
+        if args.fw_ver is None:
+            try:
+                fw_ver = read_fw_ver_from_header()
+                ver_note = 'CanData.h'
+            except (OSError, ValueError) as e:
+                print(f'FAIL: 自动取版本失败（{e}）；请用 --fw-ver 主.次 显式指定')
+                return 1
+        else:
+            fw_ver, ver_note = args.fw_ver, '--fw-ver'
 
     img = b''
     if args.bin:
@@ -429,8 +465,8 @@ def main():
     # 版本号由设备写进 sector 3 元数据：App 界面显示、上电日志打印都靠它。
     import zlib
     img_crc = zlib.crc32(img) & 0xFFFFFFFF
-    ver_major, ver_minor = args.fw_ver
-    print(f'整包 CRC32: 0x{img_crc:08X}, 固件版本: v{ver_major}.{ver_minor}')
+    ver_major, ver_minor = fw_ver
+    print(f'整包 CRC32: 0x{img_crc:08X}, 固件版本: v{ver_major}.{ver_minor}（来源 {ver_note}）')
     link.send(CMD_END, img_crc.to_bytes(4, 'little') + bytes([ver_major, ver_minor]))
     st = link.wait_ack(CMD_END, 6000)   # 设备要算 CRC + 擦写 sector3，留足时间
     if st != ST_OK:
