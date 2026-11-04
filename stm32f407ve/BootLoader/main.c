@@ -144,13 +144,22 @@
 #define ST_FLASH          0x02U      /*擦除或编程失败（写前发现没擦干净也算）*/
 #define ST_CRC            0x03U      /*整包 CRC 校验不通过：写入内容与 PC 送的不一致*/
 
-/* 元数据区（sector 3，16KB）v2 布局：只写前 5 个字，其余保持 0xFF
- *   [0] magic      [1] 格式版本=2       [2] 固件版本(主字节 << 8 | 次字节)
- *   [3] 镜像字节数(4 对齐)               [4] 整包 CRC32
- * v1 旧布局（magic, size, crc, 1）只读不写，兼容上一轮已升级过的板子 */
+/* 元数据区（sector 3，16KB）用「追加记录」布局，为的是抗掉电：
+ * 每次升级成功只往后追加一条 32 字节记录，从不擦除已有记录；
+ * 写到一半掉电只会留下一条校验不过的记录，上一条仍然完整可用。
+ * 记录布局（8 个字，只用前 6 个，其余保持 0xFF）：
+ *   [0] magic      [1] 记录格式=3        [2] 固件版本(主字节 << 8 | 次字节)
+ *   [3] 镜像字节数(4 对齐)                [4] 整包 CRC32
+ *   [5] 前 5 个字的 CRC32（记录自身校验；最后写，写完这条才算有效）
+ * 空槽判据：第 0 个字是 0xFFFFFFFF（整扇区擦完就是它）
+ * v2（magic, 2, 版本, size, crc）与 v1（magic, size, crc, 1）旧布局
+ * 只读不写，兼容已经升级过的板子 */
 #define META_MAGIC          0x4154454DUL  /*'M''E''T''A'：元数据有效的标记*/
-#define META_VERSION        2UL           /*当前元数据格式版本；改布局时加 1*/
+#define META_VERSION_REC    3UL           /*追加记录格式：带记录自身 CRC*/
+#define META_VERSION        2UL           /*旧 v2 五字布局，仅兼容读*/
 #define META_VERSION_V1     1UL           /*旧格式：没有版本号和结束标记*/
+#define META_SLOT_SIZE      32UL          /*一条记录占 32 字节，16KB 共 512 条*/
+#define META_SLOT_COUNT     ((META_LIMIT_ADDR - META_BASE_ADDR) / META_SLOT_SIZE)
 #define APP_END_MAGIC       0x444E454DUL  /*内存里读出 'M''E''N''D'：镜像末尾标记*/
 #define APP_SIZE            (APP_LIMIT_ADDR - APP_BASE_ADDR)
 #define FW_VER_PACK(maj, min) ((((uint32_t)(maj) & 0xFFUL) << 8U) | ((uint32_t)(min) & 0xFFUL))
@@ -210,7 +219,9 @@ static uint8_t  upgrade_erase(const uint8_t *data, uint8_t len);
 static uint8_t  upgrade_write(const uint8_t *data, uint8_t len);
 static uint8_t  upgrade_finish(void);
 static uint32_t app_crc32(uint32_t len);
-static int      meta_read(uint32_t *fmt, uint32_t *size, uint32_t *crc, uint32_t *fw_ver);
+static uint32_t meta_rec_crc(const volatile uint32_t *w);
+static int      meta_read(uint32_t *fmt, uint32_t *size, uint32_t *crc, uint32_t *fw_ver,
+                          uint32_t *slot);
 static int      meta_size_ok(uint32_t size);
 static int      app_end_mark_ok(uint32_t size);
 static int      app_end_mark_write(uint32_t size);
@@ -1101,19 +1112,83 @@ static int meta_size_ok(uint32_t size)
 }
 
 /**
-  * 功    能：读元数据并识别格式（v2 新布局 / v1 旧布局）
-  * 参    数：fmt 输出格式版本；size/crc/fw_ver 输出对应字段
-  * 返 回 值：1 读到可用元数据；0 没有或不可信
-  * 补    充：先看 magic 再看格式，避免把 sector 3 里上一轮残留的旧 App 代码当成元数据。
-  *            v2 用「格式版本=2 且 size 合理」双条件，防止旧布局的第 4 个字恰好是 1 时误判
+  * 功    能：算一条元数据记录的自校验 CRC（只覆盖前 5 个字）
+  * 参    数：w 记录首地址
+  * 返 回 值：CRC32 值
+  * 补    充：与整包 CRC 同一个算法，但输入只有 20 字节，逐位算也不费时。
+  *            掉电时记录若只写了一半，这个值必然对不上，那条记录就不算数。
   */
-static int meta_read(uint32_t *fmt, uint32_t *size, uint32_t *crc, uint32_t *fw_ver)
+static uint32_t meta_rec_crc(const volatile uint32_t *w)
 {
-  uint32_t m0 = *(volatile uint32_t *)META_BASE_ADDR;
-  uint32_t m1 = *(volatile uint32_t *)(META_BASE_ADDR + 4UL);
-  uint32_t m2 = *(volatile uint32_t *)(META_BASE_ADDR + 8UL);
-  uint32_t m3 = *(volatile uint32_t *)(META_BASE_ADDR + 12UL);
-  uint32_t m4 = *(volatile uint32_t *)(META_BASE_ADDR + 16UL);
+  uint32_t crc = 0xFFFFFFFFUL;
+  uint32_t i;
+  uint8_t  k;
+
+  for (i = 0UL; i < 5UL; i++)
+  {
+    for (k = 0U; k < 4U; k++)
+    {
+      crc = crc32_update(crc, (uint8_t)((w[i] >> (8U * k)) & 0xFFUL));
+    }
+  }
+  return crc ^ 0xFFFFFFFFUL;
+}
+
+/**
+  * 功    能：读元数据：先扫追加记录取最新一条，扫不到再认旧布局
+  * 参    数：fmt 输出格式版本；size/crc/fw_ver 输出对应字段；slot 输出记录槽号（旧布局为 0）
+  * 返 回 值：1 读到可用元数据；0 没有或不可信
+  * 补    充：槽号从 0 往后递增，后写的记录一定在更大的槽号里，所以
+  *            「最后一个通过校验的」就是最新的；中间某条写坏了不影响上一条。
+  */
+static int meta_read(uint32_t *fmt, uint32_t *size, uint32_t *crc, uint32_t *fw_ver,
+                     uint32_t *slot)
+{
+  uint32_t i;
+  uint32_t addr;
+  uint32_t m0;
+  uint32_t m1;
+  uint32_t m3;
+  int      hit = 0;
+
+  *slot = 0UL;
+
+  for (i = 0UL; i < META_SLOT_COUNT; i++)
+  {
+    addr = META_BASE_ADDR + (i * META_SLOT_SIZE);
+    if (*(volatile uint32_t *)addr != META_MAGIC)
+    {
+      continue;   /*空槽（0xFFFFFFFF）或别的东西，跳过*/
+    }
+    if (*(volatile uint32_t *)(addr + 4UL) != META_VERSION_REC)
+    {
+      continue;
+    }
+    if (meta_size_ok(*(volatile uint32_t *)(addr + 12UL)) == 0)
+    {
+      continue;
+    }
+    if (meta_rec_crc((const volatile uint32_t *)addr) != *(volatile uint32_t *)(addr + 20UL))
+    {
+      continue;   /*记录自身 CRC 不对：这条是掉电写了一半的，不算数*/
+    }
+    *fmt    = META_VERSION_REC;
+    *fw_ver = *(volatile uint32_t *)(addr + 8UL);
+    *size   = *(volatile uint32_t *)(addr + 12UL);
+    *crc    = *(volatile uint32_t *)(addr + 16UL);
+    *slot   = i;
+    hit = 1;    /*继续往后扫，保证取到槽号最大的那条*/
+  }
+
+  if (hit != 0)
+  {
+    return 1;
+  }
+
+  /*旧布局兼容：0 偏移处的五字结构*/
+  m0 = *(volatile uint32_t *)META_BASE_ADDR;
+  m1 = *(volatile uint32_t *)(META_BASE_ADDR + 4UL);
+  m3 = *(volatile uint32_t *)(META_BASE_ADDR + 12UL);
 
   if (m0 != META_MAGIC)
   {
@@ -1123,19 +1198,18 @@ static int meta_read(uint32_t *fmt, uint32_t *size, uint32_t *crc, uint32_t *fw_
   if ((m1 == META_VERSION) && (meta_size_ok(m3) != 0))
   {
     *fmt    = META_VERSION;
-    *fw_ver = m2;
+    *fw_ver = *(volatile uint32_t *)(META_BASE_ADDR + 8UL);
     *size   = m3;
-    *crc    = m4;
+    *crc    = *(volatile uint32_t *)(META_BASE_ADDR + 16UL);
     return 1;
   }
 
-  /*v1 旧布局：第 4 个字才是格式版本；size 也要过一遍范围检查*/
   if ((m3 == META_VERSION_V1) && (meta_size_ok(m1) != 0))
   {
     *fmt    = META_VERSION_V1;
     *fw_ver = 0UL;
     *size   = m1;
-    *crc    = m2;
+    *crc    = *(volatile uint32_t *)(META_BASE_ADDR + 8UL);
     return 1;
   }
 
@@ -1193,8 +1267,9 @@ static void boot_meta_report(void)
   uint32_t size;
   uint32_t crc;
   uint32_t fw_ver;
+  uint32_t slot;
 
-  if (meta_read(&fmt, &size, &crc, &fw_ver) == 0)
+  if (meta_read(&fmt, &size, &crc, &fw_ver, &slot) == 0)
   {
     uart1_send_str("[BOOT] meta none, vector check only\r\n");
     return;
@@ -1202,7 +1277,7 @@ static void boot_meta_report(void)
 
   uart1_send_str("[BOOT] meta v");
   uart1_send_dec(fmt);
-  if (fmt == META_VERSION)
+  if ((fmt == META_VERSION_REC) || (fmt == META_VERSION))
   {
     uart1_send_str(" fw=");
     uart1_send_dec((fw_ver >> 8U) & 0xFFUL);
@@ -1214,42 +1289,69 @@ static void boot_meta_report(void)
   uart1_send_dec(size);
   uart1_send_str(" crc=0x");
   uart1_send_hex32(crc);
+  if (fmt == META_VERSION_REC)
+  {
+    /*槽号是排查掉电时最有用的一列：相邻两次升级的槽号应当递增*/
+    uart1_send_str(" slot=");
+    uart1_send_dec(slot);
+  }
   uart1_send_str("\r\n");
 }
 
 /**
-  * 功    能：把本次升级结果写进元数据区（sector 3）
+  * 功    能：把本次升级结果追加一条记录到元数据区（sector 3）
   * 参    数：size 镜像字节数；crc 整包 CRC32（已核对通过的值）；fw_ver 固件版本（主<<8 | 次）
-  * 返 回 值：1 成功；0 擦除或编程失败
-  * 补    充：写 20 字节：magic + 格式版本 + 固件版本 + 大小 + CRC。
-  *            只有升级完整走完才会调用它，所以「元数据存在」就等于
-  *            「上一次升级是完整结束的」，这就是它最核心的价值。
-  *            sector 3 整扇区擦除约 1 秒，只在成功时发生一次，不影响升级速度。
-  *            【这块区域升级命令永远碰不到】：upgrade_erase 只许 s4~s7。
+  * 返 回 值：1 成功；0 编程或擦除失败
+  * 补    充：找第一个空槽（首字为 0xFFFFFFFF），只写这一条，不动已有的记录，
+  *            所以元数据更新没有「擦掉旧值再写新值」的危险窗口。
+  *            写入顺序是 magic 先、校验字最后：中途掉电留下的半条记录
+  *            magic 在、CRC 不对，读取时直接跳过，上一条仍然有效。
+  *            512 条用满（正常使用到不了）才整扇区擦一次，从 0 号槽重来。
   */
 static int meta_write(uint32_t size, uint32_t crc, uint32_t fw_ver)
 {
-  uint32_t buf[5];
+  uint32_t buf[6];
+  uint32_t i;
+  uint32_t addr;
   uint8_t  snb;
-  uint8_t  i;
+  uint8_t  k;
+
+  for (i = 0UL; i < META_SLOT_COUNT; i++)
+  {
+    if (*(volatile uint32_t *)(META_BASE_ADDR + (i * META_SLOT_SIZE)) == 0xFFFFFFFFUL)
+    {
+      break;      /*首字为空 ⇒ 整槽都还是擦除态*/
+    }
+  }
+
+  if (i >= META_SLOT_COUNT)
+  {
+    /*记录区写满了：整扇区擦一次，从 0 号槽重来（这一步会丢掉全部历史记录）*/
+    snb = flash_sector_of(META_BASE_ADDR);
+    flash_unlock();
+    if (!flash_erase_sector(snb))
+    {
+      flash_lock();
+      return 0;
+    }
+    flash_lock();
+    uart1_send_str("[BOOT] meta slots full, sector erased\r\n");
+    i = 0UL;
+  }
 
   buf[0] = META_MAGIC;
-  buf[1] = META_VERSION;
+  buf[1] = META_VERSION_REC;
   buf[2] = fw_ver;
   buf[3] = size;
   buf[4] = crc;
+  buf[5] = meta_rec_crc((const volatile uint32_t *)buf);
 
-  snb = flash_sector_of(META_BASE_ADDR);
+  addr = META_BASE_ADDR + (i * META_SLOT_SIZE);
 
   flash_unlock();
-  if (!flash_erase_sector(snb))
+  for (k = 0U; k < 6U; k++)
   {
-    flash_lock();
-    return 0;
-  }
-  for (i = 0U; i < 5U; i++)
-  {
-    if (!flash_program_word(META_BASE_ADDR + (4UL * (uint32_t)i), buf[i]))
+    if (!flash_program_word(addr + (4UL * (uint32_t)k), buf[k]))
     {
       flash_lock();
       return 0;

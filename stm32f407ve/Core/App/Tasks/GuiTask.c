@@ -91,7 +91,10 @@ static lv_obj_t *labelFwVer;
  *   [0] magic  [1] 格式版本  [2] 固件版本(主<<8|次)  [3] 镜像字节数  [4] 整包 CRC32 */
 #define OTA_META_ADDR     0x0800C000UL
 #define OTA_META_MAGIC    0x4154454DUL  /*'M''E''T''A'*/
-#define OTA_META_FMT      2UL
+#define OTA_META_FMT      2UL           /*旧 v2 五字布局，只兼容读*/
+#define OTA_META_FMT_REC  3UL           /*追加记录：带记录自身 CRC*/
+#define OTA_META_SLOT     32UL          /*一条记录占 32 字节*/
+#define OTA_META_SLOTS    (0x4000UL / OTA_META_SLOT)  /*sector 3 共 16KB，512 条*/
 #define OTA_META_END      0x444E454DUL  /*'M''E''N''D'：镜像末尾标记*/
 #define OTA_APP_BASE      0x08010000UL
 #define OTA_APP_SIZE      0x00070000UL  /*448KB，与 BootLoader 的 APP_SIZE 同值*/
@@ -303,32 +306,110 @@ static lv_obj_t *GUI_CreateSensorCard(lv_obj_t *parent, int16_t x, int16_t y,
 
 /*状态栏*/
 /**
+  * 功    能：对几个字做 CRC32（与 BootLoader 的 meta_rec_crc 同一算法）
+  * 参    数：w 首地址；n 字数
+  * 返 回 值：CRC32
+  * 补    充：只用于 20 字节的记录校验，逐位算即可，不引查表占空间
+  */
+static uint32_t OTA_Crc32Words(const volatile uint32_t *w, uint32_t n)
+{
+  uint32_t crc = 0xFFFFFFFFUL;
+  uint32_t i;
+  uint8_t  k;
+
+  for (i = 0UL; i < n; i++)
+  {
+    for (k = 0U; k < 4U; k++)
+    {
+      uint32_t b = (w[i] >> (8U * k)) & 0xFFUL;
+      uint8_t  bit;
+      for (bit = 0U; bit < 8U; bit++)
+      {
+        uint32_t mix = (crc ^ b) & 1UL;
+        crc >>= 1U;
+        if (mix != 0UL)
+        {
+          crc ^= 0xEDB88320UL;
+        }
+        b >>= 1U;
+      }
+    }
+  }
+  return crc ^ 0xFFFFFFFFUL;
+}
+
+/**
   * 功    能：取当前固件版本：元数据可信就用它，否则退回 CanData.h 的编译期版本
   * 参    数：major/minor 输出版本号；fromMeta 输出 1=读自元数据 0=编译期常量
   * 返 回 值：无
   * 补    充：为什么不是直接用元数据：Keil 直接烧 App 时不会更新 sector 3，
   *            旧元数据里的版本号和大小会留在那儿。判据是「格式对 + 大小合理 +
-  *            镜像末尾标记 'MEND' 在位」——标记由 IAP 写完镜像后写，Keil 烧录擦不出它，
-  *            标记不在就说明这份元数据不是当前这份镜像的，退回编译期版本才不会显示错。
+  *            记录自身 CRC 对 + 镜像末尾标记 'MEND' 在位」——标记由 IAP 写完镜像后写，
+  *            Keil 烧录擦不出它，标记不在就说明这份元数据不是当前这份镜像的，
+  *            退回编译期版本才不会显示错。
+  *            元数据是往后追加的记录，取槽号最大的那条（BootLoader 的 meta_read 同判据）。
   */
 static void GUI_GetFwVersion(uint8_t *major, uint8_t *minor, uint8_t *fromMeta)
 {
-  uint32_t fmt  = *(volatile uint32_t *)(OTA_META_ADDR + 4UL);
-  uint32_t ver  = *(volatile uint32_t *)(OTA_META_ADDR + 8UL);
-  uint32_t size = *(volatile uint32_t *)(OTA_META_ADDR + 12UL);
+  uint32_t i;
+  uint32_t addr;
+  uint32_t size = 0UL;
+  uint32_t ver  = 0UL;
+  uint8_t  found = 0U;
 
   *fromMeta = 0U;
   *major    = CAN_FW_VER_MAJOR;
   *minor    = CAN_FW_VER_MINOR;
 
+  for (i = 0UL; i < OTA_META_SLOTS; i++)
+  {
+    addr = OTA_META_ADDR + (i * OTA_META_SLOT);
+    if (*(volatile uint32_t *)addr != OTA_META_MAGIC)
+    {
+      continue;   /*空槽或别的东西*/
+    }
+    if (*(volatile uint32_t *)(addr + 4UL) != OTA_META_FMT_REC)
+    {
+      continue;
+    }
+    size = *(volatile uint32_t *)(addr + 12UL);
+    if ((size < 8UL) || (size > OTA_APP_SIZE) || ((size & 3UL) != 0UL))
+    {
+      continue;
+    }
+    if (OTA_Crc32Words((const volatile uint32_t *)addr, 5UL) !=
+        *(volatile uint32_t *)(addr + 20UL))
+    {
+      continue;   /*掉电写了一半的记录，不算数*/
+    }
+    ver   = *(volatile uint32_t *)(addr + 8UL);
+    found = 1U;   /*继续往后扫，最后一条才是最新的*/
+  }
+
+  if (found != 0U)
+  {
+    if ((size < OTA_APP_SIZE) &&
+        (*(volatile uint32_t *)(OTA_APP_BASE + size) != OTA_META_END))
+    {
+      return;   /*标记不在：元数据不是当前这份镜像的，不可信*/
+    }
+    *major    = (uint8_t)((ver >> 8U) & 0xFFUL);
+    *minor    = (uint8_t)(ver & 0xFFUL);
+    *fromMeta = 1U;
+    return;
+  }
+
+  /*旧 v2 五字布局兼容：0 偏移处*/
   if (*(volatile uint32_t *)OTA_META_ADDR != OTA_META_MAGIC)
   {
     return;
   }
-  if (fmt != OTA_META_FMT)
+  if (*(volatile uint32_t *)(OTA_META_ADDR + 4UL) != OTA_META_FMT)
   {
     return;
   }
+  ver  = *(volatile uint32_t *)(OTA_META_ADDR + 8UL);
+  size = *(volatile uint32_t *)(OTA_META_ADDR + 12UL);
   if ((size < 8UL) || (size > OTA_APP_SIZE) || ((size & 3UL) != 0UL))
   {
     return;
@@ -336,7 +417,7 @@ static void GUI_GetFwVersion(uint8_t *major, uint8_t *minor, uint8_t *fromMeta)
   if ((size < OTA_APP_SIZE) &&
       (*(volatile uint32_t *)(OTA_APP_BASE + size) != OTA_META_END))
   {
-    return;   /*标记不在：元数据是上一轮升级留下的，不可信*/
+    return;
   }
 
   *major    = (uint8_t)((ver >> 8U) & 0xFFUL);
