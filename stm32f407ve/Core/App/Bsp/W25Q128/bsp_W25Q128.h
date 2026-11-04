@@ -22,6 +22,17 @@
 /*GBK 字库区：后 6MB，验证前一律写保护*/
 #define W25Q128_GBK_BASE        0x00A00000UL   /* 字库起始(后 6MB), 之前 10MB 为用户区 */
 
+/*固件槽：LittleFS 缩到 8MB 后，从 0x00800000 起划两个 448KB 槽（A/B），字库区不动
+ * 每槽首 4KB 放镜像记录，镜像从槽基址 +0x1000 开始，最大 0x6F000(444KB)
+ * 记录 32B：magic('FWSL') / 格式为 1 / 版本 / 镜像字节数 / 镜像 CRC32 / 记录自身 CRC32
+ * 槽 A 存备份镜像，槽 B 留给 OTA 新镜像*/
+#define W25Q128_FW_SLOT_A_ADDR  0x00800000UL
+#define W25Q128_FW_SLOT_B_ADDR  0x00870000UL
+#define W25Q128_FW_SLOT_SIZE    0x00070000UL   /* 448KB, 与内部 App 区同大小 */
+#define W25Q128_FW_HDR_SIZE     0x00001000UL   /* 每槽首 4KB 记录扇区 */
+#define W25Q128_FW_IMG_MAX      (W25Q128_FW_SLOT_SIZE - W25Q128_FW_HDR_SIZE)
+#define W25Q128_FW_MAGIC        0x4657534CUL   /*'F''W''S''L'：槽内记录有效*/
+
 /**
   * 功    能：初始化 W25Q128：配 SPI 并读 JEDEC ID 确认芯片在位
   * 参    数：无
@@ -111,5 +122,29 @@ void W25Q128_SelfTest(void);
   * 补    充：只做存在性检查，不解析字库格式；首字节非全 0xFF 且 6MB 采样 0xFF 占比 < 80%
   */
 uint8_t W25Q128_CheckGBKFont(void);
+
+/**
+  * 功    能：擦除一段连续扇区（起始 4KB 对齐、长度 4KB 整数倍）
+  * 参    数：addr  起始地址；size  字节数
+  * 返 回 值：HAL_OK = 全部擦完；HAL_TIMEOUT = 某个扇区超时；HAL_ERROR = 未初始化/不对齐/越界
+  * 补    充：逐扇区调 SectorErase4K，中途失败立即返回，不继续往后擦
+  */
+HAL_StatusTypeDef W25Q128_EraseRange(uint32_t addr, uint32_t size);
+
+/**
+  * 功    能：从 addr 起连续写入一段数据，内部按 256B 页边界切片
+  * 参    数：addr  起始地址，可非页对齐；pData  数据首地址；size  字节数
+  * 返 回 值：HAL_OK = 写完；HAL_ERROR = 未初始化/参数为空/越过字库区/底层写失败
+  * 补    充：写入区必须先擦过；跨页时自动切开，避免页内回绕覆盖页首
+  */
+HAL_StatusTypeDef W25Q128_WriteRange(uint32_t addr, const uint8_t *pData, uint32_t size);
+
+/**
+  * 功    能：对一段区域做 CRC32（逐位，多项式 0xEDB88320，初值/终值 0xFFFFFFFF）
+  * 参    数：addr  起始地址；size  字节数
+  * 返 回 值：CRC32；未初始化或越界返回 0
+  * 补    充：static 256B 缓冲分块读，不占栈；与 BootLoader/iap_upgrade.py 算法一致
+  */
+uint32_t W25Q128_Crc32Range(uint32_t addr, uint32_t size);
 
 #endif /* __BSP_W25Q128_H */

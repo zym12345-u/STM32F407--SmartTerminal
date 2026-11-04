@@ -628,3 +628,150 @@ uint8_t W25Q128_CheckGBKFont(void)
                 (unsigned long)W25Q128_GBK_BASE);
     return pass;
 }
+
+/* ══════ 范围擦/写/CRC：给固件备份与后续 OTA 用 ══════ */
+
+/**
+  * 功    能：逐位 CRC32 更新一个字节（多项式 0xEDB88320）
+  * 参    数：crc  当前累加值；b  新字节
+  * 返 回 值：更新后的 CRC32
+  * 补    充：与 BootLoader 的 crc32_update、iap_upgrade.py 的 crc32 逐位一致
+  */
+static uint32_t W25Q_Crc32Update(uint32_t crc, uint8_t b)
+{
+    uint8_t i;
+
+    crc ^= (uint32_t)b;
+    for (i = 0U; i < 8U; i++)
+    {
+        if ((crc & 1UL) != 0UL)
+        {
+            crc = (crc >> 1U) ^ 0xEDB88320UL;
+        }
+        else
+        {
+            crc >>= 1U;
+        }
+    }
+    return crc;
+}
+
+/**
+  * 功    能：擦一段连续扇区
+  * 参    数：addr  起始地址，必须 4KB 对齐；size  字节数，必须 4KB 整数倍
+  * 返 回 值：HAL_OK / HAL_TIMEOUT / HAL_ERROR
+  * 补    充：逐扇区擦，失败立即停；地址越界（含字库区）在入口就拒绝，不会擦到一半才发现
+  */
+HAL_StatusTypeDef W25Q128_EraseRange(uint32_t addr, uint32_t size)
+{
+    uint32_t a;
+    HAL_StatusTypeDef st = HAL_OK;
+
+    if (s_initOk == 0U)
+    {
+        return HAL_ERROR;
+    }
+    /*对齐与越界一次性查完：擦到一半再报错会留下半擦状态，不如入口拒绝*/
+    if ((size == 0U) ||
+        ((addr & (W25Q128_SECTOR_SIZE - 1U)) != 0U) ||
+        ((size & (W25Q128_SECTOR_SIZE - 1U)) != 0U) ||
+        (addr >= W25Q128_GBK_BASE) ||
+        (size > (W25Q128_GBK_BASE - addr)))
+    {
+        UART_Printf("[W25Q] erase range 0x%08lX+0x%lX rejected\r\n",
+                    (unsigned long)addr, (unsigned long)size);
+        return HAL_ERROR;
+    }
+
+    for (a = addr; a < (addr + size); a += W25Q128_SECTOR_SIZE)
+    {
+        st = W25Q128_SectorErase4K(a);
+        if (st != HAL_OK)
+        {
+            break;
+        }
+    }
+    return st;
+}
+
+/**
+  * 功    能：从 addr 起连续写入一段数据，内部按 256B 页边界自动切片
+  * 参    数：addr  起始地址；pData  数据首地址；size  字节数
+  * 返 回 值：HAL_OK = 写完；HAL_ERROR = 未初始化/空指针/越过字库区/底层失败
+  * 补    充：只负责"写"，不负责"擦"；调用前该区域必须已擦成全 0xFF
+  */
+HAL_StatusTypeDef W25Q128_WriteRange(uint32_t addr, const uint8_t *pData, uint32_t size)
+{
+    uint32_t off = 0UL;
+    uint32_t chunk;
+
+    if ((s_initOk == 0U) || (pData == NULL) || (size == 0U))
+    {
+        return HAL_ERROR;
+    }
+    if ((addr >= W25Q128_GBK_BASE) || (size > (W25Q128_GBK_BASE - addr)))
+    {
+        UART_Printf("[W25Q] write range 0x%08lX+0x%lX rejected: GBK font region\r\n",
+                    (unsigned long)addr, (unsigned long)size);
+        return HAL_ERROR;
+    }
+
+    while (off < size)
+    {
+        /*切到本页剩余空间为止：跨页写会在页内回绕，把页首已写内容盖掉*/
+        chunk = W25Q128_PAGE_SIZE - ((addr + off) & (W25Q128_PAGE_SIZE - 1U));
+        if (chunk > (size - off))
+        {
+            chunk = size - off;
+        }
+        if (W25Q128_PageProgram(addr + off, pData + off, (uint16_t)chunk) != HAL_OK)
+        {
+            return HAL_ERROR;
+        }
+        off += chunk;
+    }
+    return HAL_OK;
+}
+
+/**
+  * 功    能：分段读一段区域并算 CRC32
+  * 参    数：addr  起始地址；size  字节数
+  * 返 回 值：CRC32；未初始化或越界返回 0
+  * 补    充：static 256B 缓冲，避免在大块校验时占用任务栈
+  */
+uint32_t W25Q128_Crc32Range(uint32_t addr, uint32_t size)
+{
+    static uint8_t  s_crcBuf[W25Q128_PAGE_SIZE];
+    uint32_t crc = 0xFFFFFFFFUL;
+    uint32_t off = 0UL;
+    uint32_t chunk;
+    uint32_t i;
+
+    if (s_initOk == 0U)
+    {
+        return 0U;
+    }
+    if ((addr >= W25Q128_TOTAL_BYTES) || (size > (W25Q128_TOTAL_BYTES - addr)))
+    {
+        return 0U;
+    }
+
+    while (off < size)
+    {
+        chunk = size - off;
+        if (chunk > W25Q128_PAGE_SIZE)
+        {
+            chunk = W25Q128_PAGE_SIZE;
+        }
+        if (W25Q128_ReadData(addr + off, s_crcBuf, chunk) != HAL_OK)
+        {
+            return 0U;
+        }
+        for (i = 0UL; i < chunk; i++)
+        {
+            crc = W25Q_Crc32Update(crc, s_crcBuf[i]);
+        }
+        off += chunk;
+    }
+    return crc ^ 0xFFFFFFFFUL;
+}
