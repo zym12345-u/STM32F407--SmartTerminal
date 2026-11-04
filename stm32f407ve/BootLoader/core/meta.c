@@ -1,4 +1,4 @@
-/* BootLoader/meta.c
+/* BootLoader/core/meta.c
  * 升级元数据：追加记录式布局的读校验、末尾标记、上电报告和写入。
  *
  * ── 元数据 v2 加了什么，为什么 ──

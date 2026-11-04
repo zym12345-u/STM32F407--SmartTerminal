@@ -1,4 +1,4 @@
-/* BootLoader/bsp_uart1.h
+/* BootLoader/port/bsp_uart1.h
  * 升级口 USART1 的裸机驱动 + 升级帧协议（帧头/命令号/状态码/解析器）。
  */
 #ifndef BSP_UART1_H
@@ -47,6 +47,8 @@ void uart1_init(void);
 void uart1_send_str(const char *s);
 void uart1_send_dec(uint32_t v);
 void uart1_send_hex32(uint32_t v);
+int  uart_rx_ready(void);        /*收接口：升级循环用这个判断"有没有字节"，不直接摸寄存器*/
+uint8_t uart_getc(void);         /*收接口：取走一个已收到的字节*/
 uint32_t crc32_update(uint32_t crc, uint8_t b);
 void frame_send(uint8_t cmd, const uint8_t *data, uint8_t len);
 void frame_reply(uint8_t cmd, uint8_t st);

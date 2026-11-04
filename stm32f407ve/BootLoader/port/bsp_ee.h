@@ -1,4 +1,4 @@
-/* BootLoader/bsp_ee.h
+/* BootLoader/port/bsp_ee.h
  * 板载 24C02（I2C1）驱动 + 升级进度标志（断电续传用）。
  */
 #ifndef BSP_EE_H

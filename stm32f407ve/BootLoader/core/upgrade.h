@@ -1,4 +1,4 @@
-/* BootLoader/upgrade.h
+/* BootLoader/core/upgrade.h
  * 升级模式主循环：收命令、分发、写 Flash、校验整包、跳 App。
  */
 #ifndef UPGRADE_H

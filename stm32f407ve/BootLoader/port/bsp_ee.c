@@ -1,4 +1,4 @@
-/* BootLoader/bsp_ee.c
+/* BootLoader/port/bsp_ee.c
  * 24C02（I2C1）极简轮询驱动 + 升级进度标志。
  *
  * ── 升级断电保护：标志为什么放 24C02 而不是 sector 3 ──

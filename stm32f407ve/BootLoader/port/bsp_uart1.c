@@ -1,4 +1,4 @@
-/* BootLoader/bsp_uart1.c
+/* BootLoader/port/bsp_uart1.c
  * 升级口 USART1：裸机寄存器版驱动 + 升级帧的收发状态机。
  *
  * ── 升级帧为什么这么定（本步只实现握手）──
@@ -44,6 +44,31 @@ void uart1_init(void)
   USART1->BRR = UART_BRR;
   USART1->CR2 = 0UL;                                  /*1 位停止位*/
   USART1->CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE;   /*使能串口、发送、接收；M=0 即 8 位数据*/
+}
+
+/**
+  * 功    能：收接口①——查升级口有没有收到待取的字节
+  * 参    数：无
+  * 返 回 值：1 = 有字节可取，0 = 没有
+  * 补    充：RXNE（Receive data register Not Empty）= 1 表示 DR 里躺着一个没收走的字节。
+  *            上层（core/upgrade.c）只通过这个接口感知串口，【不许直接摸 USART1 寄存器】——
+  *            这是 port/core 分层的边界：换传输介质（USART2/RS485/USB CDC）只改本文件
+  */
+int uart_rx_ready(void)
+{
+  return ((USART1->SR & USART_SR_RXNE) != 0UL) ? 1 : 0;
+}
+
+/**
+  * 功    能：收接口②——取走一个已收到的字节（调之前必须先确认 uart_rx_ready()）
+  * 参    数：无
+  * 返 回 值：收到的字节
+  * 补    充：读 DR 的动作本身就是"取走"——读一次 RXNE 自动清零。
+  *            和发送侧一样是寄存器直配，BootLoader 不依赖 HAL
+  */
+uint8_t uart_getc(void)
+{
+  return (uint8_t)USART1->DR;
 }
 
 /**

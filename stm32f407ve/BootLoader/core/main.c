@@ -1,4 +1,4 @@
-/* BootLoader/main.c
+/* BootLoader/core/main.c
  * 上电先开 3 秒串口升级窗口，窗口结束再校验 App 区向量表，合法则跳到 App，不合法则闪灯提示。
  * 分区：BootLoader 48KB，元数据 16KB，App 448KB（元数据独占整个 sector 3）。
  *
