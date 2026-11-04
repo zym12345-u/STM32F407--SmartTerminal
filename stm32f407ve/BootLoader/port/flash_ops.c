@@ -1,4 +1,4 @@
-/* BootLoader/flash_ops.c
+/* BootLoader/port/flash_ops.c
  * 内部 Flash 操作：解锁、上锁、擦扇区、按字编程、扇区号换算。
  * 全部用寄存器，不经过 HAL —— BootLoader 不链接 HAL，越瘦越好。
  */

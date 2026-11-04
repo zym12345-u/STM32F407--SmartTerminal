@@ -1,5 +1,12 @@
-/* BootLoader/upgrade.c
+/* BootLoader/core/upgrade.c
  * 升级模式：擦除 → 数据块 → 结束三条命令的落地动作，外加断电续传的游标恢复。
+ *
+ * ── 本文件的可移植性边界（改板/换芯片时不许动这里的协议逻辑）──
+ *   本文件属于 core/：只懂帧协议和 Flash 写入策略，【不直接摸任何外设寄存器】。
+ *   收字节走 port/bsp_uart1 的 uart_rx_ready()/uart_getc() 接口，
+ *   发字节走 uart1_send_*，擦写走 flash_ops，断点标志走 bsp_ee —— 换传输介质
+ *   （USART2/RS485/USB CDC）时只换 port 层实现，本文件的协议一行不用改。
+ *   验收标准：在本文件里 grep 外设寄存器名(GPIOA/USART1/FLASH_KEYR 之类)必须零命中。
  *
  * ── 三条升级命令怎么配合 ──
  *   0x04 擦除（带起始/结束地址）→ 0x02 数据块（不带地址）→ 0x03 结束。
@@ -15,7 +22,6 @@
  */
 
 #include <stdint.h>
-#include "stm32f4xx.h"
 #include "boot_layout.h"
 #include "bsp_uart1.h"
 #include "flash_ops.h"
@@ -248,12 +254,12 @@ void upgrade_loop(void)
 
   for (;;)
   {
-    if ((USART1->SR & USART_SR_RXNE) == 0UL)   /*升级模式不设超时，一直等到有字节*/
+    if (uart_rx_ready() == 0)                  /*升级模式不设超时，一直等到有字节*/
     {
       continue;
     }
 
-    ch = (uint8_t)USART1->DR;
+    ch = uart_getc();
     r  = frame_feed(&p, ch);
 
     if (r == 0U)

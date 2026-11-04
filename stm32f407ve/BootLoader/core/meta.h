@@ -1,4 +1,4 @@
-/* BootLoader/meta.h
+/* BootLoader/core/meta.h
  * 升级元数据（sector 3）的布局与读写接口。
  */
 #ifndef META_H

@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>STM32F407xx</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/WifiStore;../Core/App/Bsp/RS485;../Core/App/Bsp/IWDG;../Core/App/Bsp/W25Q128;../Middlewares/Third_Party/littlefs;../Core/App/Bsp/LittleFS;../Core/App/Bsp/Font;../Core/App/Bsp/CAN;../BootLoader</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/WifiStore;../Core/App/Bsp/RS485;../Core/App/Bsp/IWDG;../Core/App/Bsp/W25Q128;../Middlewares/Third_Party/littlefs;../Core/App/Bsp/LittleFS;../Core/App/Bsp/Font;../Core/App/Bsp/CAN;../BootLoader;../BootLoader/config;../BootLoader/port;../BootLoader/core</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -397,37 +397,37 @@
             <File>
               <FileName>main.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../BootLoader/main.c</FilePath>
+              <FilePath>../BootLoader/core/main.c</FilePath>
             </File>
             <File>
               <FileName>board.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../BootLoader/board.c</FilePath>
+              <FilePath>../BootLoader/port/board.c</FilePath>
             </File>
             <File>
               <FileName>bsp_uart1.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../BootLoader/bsp_uart1.c</FilePath>
+              <FilePath>../BootLoader/port/bsp_uart1.c</FilePath>
             </File>
             <File>
               <FileName>flash_ops.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../BootLoader/flash_ops.c</FilePath>
+              <FilePath>../BootLoader/port/flash_ops.c</FilePath>
             </File>
             <File>
               <FileName>meta.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../BootLoader/meta.c</FilePath>
+              <FilePath>../BootLoader/core/meta.c</FilePath>
             </File>
             <File>
               <FileName>bsp_ee.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../BootLoader/bsp_ee.c</FilePath>
+              <FilePath>../BootLoader/port/bsp_ee.c</FilePath>
             </File>
             <File>
               <FileName>upgrade.c</FileName>
               <FileType>1</FileType>
-              <FilePath>../BootLoader/upgrade.c</FilePath>
+              <FilePath>../BootLoader/core/upgrade.c</FilePath>
             </File>
             <File>
               <FileName>system_stm32f4xx.c</FileName>

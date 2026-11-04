@@ -1,4 +1,4 @@
-/* BootLoader/boot_layout.h
+/* BootLoader/config/boot_layout.h
  * 分区常量收口：BootLoader / 元数据 / App / SRAM 的地址与大小。
  * IAP 和 App 侧共用同一组地址，改分区只需改这里。
  *

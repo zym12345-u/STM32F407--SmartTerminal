@@ -1,4 +1,4 @@
-/* BootLoader/flash_ops.h
+/* BootLoader/port/flash_ops.h
  * STM32F407 内部 Flash 的寄存器级操作：解锁/上锁/擦除/按字编程/扇区换算。
  */
 #ifndef FLASH_OPS_H

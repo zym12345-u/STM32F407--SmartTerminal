@@ -1,4 +1,4 @@
-/* BootLoader/board.h
+/* BootLoader/port/board.h
  * 板载 LED、SysTick 毫秒计时和粗延时：全部寄存器操作，不依赖 HAL。
  */
 #ifndef BOARD_H

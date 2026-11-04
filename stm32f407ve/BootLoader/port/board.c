@@ -1,4 +1,4 @@
-/* BootLoader/board.c
+/* BootLoader/port/board.c
  * 板载 LED、SysTick 毫秒计时和粗延时。
  * 这三个小东西被串口窗口、升级主循环、I2C 总线恢复共用，单独放一处免得各文件抄一遍。
  */
