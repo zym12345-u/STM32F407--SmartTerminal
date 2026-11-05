@@ -19,5 +19,6 @@ void led_init(void);
 void led_on(void);
 void led_off(void);
 void delay_loop(uint32_t n);
+void rst_cause_dump(void);   /*复位原因解析(RCC->CSR)：器件级, 所以在 port 不在 core*/
 
 #endif /* BOARD_H */
