@@ -35,6 +35,11 @@
  *   跳过窗口直接进升级模式等 PC 重传；不在 → 照旧窗口 + 校验 + 跳转。
  *   24C02 探测失败(没焊/挂了)就当没有标志走原流程 —— 一片 EEPROM 挂了
  *   不能让整块板子起不来，向量表校验还是最后的底。
+ *
+ * ── 本文件的可移植性边界 ──
+ *   core/ 只允许出现【Cortex-M 内核级】寄存器：SCB / NVIC / SysTick（跳转六步必需）。
+ *   RCC 是【外设】不是内核 —— 所以复位原因解析(rst_cause_dump)已迁 port/board.c，
+ *   换芯片时本文件一个外设寄存器名都不用改。
  */
 
 #include <stdint.h>
@@ -46,8 +51,6 @@
 #include "board.h"
 #include "upgrade.h"
 #include "main.h"
-
-static void rst_cause_dump(void);
 
 int main(void)
 {
@@ -114,39 +117,6 @@ int main(void)
   for (;;)
   {
   }
-}
-
-/**
-  * 功    能：打印本次复位的原因，然后把标志清掉
-  * 参    数：无
-  * 返 回 值：无
-  * 补    充：这是排查"升级到一半板子自己重启"最省事的证据。
-  *            RCC->CSR 里每一位对应一种复位源，读出即知：
-  *              POR = 上电复位（电源从 0 爬起来）
-  *              BOR = 掉电复位（电压跌破 BOR 门限，擦写 Flash 电流冲击最常见）
-  *              PIN = NRST 引脚被拉低（按键、外部干扰、复位芯片）
-  *              IWDG/WWDG = 看门狗（BootLoader 根本没开，出现就是异常）
-  *              SFT = 软件复位（代码里主动 NVIC_SystemReset）
-  *              LPWR = 低功耗相关复位
-  *            多个位可能同时置 1（比如掉电后再上电），所以全部打印不取第一个。
-  *            读完立刻写 RMVF 清除：不清的话下次上电看到的还是"历史上任意一次"的残留，
-  *            证据就失效了。
-  */
-static void rst_cause_dump(void)
-{
-  uint32_t csr = RCC->CSR;
-
-  uart1_send_str("[BOOT] rst:");
-  if ((csr & RCC_CSR_LPWRRSTF) != 0UL) { uart1_send_str(" LPWR"); }
-  if ((csr & RCC_CSR_WWDGRSTF) != 0UL) { uart1_send_str(" WWDG"); }
-  if ((csr & RCC_CSR_IWDGRSTF) != 0UL) { uart1_send_str(" IWDG"); }
-  if ((csr & RCC_CSR_SFTRSTF)  != 0UL) { uart1_send_str(" SFT");  }
-  if ((csr & RCC_CSR_PORRSTF)  != 0UL) { uart1_send_str(" POR");  }
-  if ((csr & RCC_CSR_PINRSTF)  != 0UL) { uart1_send_str(" PIN");  }
-  if ((csr & RCC_CSR_BORRSTF)  != 0UL) { uart1_send_str(" BOR");  }
-  uart1_send_str("\r\n");
-
-  RCC->CSR |= RCC_CSR_RMVF;
 }
 
 /**
