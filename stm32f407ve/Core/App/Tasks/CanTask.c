@@ -416,7 +416,7 @@ void CanTask_Create(void)
 {
     const osThreadAttr_t attr = {
         .name       = "CanTask",
-        .stack_size = 256 * 4,                          /*栈以字为单位：256 字 = 1024 字节*/
+        .stack_size = 256 * 4,                          /*CMSIS 单位是字节：1024 字节；256 字只是换算结果*/
         .priority   = (osPriority_t)osPriorityNormal,   /*与 ModbusTask 同级*/
     };
     (void)osThreadNew(StartCanTask, NULL, &attr);
