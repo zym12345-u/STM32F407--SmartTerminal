@@ -64,11 +64,21 @@ static volatile uint16_t s_rxHead = 0U;   /* ISR 写位置 */
 static volatile uint16_t s_rxTail = 0U;   /* 任务读位置 */
 static uint8_t           s_rx[ESP_RX_BUF_SIZE];
 
+/* +IPD 解析状态：普通模式下数据是 "+IPD,<长度>:<二进制>"，壳和正文混在串口流里。
+ * 一次读取可能只拿到半个包头/半个正文，所以进度必须留在 static 里跨调用保存。
+ * 状态 0=找 "+IPD," 前缀  1=读长度数字  2=按长度收正文 */
+static uint8_t  s_ipdState  = 0U;
+static uint8_t  s_ipdMatch  = 0U;   /* 前缀匹配到第几个字符 */
+static uint8_t  s_ipdDigits = 0U;   /* 长度字段已读几位数字 */
+static uint32_t s_ipdLen    = 0UL;  /* 本包总长度 */
+static uint32_t s_ipdRemain = 0UL;  /* 本包还剩多少正文没取 */
+
 
 /*内部函数*/
 static void ESP_GPIO_UART_Init(void);
 static void ESP_RingFlush(void);
 static uint16_t ESP_RingCopy(uint8_t *out, uint16_t max);
+static uint16_t ESP_RingPop(uint8_t *out, uint16_t max);
 
 
 /**
@@ -167,6 +177,28 @@ static uint16_t ESP_RingCopy(uint8_t *out, uint16_t max)
         out[n++] = s_rx[t];
         t = (uint16_t)((t + 1U) % ESP_RX_BUF_SIZE);     /* 读指针同样按 2KB 环形回卷 */
     }
+    return n;
+}
+
+/**
+  * 功    能：从环形缓冲真正取走数据（推进 s_rxTail）
+  * 参    数：out  输出缓冲；max  最多取多少字节
+  * 返 回 值：实际取走字节数
+  * 补    充：与 ESP_RingCopy 的区别是「取走」——数据交出去后不再保留，
+  *            +IPD 流式接收必须用它，否则缓冲区会被同一段数据反复占满
+  */
+static uint16_t ESP_RingPop(uint8_t *out, uint16_t max)
+{
+    uint16_t n = 0U;
+    uint16_t t = s_rxTail;
+    uint16_t h = s_rxHead;
+
+    while ((t != h) && (n < max))
+    {
+        out[n++] = s_rx[t];
+        t = (uint16_t)((t + 1U) % ESP_RX_BUF_SIZE);
+    }
+    s_rxTail = t;          /* 只有任务改 tail，单消费者，无需关中断 */
     return n;
 }
 
@@ -354,4 +386,217 @@ uint16_t ESP8266_CopyResponse(char *out, uint16_t max)
     n = ESP_RingCopy((uint8_t *)out, (uint16_t)(max - 1U));
     out[n] = '\0';
     return n;
+}
+
+
+/*════════════════ TCP 数据通道：OTA 下载用的二进制收包 ════════════════
+ *
+ * ── 为什么不能沿用 ESP8266_Cmd() ──
+ *   Cmd 每次调用先 ESP_RingFlush()，只适合「一发一收」的短应答。
+ *   下载固件时数据是连续到达的，中间插一条 Cmd 就会把已经收到的几百字节丢掉。
+ *   所以收数据阶段完全不走 Cmd：只发一次 CIPSEND，然后一直用 TcpRead 抠数据。
+ *
+ * ── +IPD 长什么样 ──
+ *   单连接模式(CIPMUX=0)下，模块主动上报收到的网络数据：
+ *       +IPD,<len>:<len 个原始字节>
+ *   它和 "SEND OK"、"CLOSED" 这类文本应答混在同一个串口流里，必须按前缀识别。
+ *   正文里也可能出现 0x00 或 "+IPD" 字样，所以不能靠 strstr，必须严格按长度取。
+ */
+
+/**
+  * 功    能：清空 +IPD 解析状态（新连接或关闭连接时调用）
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：只清解析状态，不动环形缓冲；环形缓冲由 ESP8266_Cmd/Flush 负责
+  */
+void ESP8266_TcpRxReset(void)
+{
+    s_ipdState  = 0U;
+    s_ipdMatch  = 0U;
+    s_ipdDigits = 0U;
+    s_ipdLen    = 0UL;
+    s_ipdRemain = 0UL;
+}
+
+/**
+  * 功    能：建 TCP 连接。依次关旧连接、普通模式、关被动接收、单连接、CIPSTART
+  * 参    数：host  服务器 IP 或域名；port  端口
+  * 返 回 值：1 = 连上（收到 OK），0 = 失败
+  * 补    充：CIPMODE=0 才会有 +IPD；CIPMUX=0 让 +IPD 不带连接号，解析最简单。
+  *            老固件没有 CIPRECVMODE，它会回 ERROR，这里故意忽略，不影响后续
+  */
+uint8_t ESP8266_TcpConnect(const char *host, uint16_t port)
+{
+    char cmd[96];
+
+    if (host == NULL)
+    {
+        return 0U;
+    }
+
+    (void)ESP8266_Cmd("AT+CIPCLOSE\r\n", "OK", 1000U);       /* 没连接时回 ERROR，忽略 */
+    (void)ESP8266_Cmd("AT+CIPMODE=0\r\n", "OK", 2000U);      /* 0=普通模式，1=透传(收不到+IPD) */
+    (void)ESP8266_Cmd("AT+CIPRECVMODE=0\r\n", "OK", 2000U);  /* 关被动接收；老固件不支持，忽略 */
+    if (ESP8266_Cmd("AT+CIPMUX=0\r\n", "OK", 2000U) == 0U)   /* 单连接，+IPD 不带连接号 */
+    {
+        return 0U;
+    }
+
+    ESP8266_TcpRxReset();                                     /* 新连接从干净的解析状态开始 */
+    (void)snprintf(cmd, sizeof(cmd), "AT+CIPSTART=\"TCP\",\"%s\",%u\r\n",
+                   host, (unsigned)port);
+    return ESP8266_Cmd(cmd, "OK", 10000U);                    /* DNS + 握手，给 10s 余量 */
+}
+
+/**
+  * 功    能：用 AT+CIPSEND 发一段数据
+  * 参    数：data  数据首地址；len  字节数，1~2048
+  * 返 回 值：1 = 数据已发出，0 = 模块没给 '>' 或串口发送失败
+  * 补    充：等到 '>' 才发正文；不等 "SEND OK" —— 等它会把已经先到的 +IPD 清掉
+  */
+uint8_t ESP8266_TcpSend(const uint8_t *data, uint16_t len)
+{
+    char cmd[24];
+
+    if ((data == NULL) || (len == 0U) || (len > 2048U))
+    {
+        return 0U;
+    }
+
+    (void)snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%u\r\n", (unsigned)len);
+    if (ESP8266_Cmd(cmd, ">", 3000U) == 0U)                   /* '>' 才是「可以发正文」的信号 */
+    {
+        return 0U;
+    }
+    if (HAL_UART_Transmit(&huart_esp, (uint8_t *)data, len, 3000U) != HAL_OK)
+    {
+        return 0U;
+    }
+    Watchdog_Heartbeat(WDT_TASK_WIFI);                        /* 长数据发送期间补报一次 */
+    return 1U;
+}
+
+/**
+  * 功    能：关闭 TCP 连接
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：CIPCLOSE 会清空接收环（Cmd 内部 Flush），所以随后必须重置 +IPD 状态
+  */
+void ESP8266_TcpClose(void)
+{
+    (void)ESP8266_Cmd("AT+CIPCLOSE\r\n", "OK", 2000U);
+    ESP8266_TcpRxReset();
+}
+
+/**
+  * 功    能：从 +IPD 流里取纯数据（二进制安全），最多等 waitMs
+  * 参    数：out  输出缓冲；max  本次最多取多少；waitMs  本次最长等待
+  * 返 回 值：实际取到字节数，0 表示这段时间没有数据
+  * 补    充：状态机跨调用保存：包头只到一半、正文只到一半都能续上；
+  *            非 +IPD 的文本（SEND OK / CLOSED）在扫描状态里被自然丢弃
+  */
+uint16_t ESP8266_TcpRead(uint8_t *out, uint16_t max, uint32_t waitMs)
+{
+    static const uint8_t pfx[5] = { '+', 'I', 'P', 'D', ',' };
+    uint16_t got      = 0U;
+    uint32_t start    = HAL_GetTick();
+    uint32_t lastBeat = start;
+
+    if ((out == NULL) || (max == 0U))
+    {
+        return 0U;
+    }
+
+    while (got < max)
+    {
+        uint8_t  b;
+        uint16_t n;
+
+        if (s_ipdState == 2U)
+        {
+            /*正文阶段：按剩余长度取，取满一包才回到找前缀*/
+            uint32_t want = s_ipdRemain;
+
+            if (want > (uint32_t)(max - got))
+            {
+                want = (uint32_t)(max - got);
+            }
+            n = ESP_RingPop(&out[got], (uint16_t)want);
+            if (n > 0U)
+            {
+                got          = (uint16_t)(got + n);
+                s_ipdRemain -= (uint32_t)n;
+                if (s_ipdRemain == 0UL)
+                {
+                    s_ipdState = 0U;
+                    s_ipdMatch = 0U;
+                }
+                start = HAL_GetTick();      /*收到数据 → 空闲计时重置*/
+                continue;
+            }
+        }
+        else if (ESP_RingPop(&b, 1U) == 1U)
+        {
+            start = HAL_GetTick();
+            if (s_ipdState == 0U)
+            {
+                /*扫描 "+IPD,"：逐字符匹配，失败时用 KMP 思路回退到 1 或 0*/
+                if (b == pfx[s_ipdMatch])
+                {
+                    s_ipdMatch++;
+                    if (s_ipdMatch >= 5U)
+                    {
+                        s_ipdState  = 1U;
+                        s_ipdLen    = 0UL;
+                        s_ipdDigits = 0U;
+                    }
+                }
+                else
+                {
+                    s_ipdMatch = (b == '+') ? 1U : 0U;
+                }
+            }
+            else
+            {
+                /*长度字段：十进制数字，遇到 ':' 结束*/
+                if ((b >= '0') && (b <= '9'))
+                {
+                    s_ipdLen = (s_ipdLen * 10UL) + (uint32_t)(b - '0');
+                    s_ipdDigits++;
+                }
+                else if ((b == ':') && (s_ipdDigits > 0U))
+                {
+                    if (s_ipdLen == 0UL)
+                    {
+                        s_ipdState = 0U;
+                        s_ipdMatch = 0U;
+                    }
+                    else
+                    {
+                        s_ipdRemain = s_ipdLen;
+                        s_ipdState  = 2U;
+                    }
+                }
+                else
+                {
+                    s_ipdState = 0U;        /*非法长度，重新找前缀*/
+                    s_ipdMatch = 0U;
+                }
+            }
+            continue;
+        }
+
+        /*环里暂时没数据：等 1ms 让出 CPU；超过 waitMs 返回已取到的部分*/
+        if ((uint32_t)(HAL_GetTick() - start) >= waitMs)
+        {
+            break;
+        }
+        osDelay(1U);
+        if ((uint32_t)(HAL_GetTick() - lastBeat) >= 500U)
+        {
+            Watchdog_Heartbeat(WDT_TASK_WIFI);
+            lastBeat = HAL_GetTick();
+        }
+    }
+    return got;
 }

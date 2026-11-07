@@ -60,4 +60,52 @@ uint8_t ESP8266_FetchTime(ESP8266_Time_t *out);
 uint16_t ESP8266_CopyResponse(char *out, uint16_t max);
 
 
+/*══════ TCP 数据通道（OTA 下载用）══════
+ * 与上面「发命令等关键字」不同，下面这组是给「收二进制数据」用的：
+ * 普通模式下模块把收到的字节包成 "+IPD,<长度>:<数据>" 混在串口流里，
+ * ESP8266_TcpRead() 负责把这层壳剥掉，按字节原样交给调用方。
+ * 只有 WifiTask 能调；一次连接内不要穿插 ESP8266_Cmd()，否则会把数据流清掉。*/
+
+/**
+  * 功    能：清空 +IPD 解析状态（连接/断开前后都要调，避免半个包串到下一次）
+  * 参    数：无
+  * 返 回 值：无
+  */
+void ESP8266_TcpRxReset(void);
+
+/**
+  * 功    能：建立一条 TCP 连接：先关旧连接 → 普通模式 → 单连接 → CIPSTART
+  * 参    数：host  服务器域名或点分 IP，不允许 NULL
+  *            port  端口，1~65535
+  * 返 回 值：1 = 模块回 OK（已连上），0 = 参数非法/模式设置失败/连接失败
+  * 补    充：仅 WifiTask 调用；CIPSTART 最长等 10s，期间内部补报心跳
+  */
+uint8_t ESP8266_TcpConnect(const char *host, uint16_t port);
+
+/**
+  * 功    能：用 AT+CIPSEND 发一段数据（HTTP 请求就是走这里）
+  * 参    数：data  数据首地址，不允许 NULL；len  字节数，1~2048
+  * 返 回 值：1 = 模块出现 '>' 且数据已写入串口，0 = 失败
+  * 补    充：只负责发出去，不等 "SEND OK"——等它会顺手清掉可能已经先到的 +IPD
+  */
+uint8_t ESP8266_TcpSend(const uint8_t *data, uint16_t len);
+
+/**
+  * 功    能：关掉 TCP 连接（没连接时模块回 ERROR，属正常）
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：会清空接收环，调用后不要再指望读之前的数据
+  */
+void ESP8266_TcpClose(void);
+
+/**
+  * 功    能：从 +IPD 流里取最多 max 字节的纯数据，最多等 waitMs
+  * 参    数：out  输出缓冲，不允许 NULL；max  最多取多少；waitMs  本次最多等多久
+  * 返 回 值：实际取到的字节数，0~max（0 表示这段时间没有数据，不代表连接关闭）
+  * 补    充：自动跳过 "SEND OK"、"CLOSED" 等文本；跨多次调用能记住半个 +IPD 包；
+  *            调用期间每 500ms 补报一次 WifiTask 心跳
+  */
+uint16_t ESP8266_TcpRead(uint8_t *out, uint16_t max, uint32_t waitMs);
+
+
 #endif /* __BSP_ESP8266_H */

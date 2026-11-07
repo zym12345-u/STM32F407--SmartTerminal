@@ -8,9 +8,17 @@
 #include <stdio.h>
 
 #include "bsp_IWDG.h"
+#include "bsp_bootflag.h"   /*OTA-2：系统健康跑起来后向 BootLoader 确认*/
 #include "usart.h"   /* UART_Printf */
 
 #define MONITOR_INTERVAL_MS     500U    /*监控周期，单位 ms，本任务读*/
+#define BOOT_CONFIRM_DELAY_MS   3000U   /*启动后健康运行 3s 才确认，避免刚初始化就盖章*/
+#define BOOT_CONFIRM_RETRY_MAX  3U      /*EEPROM 写失败最多重试 3 次*/
+
+/*启动确认状态：放静态区，MonitorTask 栈只有 1KB*/
+static uint16_t s_bootElapsedMs;
+static uint8_t  s_bootConfirmed;
+static uint8_t  s_confirmRetry;
 
 /**
   * 功    能：系统监控任务：每 500ms 查一遍所有任务的心跳，全部在 3s 内上报过才喂狗
@@ -34,6 +42,34 @@ void StartMonitorTask(void *argument)
 
         if (Watchdog_CheckAllAlive())
         {
+            /*OTA-2 启动确认：任务全部健康存活满 3s，才告诉 BootLoader“新固件能用”。
+             * 确认失败只重试 3 次，避免 EEPROM 异常时每 500ms 无休止写*/
+            if (s_bootConfirmed == 0U)
+            {
+                if (s_bootElapsedMs < BOOT_CONFIRM_DELAY_MS)
+                {
+                    s_bootElapsedMs = (uint16_t)(s_bootElapsedMs + MONITOR_INTERVAL_MS);
+                }
+                if ((s_bootElapsedMs >= BOOT_CONFIRM_DELAY_MS) &&
+                    (s_confirmRetry < BOOT_CONFIRM_RETRY_MAX))
+                {
+                    uint8_t r = BootFlag_ConfirmBoot();
+
+                    if (r != 0U)
+                    {
+                        s_bootConfirmed = 1U;
+                        if (r == 2U)
+                        {
+                            UART_Printf("[MON] boot confirmed\r\n");
+                        }
+                    }
+                    else
+                    {
+                        s_confirmRetry++;
+                    }
+                }
+            }
+
             IWDG_Refresh();                /*全部存活才喂狗*/
         }
         else

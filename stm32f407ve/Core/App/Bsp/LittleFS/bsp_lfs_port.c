@@ -23,7 +23,7 @@
 /* ---- 地址与容量 ---- */
 #define LFS_FLASH_BASE   0x00000000UL
 /* 2048 块(8MB): 0x00000000 ~ 0x007FFFFF, 给尾部两个 448KB 固件槽让出空间;
- * 0x00800000 起是槽 A/B, 0x009FF000 仍留给 boot 自测扇区, 不越过 0x00A00000 的 GBK 字库区 */
+ * 0x00800000 起是槽 A/B(B 从 0x00871000 起，避开 A 的 448KB 备份尾部), 0x009FF000 仍留给 boot 自测扇区, 不越过 0x00A00000 的 GBK 字库区 */
 #define LFS_BLOCK_COUNT  ((lfs_size_t)(W25Q128_FW_SLOT_A_ADDR / W25Q128_SECTOR_SIZE))
 
 /* ---- 缓冲区(全部静态, 共 512*3 + 512 = 2KB .bss) ---- */

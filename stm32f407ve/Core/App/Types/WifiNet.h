@@ -56,12 +56,13 @@ typedef struct
 extern WifiScanState_t g_wifiScan;
 
 
-/* 命令码 1~2；GuiTask 填并投队列，WifiTask 读 */
+/* 命令码 1~3；GuiTask 填并投队列，WifiTask 读 */
 #define WIFI_CMD_SCAN   1U
 #define WIFI_CMD_JOIN   2U
+#define WIFI_CMD_OTA    3U                  /* 下载固件到 W25Q 槽 B，进度看 g_otaStatus */
 typedef struct
 {
-    uint8_t type;                       /* 1=SCAN 2=JOIN；GuiTask 写，WifiTask 读 */
+    uint8_t type;                       /* 1=SCAN 2=JOIN 3=OTA；GuiTask 写，WifiTask 读 */
     char    ssid[WIFI_SSID_LEN + 1U];   /* 目标热点名 0~32 字符，仅 JOIN 有效；GuiTask 写，WifiTask 读 */
     char    pwd[WIFI_PWD_LEN + 1U];     /* 密码 0~63 字符，仅 JOIN 有效；GuiTask 写，WifiTask 读 */
 } WifiCmd_t;
@@ -91,6 +92,14 @@ void Wifi_PostScan(void);
   * 补    充：ssid 不能为 NULL；开放热点密码传空串
   */
 void Wifi_PostJoin(const char *ssid, const char *pwd);
+
+/**
+  * 功    能：请求 WifiTask 从 HTTP 服务器下载固件到 W25Q 槽 B（非阻塞，投队列就返回）
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：下载进度/结果读 g_otaStatus；只能在本页 WiFi 已连接时发起，否则 err=OTA_ERR_WIFI
+  */
+void Wifi_PostOta(void);
 
 /*0 tick 超时，绝不阻塞 GUI；事件队列长度由 WifiTask_Create 决定*/
 /**

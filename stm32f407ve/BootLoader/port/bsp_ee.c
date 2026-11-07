@@ -462,3 +462,93 @@ uint32_t ota_read_written(void)
   return (uint32_t)buf[4] | ((uint32_t)buf[5] << 8U) |
          ((uint32_t)buf[6] << 16U) | ((uint32_t)buf[7] << 24U);
 }
+
+/* ── OTA-2 状态页：magic + state + 未确认次数，一页 8 字节 ── */
+
+/**
+  * 功    能：读 OTA-2 状态页
+  * 参    数：state 输出状态；count 输出未确认启动次数
+  * 返 回 值：1 = magic 对上，内容可信；0 = 没有状态页或读取失败
+  * 补    充：读失败一律当"没有请求"处理，回到原启动流程；
+  *            输出参数先清零，调用方不核对 magic 也不会用到随机值
+  */
+int ota2_state_read(uint8_t *state, uint8_t *count)
+{
+  uint8_t  buf[8];
+  uint32_t magic;
+
+  *state = OTA2_ST_NONE;
+  *count = 0U;
+
+  if (g_ee_ok == 0U)
+  {
+    return 0;
+  }
+  if (ee_read8(EE_OTA2_MEM, buf) != 0)
+  {
+    g_ee_ok = 0U;
+    return 0;
+  }
+
+  magic = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8U) |
+          ((uint32_t)buf[2] << 16U) | ((uint32_t)buf[3] << 24U);
+  if (magic != EE_OTA2_MAGIC)
+  {
+    return 0;
+  }
+
+  *state = buf[4];
+  *count = buf[5];
+  return 1;
+}
+
+/**
+  * 功    能：写 OTA-2 状态页
+  * 参    数：state 状态；count 未确认启动次数
+  * 返 回 值：无
+  * 补    充：写失败关掉 g_ee_ok，避免后续每次启动都重试拖慢流程；
+  *            此时这次搬运仍会继续，只是失去掉电续传/确认能力
+  */
+void ota2_state_write(uint8_t state, uint8_t count)
+{
+  uint8_t buf[8] = {0U};
+
+  if (g_ee_ok == 0U)
+  {
+    return;
+  }
+
+  buf[0] = (uint8_t)(EE_OTA2_MAGIC);
+  buf[1] = (uint8_t)(EE_OTA2_MAGIC >> 8U);
+  buf[2] = (uint8_t)(EE_OTA2_MAGIC >> 16U);
+  buf[3] = (uint8_t)(EE_OTA2_MAGIC >> 24U);
+  buf[4] = state;
+  buf[5] = count;
+
+  if (ee_write_page(EE_OTA2_MEM, buf) != 0)
+  {
+    g_ee_ok = 0U;
+    uart1_send_str("[BOOT] ee ota2 write fail\r\n");
+  }
+}
+
+/**
+  * 功    能：清 OTA-2 状态页（整页写 0，magic 一并清掉）
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：搬运完成、回滚完成、拒绝搬运时调用；写失败下次启动会重走一遍，
+  *            对搬运来说最多多做一次，不会把 App 区写坏
+  */
+void ota2_state_clear(void)
+{
+  uint8_t buf[8] = {0U};
+
+  if (g_ee_ok == 0U)
+  {
+    return;
+  }
+  if (ee_write_page(EE_OTA2_MEM, buf) != 0)
+  {
+    uart1_send_str("[BOOT] ee ota2 clear fail\r\n");
+  }
+}

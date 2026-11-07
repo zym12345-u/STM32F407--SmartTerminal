@@ -430,6 +430,16 @@
               <FilePath>../BootLoader/core/upgrade.c</FilePath>
             </File>
             <File>
+              <FileName>ota2.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../BootLoader/core/ota2.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_w25q.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../BootLoader/port/bsp_w25q.c</FilePath>
+            </File>
+            <File>
               <FileName>system_stm32f4xx.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/system_stm32f4xx.c</FilePath>

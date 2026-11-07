@@ -24,10 +24,13 @@
 
 /*固件槽：LittleFS 缩到 8MB 后，从 0x00800000 起划两个 448KB 槽（A/B），字库区不动
  * 每槽首 4KB 放镜像记录，镜像从槽基址 +0x1000 开始，最大 0x6F000(444KB)
- * 记录 32B：magic('FWSL') / 格式为 1 / 版本 / 镜像字节数 / 镜像 CRC32 / 记录自身 CRC32
- * 槽 A 存备份镜像，槽 B 留给 OTA 新镜像*/
+ * 记录 32B：magic('FWSL') / 格式(1=槽A整区备份 2=槽B OTA镜像) / 版本 / 镜像字节数 / 镜像 CRC32 / 记录自身 CRC32
+ * 槽 A 存备份镜像，槽 B 留给 OTA 新镜像
+ * 【槽 B 必须从 0x00871000 起，不能是 0x00870000】槽 A 是 448KB 整区备份，
+ * 镜像从 0x00801000 一直写到 0x00870FFF；若 B 从 0x00870000 起，B 的记录扇区
+ * 正好压在 A 备份的最后 4KB 上，写一次 OTA 记录就会让 A 的整区 CRC 失效。*/
 #define W25Q128_FW_SLOT_A_ADDR  0x00800000UL
-#define W25Q128_FW_SLOT_B_ADDR  0x00870000UL
+#define W25Q128_FW_SLOT_B_ADDR  0x00871000UL
 #define W25Q128_FW_SLOT_SIZE    0x00070000UL   /* 448KB, 与内部 App 区同大小 */
 #define W25Q128_FW_HDR_SIZE     0x00001000UL   /* 每槽首 4KB 记录扇区 */
 #define W25Q128_FW_IMG_MAX      (W25Q128_FW_SLOT_SIZE - W25Q128_FW_HDR_SIZE)
