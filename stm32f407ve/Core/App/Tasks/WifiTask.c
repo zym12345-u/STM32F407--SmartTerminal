@@ -8,6 +8,8 @@
 #include "task.h"
 
 #include "bsp_ESP8266.h"
+#include "bsp_OTA.h"
+#include "OtaData.h"
 #include "bsp_WifiStore.h"
 #include "bsp_WifiStoreLfs.h"
 #include "bsp_IWDG.h"
@@ -107,6 +109,28 @@ void Wifi_PostJoin(const char *ssid, const char *pwd)
     else
     {
         UART_Printf("[WIFI] PostJoin dropped: cmdQ NULL (heap alloc failed)\r\n");
+    }
+}
+
+/**
+  * 功    能：请求 WifiTask 下载固件到槽 B：投一条命令就返回，进度由 GUI 轮询 g_otaStatus
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：必须走 WifiTask —— ESP8266 是单消费者，且 W25Q 与 WifiStore 共用 SPI1，
+  *            放在同一个任务里执行天然串行，不需要额外加锁
+  */
+void Wifi_PostOta(void)
+{
+    WifiCmd_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.type = WIFI_CMD_OTA;
+    if (s_cmdQ != NULL)
+    {
+        (void)osMessageQueuePut(s_cmdQ, &cmd, 0U, 0U);
+    }
+    else
+    {
+        OTA_ReportFail(OTA_ERR_QUEUE);
     }
 }
 
@@ -631,6 +655,18 @@ void StartWifiTask(void *argument)
                     /*DoJoinCmd 已写 ClockData，走秒基准从当前值继续*/
                     ClockData_Get(&now);
                     lastResync = osKernelGetTickCount();
+                }
+            }
+            else if (cmd.type == WIFI_CMD_OTA)
+            {
+                /*没联网就别开始：OTA 不做自动连接，避免把 20s×3 的联网时间藏进下载流程*/
+                if (s_connected == 0U)
+                {
+                    OTA_ReportFail(OTA_ERR_WIFI);
+                }
+                else
+                {
+                    (void)OTA_DownloadToSlotB();
                 }
             }
             continue;

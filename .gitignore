@@ -26,6 +26,8 @@ __pycache__/
 *.hex
 *.bin
 *.map
+# OTA 打包时由 ota_serve.py 生成，不入库
+**/app.meta
 *.elf
 *.scvd
 *.bak

@@ -30,4 +30,18 @@
 #define APP_SIZE            (APP_LIMIT_ADDR - APP_BASE_ADDR)
 #define FW_VER_PACK(maj, min) ((((uint32_t)(maj) & 0xFFUL) << 8U) | ((uint32_t)(min) & 0xFFUL))
 
+/* 外部 W25Q128 固件槽：数值必须与 App 侧 bsp_W25Q128.h 保持一致
+ * 每槽 448KB，槽首 4KB 是 32B 记录，镜像从 +0x1000 起；A 存整区备份，B 存 OTA 镜像
+ * 【槽 B 从 0x00871000 起，不能是 0x00870000】A 的 448KB 镜像从 0x00801000 写到
+ * 0x00870FFF；若 B 的 4KB 记录扇区放在 0x00870000，就会压掉 A 备份的最后 4KB，
+ * 让 A 的整区 CRC 永远对不上，回滚基线失效。 */
+#define SLOT_A_BASE_ADDR   0x00800000UL
+#define SLOT_B_BASE_ADDR   0x00871000UL
+#define SLOT_SIZE          0x00070000UL
+#define SLOT_HDR_SIZE      0x00001000UL
+#define SLOT_IMG_MAX       (SLOT_SIZE - SLOT_HDR_SIZE)
+#define SLOT_MAGIC         0x4657534CUL   /*'F''W''S''L'，与 App 侧记录 magic 同值*/
+#define SLOT_FMT_BACKUP    1UL            /*槽 A：整区备份*/
+#define SLOT_FMT_OTA       2UL            /*槽 B：OTA 镜像*/
+
 #endif /* BOOT_LAYOUT_H */

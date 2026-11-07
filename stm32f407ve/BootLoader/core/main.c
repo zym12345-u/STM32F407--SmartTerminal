@@ -50,6 +50,7 @@
 #include "meta.h"
 #include "board.h"
 #include "upgrade.h"
+#include "ota2.h"
 #include "main.h"
 
 int main(void)
@@ -95,6 +96,8 @@ int main(void)
   }
 
   uart1_send_str("[BOOT] window closed\r\n");
+
+  ota2_boot_handle();   /*槽 B 搬运 / 启动确认计数 / 失败回滚，都在这里*/
 
   boot_meta_report();   /*把 sector 3 里记的版本/大小打出来，只报告不拦启动*/
 
