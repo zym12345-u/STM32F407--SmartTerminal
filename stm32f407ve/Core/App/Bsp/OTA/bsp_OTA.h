@@ -1,13 +1,22 @@
 /* bsp_OTA.h
- * WiFi OTA（第一阶段：只下载到 W25Q 槽 B，不改启动路径）。
+ * WiFi OTA：把固件下载进 W25Q 槽 B，并置"下次上电搬运"的请求。
  * 服务端约定：PC 上跑 Tools/ota_serve.py，同目录提供 app.bin 与 app.meta。
+ *
+ * ── 本模块的边界 ──
+ *   到这里为止都不碰内部 Flash：不擦 App 区、不复位、不切换启动。
+ *   "槽 B → App 区"的搬运与回滚由 BootLoader/core/ota2.c 在复位后完成。
  *
  * app.meta 是纯文本，三行键值，例如：
  *   version=1.5
  *   size=305856
  *   crc=3396383332
- * size 必须是 4 的整数倍（BootLoader 搬运时按字写内部 Flash）；
- * crc 用标准 CRC32（多项式 0xEDB88320，初值/终值 0xFFFFFFFF），与 IAP 工具一致。
+ * 三个坑：
+ *   1) size 必须是 4 的整数倍（BootLoader 搬运时按 32 位字写内部 Flash），
+ *      ota_serve.py 会自动补 0xFF 到 4 字节对齐
+ *   2) crc 是【十进制】，不是十六进制；手改 meta 时最容易在这翻车，
+ *      所以脚本生成后不要手工编辑（bin 一变 meta 必须重生成）
+ *   3) crc 用标准 CRC32（多项式 0xEDB88320，初值/终值 0xFFFFFFFF），
+ *      与 iap_upgrade.py / binascii.crc32 一致，不能用 MCU 硬件 CRC 算
  */
 #ifndef __BSP_OTA_H
 #define __BSP_OTA_H
@@ -15,13 +24,18 @@
 #include <stdint.h>
 #include "bsp_W25Q128.h"
 
-/*══════ 部署参数：测试前把 IP 改成 PC 的局域网地址 ══════*/
+/*══════ 部署参数：测试前把 IP 改成 PC 的局域网地址 ══════
+ * 为什么硬编码：这是学习/演示项目，固定一台 PC 做服务器，编译期常量最省事，
+ * 也避免了"配置存哪、怎么改"这一整套需求。量产做法是上电读配置区/二维码配网。
+ * ota_serve.py 启动时会打印本机 IP，把它抄到下面这行再重编 App 即可。*/
 #define OTA_SRV_HOST   "192.168.10.3"   /* PC 的 IPv4；ota_serve.py 启动时会打印 */
 #define OTA_SRV_PORT   8080U             /* HTTP 端口，与 ota_serve.py --port 一致 */
-#define OTA_META_PATH  "/app.meta"
+#define OTA_META_PATH  "/app.meta"       /* 路径写死：服务端目录里只能有这两个文件角色 */
 #define OTA_BIN_PATH   "/app.bin"
 
-/*槽 B 的记录格式：1=整区备份（槽 A），2=OTA 镜像（只有前 size 字节有效）*/
+/*槽 B 的记录格式：1=整区备份（槽 A），2=OTA 镜像（只有前 size 字节有效）。
+ *本模块只写格式 2；格式 1 由 GuiTask 的整区备份流程写，两边不能互换：
+ *格式 1 的 size 恒为 448KB（整区），格式 2 的 size 是真实镜像长度。*/
 #define OTA_REC_FMT    2UL
 
 /**

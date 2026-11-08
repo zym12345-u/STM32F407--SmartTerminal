@@ -34,14 +34,24 @@
  * 每槽 448KB，槽首 4KB 是 32B 记录，镜像从 +0x1000 起；A 存整区备份，B 存 OTA 镜像
  * 【槽 B 从 0x00871000 起，不能是 0x00870000】A 的 448KB 镜像从 0x00801000 写到
  * 0x00870FFF；若 B 的 4KB 记录扇区放在 0x00870000，就会压掉 A 备份的最后 4KB，
- * 让 A 的整区 CRC 永远对不上，回滚基线失效。 */
-#define SLOT_A_BASE_ADDR   0x00800000UL
-#define SLOT_B_BASE_ADDR   0x00871000UL
-#define SLOT_SIZE          0x00070000UL
-#define SLOT_HDR_SIZE      0x00001000UL
-#define SLOT_IMG_MAX       (SLOT_SIZE - SLOT_HDR_SIZE)
+ * 让 A 的整区 CRC 永远对不上，回滚基线失效。
+ *
+ * ⚠ 这组宏和 App 侧是【两个工程各存一份】的复制关系（Keil 两个 target 不共享
+ *   头文件搜索路径），改地址必须两边同时改。典型事故：App 写 0x00870000、
+ *   BootLoader 读 0x00871000，表现为"下载成功、复位永远不搬运"。
+ *   改完用 grep 把两个头文件的 0x008 常量逐字节比对一遍，比"记得改过"可靠。
+ *
+ * 布局（槽内偏移）：
+ *   +0x0000  32B 槽记录（magic/fmt/ver/size/crc/记录 CRC，后 8B 保留 0xFF）
+ *   +0x1000  镜像本体，最长 0x6F000(444KB)
+ *   +0x70000 槽结束（不含） */
+#define SLOT_A_BASE_ADDR   0x00800000UL   /*槽 A：串口 IAP 前的整区备份*/
+#define SLOT_B_BASE_ADDR   0x00871000UL   /*槽 B：WiFi OTA 下载的新镜像（A 后面紧接）*/
+#define SLOT_SIZE          0x00070000UL   /*448KB，与内部 App 区同大小*/
+#define SLOT_HDR_SIZE      0x00001000UL   /*4KB 记录扇区（32B 记录 + 擦除最小单位）*/
+#define SLOT_IMG_MAX       (SLOT_SIZE - SLOT_HDR_SIZE)   /*444KB：镜像真实上限*/
 #define SLOT_MAGIC         0x4657534CUL   /*'F''W''S''L'，与 App 侧记录 magic 同值*/
-#define SLOT_FMT_BACKUP    1UL            /*槽 A：整区备份*/
-#define SLOT_FMT_OTA       2UL            /*槽 B：OTA 镜像*/
+#define SLOT_FMT_BACKUP    1UL            /*槽 A：整区备份（size 恒为 448KB）*/
+#define SLOT_FMT_OTA       2UL            /*槽 B：OTA 镜像（只有前 size 字节有效）*/
 
 #endif /* BOOT_LAYOUT_H */

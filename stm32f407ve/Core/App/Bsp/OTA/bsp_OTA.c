@@ -1,11 +1,18 @@
 /* bsp_OTA.c
- * WiFi OTA 第一阶段：HTTP 下载 app.bin 到 W25Q 槽 B。
+ * WiFi OTA：HTTP 下载 app.bin 到 W25Q 槽 B，并置“请求搬运”标志。
  *
- * ── 完整链路 ──
+ * ── 完整链路（App 侧）──
  *   WifiTask 收到 OTA 命令 → 擦槽 B → GET app.meta → GET app.bin
  *   → 边收边写槽 B → 整包 CRC + 回读 CRC → 写槽记录（格式 2）
- * 本阶段【不复位、不切换启动】，下载失败也只是这一次失败，App 照常运行。
- * 真正的“槽 B → 内部 Flash 搬运 + 回滚”在 BootLoader 第二阶段做。
+ *   → BootFlag_RequestApply()：24C02 页 0xE8 写“下次上电把槽 B 搬进 App 区”
+ * 本文件【不会复位、也不会自己切换启动】：复位由用户按键触发，搬运由 BootLoader 做。
+ * 下载失败只是这一次失败：槽 B 没记录、App 照常跑、24C02 也不留搬运标志。
+ *
+ * ── 与 BootLoader/core/ota2.c 的分工 ──
+ *   本文件：把镜像“安全地放进外部 Flash”——链路不可控（会断网/断电），
+ *           所以允许失败，代价只是槽 B 里一份垃圾数据。
+ *   ota2.c：擦内部 App 区 + 搬运 + 回滚 + 启动确认——不可逆，必须一次成。
+ *   两段之间只有两个契约：槽首 32B 记录（magic 'FWSL'）与 24C02 的 8B 状态页。
  *
  * ── 为什么整槽先擦一遍 ──
  *   W25Q 扇区擦除一次要几十毫秒，期间 CPU 被 BUSY 轮询占住，串口里的 +IPD 数据
@@ -65,7 +72,10 @@ static uint8_t OTA_WriteRecord(uint32_t size, uint32_t crc, uint16_t ver);
   * 功    能：CRC32（逐位，多项式 0xEDB88320），与 W25Q128_Crc32Range / iap_upgrade.py 同算法
   * 参    数：crc  初值传 0xFFFFFFFF；buf  数据；n  字节数
   * 返 回 值：中间值（最终结果要再异或 0xFFFFFFFF）
-  * 补    充：边收边算，避免为 300KB 镜像再申请一块缓冲
+  * 补    充：边收边算，避免为 300KB 镜像再申请一块缓冲。
+  *            为什么不用 STM32 的硬件 CRC 外设：硬件 CRC 的初值、输入/输出反射、
+  *            字节序都可配，默认语义与 zlib / binascii.crc32 不一致，PC 端算出的
+  *            meta.crc 在这边永远对不上。软件逐位实现虽然慢，但"和谁算都一样"。
   */
 static uint32_t OTA_Crc32(uint32_t crc, const uint8_t *buf, uint32_t n)
 {
@@ -74,9 +84,11 @@ static uint32_t OTA_Crc32(uint32_t crc, const uint8_t *buf, uint32_t n)
 
     for (i = 0UL; i < n; i++)
     {
-        crc ^= (uint32_t)buf[i];
+        crc ^= (uint32_t)buf[i];          /*先并进最低字节，再逐位移出（反射算法）*/
         for (bit = 0U; bit < 8U; bit++)
         {
+            /*最低位为 1 表示这一位产生了余数，右移后要异或多项式；否则只右移。
+             *0xEDB88320 是标准 CRC32 多项式的"位反转"形式，配合右移使用*/
             if ((crc & 1UL) != 0UL)
             {
                 crc = (crc >> 1U) ^ 0xEDB88320UL;
@@ -162,7 +174,16 @@ static uint8_t OTA_HttpGetStart(const char *path)
   * 功    能：收完 HTTP 应答头，解析状态码与 Content-Length
   * 参    数：contentLen  输出，头里没写则回 0
   * 返 回 值：1 = 头完整且是 200，0 = 失败
-  * 补    充：头后面的正文若同批到达，存进 s_pre / s_preLen 交给调用方先消费
+  * 补    充：头后面的正文若同批到达，存进 s_pre / s_preLen 交给调用方先消费。
+  *
+  * ── 为什么"头尾夹着正文"是常态，不是意外 ──
+  *   +IPD 的分包边界由 ESP8266 和网络栈决定，和 HTTP 的消息边界毫无关系。
+  *   一个 +IPD 包里完全可能是"头 + 正文前 300 字节"，所以收到 \r\n\r\n 之后
+  *   必须先检查后面还有没有剩料，不能默认"头收完了，正文会重新来一包"。
+  *
+  * ── 为什么找 \r\n\r\n 而不是 \n\n ──
+  *   HTTP/1.1 规范要求行结束是 CRLF；Python 的 http.server 严格照做。
+  *   只找 \n\n 在遇到正文里恰好出现 0x0A0A 时会误判（二进制正文什么都可能有）。
   */
 static uint8_t OTA_ReadHeader(uint32_t *contentLen)
 {
@@ -175,13 +196,13 @@ static uint8_t OTA_ReadHeader(uint32_t *contentLen)
     *contentLen = 0UL;
     s_preLen = 0U;
 
-    while ((uint32_t)(HAL_GetTick() - start) < 5000U)
+    while ((uint32_t)(HAL_GetTick() - start) < 5000U)   /*总上限 5s，防止服务端半死不活*/
     {
         uint16_t r;
 
         if (n >= OTA_HDR_MAX)
         {
-            break;
+            break;      /*头超过 512B：不可能是正常应答，按失败处理*/
         }
         r = ESP8266_TcpRead(&s_hdr[n], (uint16_t)(OTA_HDR_MAX - n), 500U);
         if (r == 0U)
@@ -189,12 +210,14 @@ static uint8_t OTA_ReadHeader(uint32_t *contentLen)
             continue;      /* 500ms 没动静就接着等，总上限 5s */
         }
         n = (uint16_t)(n + r);
+        /*每来一批就从头重扫：\r\n\r\n 可能正好被切在两次读取的边界上。
+         *从 i=4 开始是因为至少要 4 个字节才能凑出一个 \r\n\r\n*/
         for (i = 4U; i < n; i++)
         {
             if ((s_hdr[i - 3U] == '\r') && (s_hdr[i - 2U] == '\n') &&
                 (s_hdr[i - 1U] == '\r') && (s_hdr[i] == '\n'))
             {
-                end = (uint16_t)(i + 1U);
+                end = (uint16_t)(i + 1U);   /*end 指向正文第一个字节*/
                 break;
             }
         }
@@ -220,7 +243,7 @@ static uint8_t OTA_ReadHeader(uint32_t *contentLen)
     {
         memcpy(s_pre, &s_hdr[end], s_preLen);
     }
-    s_hdr[end] = '\0';
+    s_hdr[end] = '\0';      /*只为了后面能当 C 字符串用；end < 512 已在上面的检查里保证*/
 
     if (strstr((char *)s_hdr, " 200 ") == NULL)
     {
@@ -229,10 +252,12 @@ static uint8_t OTA_ReadHeader(uint32_t *contentLen)
         return 0U;
     }
 
+    /*头字段大小写不统一（Python 发 Content-Length，别的服务器可能发 content-length），
+     *所以用不分大小写的查找；找不到就留 contentLen=0，交给调用方按"长度未知"处理*/
     p = OTA_StrCaseStr((char *)s_hdr, "content-length:");
     if (p != NULL)
     {
-        *contentLen = (uint32_t)strtoul(p + 15, NULL, 10);
+        *contentLen = (uint32_t)strtoul(p + 15, NULL, 10);   /*跳过 "content-length:" 共 15 字符*/
     }
     return 1U;
 }
@@ -353,15 +378,27 @@ static uint8_t OTA_FetchMeta(uint32_t *size, uint32_t *crc, uint16_t *ver)
   * 功    能：把一段收到的正文算 CRC 并按 256B 攒页写进槽 B
   * 参    数：data  数据；n  字节数
   * 返 回 值：1 = 成功，0 = 页编程失败
-  * 补    充：攒满一页才写，减少 SPI 事务；最后不足一页由调用方收尾
+  * 补    充：攒满一页才写，减少 SPI 事务；最后不足一页由调用方收尾。
+  *
+  * ── 为什么必须按 256B 攒页 ──
+  *   W25Q 的"页编程"命令（0x02）一次最多写 256B，而且【不能跨页】：
+  *   从地址 0x...F0 写 32 字节，超出的部分会回卷到本页开头（0x...00），
+  *   把前面的数据覆盖掉。所以起始地址和长度都必须按页边界安排。
+  *   这里让 s_written 只在"整页写成功"时才前进，天然保证下一页起点 256 对齐；
+  *   结尾的零头由 OTA_FetchImage 单独写一次（起点仍对齐，页内部分写合法）。
+  *
+  * ── 为什么在这里喂狗 ──
+  *   下载循环里每收一块也喂，但页写本身要 1~2ms，加上 SPI 事务的抖动，
+  *   一条 30 秒的下载链路不能只靠外层循环喂。规则：任何可能"闷头干几百毫秒"
+  *   的地方自己补报一次心跳，见 stm32-freertos-task skill 的"长流程补喂狗"。
   */
 static uint8_t OTA_Feed(const uint8_t *data, uint16_t n)
 {
-    s_crc = OTA_Crc32(s_crc, data, n);
+    s_crc = OTA_Crc32(s_crc, data, n);   /*边收边算：收完就不用再读一遍 300KB*/
 
     while (n > 0U)
     {
-        uint16_t room = (uint16_t)(W25Q128_PAGE_SIZE - s_pageFill);
+        uint16_t room = (uint16_t)(W25Q128_PAGE_SIZE - s_pageFill);   /*本页还能装多少*/
         uint16_t take = (n < room) ? n : room;
 
         memcpy(&s_page[s_pageFill], data, take);
@@ -369,7 +406,7 @@ static uint8_t OTA_Feed(const uint8_t *data, uint16_t n)
         data += take;
         n = (uint16_t)(n - take);
 
-        if (s_pageFill >= W25Q128_PAGE_SIZE)
+        if (s_pageFill >= W25Q128_PAGE_SIZE)      /*攒满一页才动一次 SPI*/
         {
             if (W25Q128_PageProgram(OTA_IMG_BASE + s_written, s_page, W25Q128_PAGE_SIZE) != HAL_OK)
             {
@@ -377,7 +414,7 @@ static uint8_t OTA_Feed(const uint8_t *data, uint16_t n)
                             (unsigned long)(OTA_IMG_BASE + s_written));
                 return 0U;
             }
-            s_written += W25Q128_PAGE_SIZE;
+            s_written += W25Q128_PAGE_SIZE;       /*只在整页写成功后前进，保证页对齐*/
             s_pageFill = 0U;
             Watchdog_Heartbeat(WDT_TASK_WIFI);
         }
@@ -387,9 +424,15 @@ static uint8_t OTA_Feed(const uint8_t *data, uint16_t n)
 
 /**
   * 功    能：下载 app.bin 到槽 B，边收边写，最后整包 CRC + 回读 CRC 双重校验
-  * 参    数：size  期望字节数；expectCrc  期望 CRC32
+  * 参    数：size  期望字节数；expectCrc  期望 CRC32（都来自 app.meta）
   * 返 回 值：OTA_ERR_NONE 或错误码
-  * 补    充：Content-Length 必须与 meta 完全一致；5s 没有新数据判超时
+  * 补    充：Content-Length 必须与 meta 完全一致；5s 没有新数据判超时。
+  *
+  * ── 为什么要拿 HTTP 头的 Content-Length 去卡 meta.size ──
+  *   meta 和 bin 是两次独立的 GET，中间服务端的文件完全可能被换掉
+  *   （重新编译、重新生成 meta）。长度对不上就说明"这两份不是一套"，
+  *   此时继续下载会得到一个 CRC 必然对不上的镜像，白白花 30 秒。
+  *   提前在头解析完就判死，失败成本从"30 秒 + 一次擦写"降到"1 秒"。
   */
 static uint8_t OTA_FetchImage(uint32_t size, uint32_t expectCrc)
 {
@@ -412,17 +455,19 @@ static uint8_t OTA_FetchImage(uint32_t size, uint32_t expectCrc)
     }
     if ((contentLen != size) || (s_preLen > size))
     {
+        /*两种异常合并成一个错误码：头里长度与 meta 不符，或者头后面夹的正文
+         *反而比整个镜像还长（说明服务器返回的根本不是这个文件）*/
         UART_Printf("[OTA] size mismatch: http=%lu meta=%lu pre=%u\r\n",
                     (unsigned long)contentLen, (unsigned long)size, (unsigned)s_preLen);
         ESP8266_TcpClose();
         return OTA_ERR_SIZE;
     }
 
-    s_crc      = 0xFFFFFFFFUL;
+    s_crc      = 0xFFFFFFFFUL;   /*CRC 初值按标准固定是这个，不能给 0*/
     s_pageFill = 0U;
-    s_written  = 0UL;
+    s_written  = 0UL;            /*三个 static 每次下载都重置：它们是"这一轮"的状态*/
 
-    if (s_preLen > 0U)
+    if (s_preLen > 0U)           /*头后面夹着的正文先吃掉，否则会少掉开头几十到几百字节*/
     {
         if (OTA_Feed(s_pre, s_preLen) == 0U)
         {
@@ -435,12 +480,15 @@ static uint8_t OTA_FetchImage(uint32_t size, uint32_t expectCrc)
 
     while (got < size)
     {
-        uint32_t left = size - got;
+        uint32_t left = size - got;      /*只收"还差多少"，绝不多收：多收的部分属于下一份数据*/
         uint16_t want = (left > (uint32_t)OTA_RX_CHUNK) ? OTA_RX_CHUNK : (uint16_t)left;
         uint16_t r    = ESP8266_TcpRead(s_chunk, want, 1000U);
 
         if (r == 0U)
         {
+            /*1 秒没数据不算断，连续 5 秒没有新字节才判死。
+             *这里限的是"无进展"而不是"总耗时"——弱网下总耗时波动很大，
+             *但只要还在进字节就说明链路活着，继续等即可*/
             if ((uint32_t)(HAL_GetTick() - lastData) >= 5000U)
             {
                 UART_Printf("[OTA] stall at %lu/%lu\r\n",
@@ -460,7 +508,9 @@ static uint8_t OTA_FetchImage(uint32_t size, uint32_t expectCrc)
         lastData = HAL_GetTick();
 
         g_otaStatus.got     = got;
-        g_otaStatus.percent = (uint8_t)(25UL + ((got * 70UL) / size));   /* 下载段占 25~95 */
+        /*百分比映射：25 + 已收/总量 × 70，把 25~95 这段留给下载，
+         *和擦除(0~20)、取 meta(20~25)、校验+写记录(96~100)拼成完整进度条*/
+        g_otaStatus.percent = (uint8_t)(25UL + ((got * 70UL) / size));
         Watchdog_Heartbeat(WDT_TASK_WIFI);
     }
 
@@ -475,14 +525,15 @@ static uint8_t OTA_FetchImage(uint32_t size, uint32_t expectCrc)
         s_written += (uint32_t)s_pageFill;
         s_pageFill = 0U;
     }
-    ESP8266_TcpClose();
+    ESP8266_TcpClose();          /*这里就先断开，后面的校验不需要网络*/
 
-    if (s_written != size)
+    if (s_written != size)       /*防御：收到的东西和声明的长度不一致*/
     {
         return OTA_ERR_SIZE;
     }
 
-    crc = s_crc ^ 0xFFFFFFFFUL;
+    /*第一重校验：网络收到的字节是否就是 meta 里那份*/
+    crc = s_crc ^ 0xFFFFFFFFUL;  /*算法约定：最终结果要再异或一次初值*/
     UART_Printf("[OTA] crc calc=0x%08lX expect=0x%08lX\r\n",
                 (unsigned long)crc, (unsigned long)expectCrc);
     if (crc != expectCrc)
@@ -490,7 +541,10 @@ static uint8_t OTA_FetchImage(uint32_t size, uint32_t expectCrc)
         return OTA_ERR_CRC;
     }
 
-    /*回读再算一遍：确认真写进了 Flash，而不是“以为写了”*/
+    /*第二重校验：把这些字节从 Flash 读回来再算一遍。
+     *第一重只证明"网上收到的没错"，证明不了"真的写进 Flash 了"——
+     *写保护、供电跌落、页编程半途失败都可能让写操作静默失效。
+     *两重都过才敢去写槽记录（记录 = 告诉 BootLoader 这份镜像可信）*/
     rbCrc = W25Q128_Crc32Range(OTA_IMG_BASE, size);
     if (rbCrc != crc)
     {
@@ -504,12 +558,23 @@ static uint8_t OTA_FetchImage(uint32_t size, uint32_t expectCrc)
   * 功    能：擦除槽 B 的全部 112 个扇区（含记录扇区）
   * 参    数：无
   * 返 回 值：1 = 全部擦完，0 = 某个扇区失败
-  * 补    充：逐扇区调用以便按扇区报进度、补 WIFI 心跳（底层只报 STORAGE 心跳）
+  * 补    充：逐扇区调用以便按扇区报进度、补 WIFI 心跳（底层只报 STORAGE 心跳）。
+  *
+  * ── 112 是怎么来的 ──
+  *   槽大小 0x70000(448KB) ÷ 扇区 0x1000(4KB) = 112。
+  *   注意这里擦的是【整槽】，包含首扇区里那条 32B 记录：
+  *   所以一旦开始下载，槽 B 的旧记录就先没了——下载失败后槽 B 只剩"没记录的垃圾"，
+  *   重跑一次成功才能恢复。这是有意为之：不先废掉旧记录，BootLoader 可能在
+  *   下载中途复位时把半份镜像当有效。
+  *
+  * ── 为什么不用"整片擦除"命令 ──
+  *   W25Q 有 0xC7 整片擦（十几秒）和 0x52/0xD8 块擦，但只有 4KB 扇区擦能给出
+  *   细粒度进度、并且每次擦完能补一次心跳；整片擦期间任务完全失联，看门狗会先动手。
   */
 static uint8_t OTA_EraseSlot(void)
 {
     uint32_t i;
-    uint32_t sectors = W25Q128_FW_SLOT_SIZE / W25Q128_SECTOR_SIZE;
+    uint32_t sectors = W25Q128_FW_SLOT_SIZE / W25Q128_SECTOR_SIZE;   /*448KB/4KB = 112*/
 
     for (i = 0UL; i < sectors; i++)
     {
@@ -518,7 +583,7 @@ static uint8_t OTA_EraseSlot(void)
             UART_Printf("[OTA] erase fail sector %lu\r\n", (unsigned long)i);
             return 0U;
         }
-        Watchdog_Heartbeat(WDT_TASK_WIFI);
+        Watchdog_Heartbeat(WDT_TASK_WIFI);   /*单扇区擦除几十 ms，112 次累计 4~5s，必须中途补报*/
         g_otaStatus.percent = (uint8_t)(20UL * (i + 1UL) / sectors);   /* 擦除段占 0~20 */
     }
     return 1U;
@@ -533,20 +598,22 @@ static uint8_t OTA_EraseSlot(void)
   */
 static uint8_t OTA_WriteRecord(uint32_t size, uint32_t crc, uint16_t ver)
 {
-    uint32_t hdr[8];
-    uint32_t rd[8];
+    uint32_t hdr[8];      /*8 字 = 32B，正好一条记录。槽基址是 4KB 对齐的，32B 不会跨页*/
+    uint32_t rd[8];       /*回读缓冲，和 hdr 同尺寸，方便逐字段比对*/
     uint8_t  i;
     uint32_t recCrc;
 
     for (i = 0U; i < 8U; i++)
     {
-        hdr[i] = 0xFFFFFFFFUL;
+        hdr[i] = 0xFFFFFFFFUL;   /*保留字节保持擦除态：写 0 反而会和"真实数据"混淆*/
     }
-    hdr[0] = W25Q128_FW_MAGIC;
-    hdr[1] = OTA_REC_FMT;
-    hdr[2] = (uint32_t)ver;
-    hdr[3] = size;
-    hdr[4] = crc;
+    hdr[0] = W25Q128_FW_MAGIC;   /*'FWSL'：BootLoader 靠它确认"这是一条槽记录"*/
+    hdr[1] = OTA_REC_FMT;        /*2 = 槽 B OTA 镜像（槽 A 备份是 1，两者不能混）*/
+    hdr[2] = (uint32_t)ver;      /*版本：主×256 + 次，v1.4 = 0x0104*/
+    hdr[3] = size;               /*镜像有效字节数，不含末尾补齐的 0xFF*/
+    hdr[4] = crc;                /*整包 CRC32，BootLoader 搬完要对这个数*/
+    /*记录自身 CRC 只覆盖前 20B：后 8B 保留位是 0xFF，
+     *如果算进去，将来改保留位含义时所有旧记录都会校验失败*/
     recCrc = OTA_Crc32(0xFFFFFFFFUL, (const uint8_t *)hdr, 20UL) ^ 0xFFFFFFFFUL;
     hdr[5] = recCrc;
 
@@ -554,6 +621,9 @@ static uint8_t OTA_WriteRecord(uint32_t size, uint32_t crc, uint16_t ver)
     {
         return 0U;
     }
+    /*回读五项逐字段比对，而不是只比 CRC：
+     *SPI 在供电抖动时可能"写进去了但内容变了"，只算 CRC 也有可能巧合相等；
+     *逐字段比对能定位到具体哪个字段坏，日志上更容易判断是写保护还是时序问题*/
     if (W25Q128_ReadData(W25Q128_FW_SLOT_B_ADDR, (uint8_t *)rd, 32UL) != HAL_OK)
     {
         return 0U;
@@ -649,9 +719,18 @@ uint8_t OTA_DownloadToSlotB(void)
 
     if (err == OTA_ERR_NONE)
     {
+        /*到这里：镜像写进槽 B 了、两重 CRC 都过了、槽记录也回读验证了。
+         *DONE 的真实含义是「槽 B 可搬」，不是「已经升级」：
+         *本函数不复位，也不碰内部 App 区，实际切换要等用户复位后由 BootLoader 做。
+         *GUI 的状态文案必须按这个口径写，否则用户会以为"点完就升级好了"。*/
         g_otaStatus.state   = OTA_ST_DONE;
         g_otaStatus.percent = 100U;
         g_otaStatus.got     = size;
+
+        /*向 BootLoader 递"下次上电请搬槽 B"的请求（24C02 页 0xE8，8 字节）。
+         *注意这条是"请求"不是"命令"：写失败时下面的状态仍然是 DONE，
+         *【已知取舍】这里只打日志不改状态——代价是用户看到"就绪"却复位后没反应，
+         *排查时先看串口有没有这一行 FAIL。要彻底解决就得把它做成独立错误码。*/
         if (BootFlag_RequestApply() == 0U)
         {
             UART_Printf("[OTA] boot apply flag set\r\n");

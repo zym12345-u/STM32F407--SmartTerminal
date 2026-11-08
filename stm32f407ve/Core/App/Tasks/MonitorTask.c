@@ -46,15 +46,25 @@ void StartMonitorTask(void *argument)
              * 确认失败只重试 3 次，避免 EEPROM 异常时每 500ms 无休止写*/
             if (s_bootConfirmed == 0U)
             {
+                /*计时只在"所有任务都还在报心跳"的分支里累加：
+                 *如果某个任务已经死了，说明这版固件本来就不健康，
+                 *不能在这种状态下给 BootLoader 盖章，否则回滚机制等于失效*/
                 if (s_bootElapsedMs < BOOT_CONFIRM_DELAY_MS)
                 {
                     s_bootElapsedMs = (uint16_t)(s_bootElapsedMs + MONITOR_INTERVAL_MS);
                 }
+                /*满 3 秒才确认，且最多重试 3 次：
+                 *3 秒是为了跳过"外设初始化阶段"——刚上电时 I2C/SPI/屏还没配好，
+                 *这时候能跑不代表功能正常；3 次重试是防 EEPROM 偶发写失败时
+                 *每 500ms 无休止地写（24C02 的寿命经不起这么磨）*/
                 if ((s_bootElapsedMs >= BOOT_CONFIRM_DELAY_MS) &&
                     (s_confirmRetry < BOOT_CONFIRM_RETRY_MAX))
                 {
                     uint8_t r = BootFlag_ConfirmBoot();
 
+                    /*返回值三态：0=读写失败(要重试)、1=没有待确认状态(普通启动)、
+                     *2=确认成功。1 和 2 都算"这件事结束了"，不能只认 2——
+                     *否则普通启动（绝大多数）会一直重试到上限，白白多读几次 EEPROM*/
                     if (r != 0U)
                     {
                         s_bootConfirmed = 1U;

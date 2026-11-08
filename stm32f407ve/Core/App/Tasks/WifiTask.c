@@ -122,14 +122,25 @@ void Wifi_PostJoin(const char *ssid, const char *pwd)
 void Wifi_PostOta(void)
 {
     WifiCmd_t cmd;
+
+    /*整条命令【按值】投递，不 malloc 指针：
+     *队列里存的是 100 字节的结构体副本，GUI 投完就可以直接返回，
+     *不存在"谁负责 free"的问题，也不会因为 GUI 任务栈上的变量被回收而踩空。
+     *代价是每次投递多拷 100 字节，但 OTA 一天也点不了几次。*/
     memset(&cmd, 0, sizeof(cmd));
     cmd.type = WIFI_CMD_OTA;
+
     if (s_cmdQ != NULL)
     {
+        /*超时传 0：GUI 侧（lv_timer 上下文）绝对不能阻塞等队列。
+         *队列深度只有 2，理论上连点两下就满——GUI 的按钮禁用是主要防护，
+         *这里投递失败时【不额外处理】，属于已知的静默丢弃（OTA 页会停在 Idle）*/
         (void)osMessageQueuePut(s_cmdQ, &cmd, 0U, 0U);
     }
     else
     {
+        /*任务还没创建（s_cmdQ 未初始化）：直接把原因写进共享状态，
+         *GUI 轮询到 FAIL 会显示"队列不可用"，比什么都不发生强*/
         OTA_ReportFail(OTA_ERR_QUEUE);
     }
 }

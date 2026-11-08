@@ -434,6 +434,17 @@ uint8_t ESP8266_TcpConnect(const char *host, uint16_t port)
         return 0U;
     }
 
+    /*这四条的顺序不能换，每一条都在为下一条铺路：
+     *1) CIPCLOSE：先把可能残留的旧连接关掉。没连接时模块回 ERROR，
+     *   属于正常，所以用 (void) 吞掉返回值
+     *2) CIPMODE=0：普通模式。透传模式(1)下收到的数据不进 +IPD 帧，直接往串口吐，
+     *   二进制流里混着 "CLOSED" 之类文本时根本无法分帧
+     *3) CIPRECVMODE=0：关"被动接收"。被动模式下数据先存在模块内部，
+     *   要 AT+CIPRECVDATA 去取，多一层缓冲就多一处溢出风险；
+     *   老固件没有这条命令会回 ERROR，同样忽略
+     *4) CIPMUX=0：单连接。多连接时 +IPD 带连接号（+IPD,0,1024:），
+     *   解析要多一个字段；本功能同时只用一条连接，没必要开
+     *   这一条失败就必须返回：后面 CIPSTART 的格式依赖它*/
     (void)ESP8266_Cmd("AT+CIPCLOSE\r\n", "OK", 1000U);       /* 没连接时回 ERROR，忽略 */
     (void)ESP8266_Cmd("AT+CIPMODE=0\r\n", "OK", 2000U);      /* 0=普通模式，1=透传(收不到+IPD) */
     (void)ESP8266_Cmd("AT+CIPRECVMODE=0\r\n", "OK", 2000U);  /* 关被动接收；老固件不支持，忽略 */
@@ -442,9 +453,14 @@ uint8_t ESP8266_TcpConnect(const char *host, uint16_t port)
         return 0U;
     }
 
+    /*每条 Cmd 内部都会 Flush 接收环，所以必须在这一步之后（而不是之前）
+     *重置 +IPD 解析状态，避免上一条连接残留的半个包头被当成本次的数据*/
     ESP8266_TcpRxReset();                                     /* 新连接从干净的解析状态开始 */
     (void)snprintf(cmd, sizeof(cmd), "AT+CIPSTART=\"TCP\",\"%s\",%u\r\n",
                    host, (unsigned)port);
+    /*10s 是这么来的：模块要先做 DNS 解析（公网域名可能 1~2s），
+     *再做 TCP 三次握手；局域网点分 IP 通常几十毫秒就回 OK，
+     *给 10s 是为了覆盖"PC 刚开机、防火墙弹窗没点允许"这类慢场景*/
     return ESP8266_Cmd(cmd, "OK", 10000U);                    /* DNS + 握手，给 10s 余量 */
 }
 
@@ -458,16 +474,27 @@ uint8_t ESP8266_TcpSend(const uint8_t *data, uint16_t len)
 {
     char cmd[24];
 
+    /*2048 是 AT 固件对单次 CIPSEND 的上限（不同版本可能写死 2048），
+     *超了直接不发：发出去模块只会回 ERROR，还白等 3 秒。
+     *本条 OTA 里最长的一帧是 HTTP GET 请求，约 100 字节，远不到上限*/
     if ((data == NULL) || (len == 0U) || (len > 2048U))
     {
         return 0U;
     }
 
     (void)snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%u\r\n", (unsigned)len);
+    /*模块收到 CIPSEND 后回一个 ">" 提示符，表示"接下来 len 个字节是数据"。
+     *这个 ">" 是输入提示符，不是最终应答——真正的完成标志是后面的 "SEND OK"*/
     if (ESP8266_Cmd(cmd, ">", 3000U) == 0U)                   /* '>' 才是「可以发正文」的信号 */
     {
         return 0U;
     }
+    /*这里【故意不等 SEND OK】：
+     *等它就得再调一次 ESP8266_Cmd，而 Cmd 进来的第一件事是 Flush 接收环——
+     *服务器可能已经把 HTTP 应答（+IPD 包）发过来了，一 Flush 就全没了。
+     *代价是丢包时不再自动重发，由上层 5s 无进展超时兜底。
+     *另外这里用 HAL_UART_Transmit 直接发，不走 UART_Printf：
+     *后者是给调试口(USART1)用的，且会加格式化与互斥锁开销*/
     if (HAL_UART_Transmit(&huart_esp, (uint8_t *)data, len, 3000U) != HAL_OK)
     {
         return 0U;
@@ -514,19 +541,23 @@ uint16_t ESP8266_TcpRead(uint8_t *out, uint16_t max, uint32_t waitMs)
 
         if (s_ipdState == 2U)
         {
-            /*正文阶段：按剩余长度取，取满一包才回到找前缀*/
+            /*正文阶段：按剩余长度取，取满一包才回到找前缀。
+             *want 取 min(本包剩余, 调用方还能接多少)：
+             *多取一个字节就会把下一包的包头当正文交出去，整条流从此错位*/
             uint32_t want = s_ipdRemain;
 
             if (want > (uint32_t)(max - got))
             {
                 want = (uint32_t)(max - got);
             }
+            /*用 Pop 而不是 Copy：这里是"取走"，数据交出去后环里不再保留。
+             *用 Copy 的话同一段 512B 会被反复读到，环永远不空，下载卡在第 1 个块*/
             n = ESP_RingPop(&out[got], (uint16_t)want);
             if (n > 0U)
             {
                 got          = (uint16_t)(got + n);
                 s_ipdRemain -= (uint32_t)n;
-                if (s_ipdRemain == 0UL)
+                if (s_ipdRemain == 0UL)     /*一包收完，回到"找下一个 +IPD,"*/
                 {
                     s_ipdState = 0U;
                     s_ipdMatch = 0U;
@@ -540,11 +571,14 @@ uint16_t ESP8266_TcpRead(uint8_t *out, uint16_t max, uint32_t waitMs)
             start = HAL_GetTick();
             if (s_ipdState == 0U)
             {
-                /*扫描 "+IPD,"：逐字符匹配，失败时用 KMP 思路回退到 1 或 0*/
+                /*扫描 "+IPD,"：逐字符匹配，失败时用 KMP 思路回退到 1 或 0。
+                 *为什么"回退到 1"：已经匹配了 "+I"，又来一个 '+'，
+                 *说明前面那个 '+' 是假的，但当前这个 '+' 可能是 "+IPD" 的开头。
+                 *正文里出现 "+IPD" 字样也不会误判，因为正文阶段是按长度取的，不走这里*/
                 if (b == pfx[s_ipdMatch])
                 {
                     s_ipdMatch++;
-                    if (s_ipdMatch >= 5U)
+                    if (s_ipdMatch >= 5U)     /*"+" "I" "P" "D" "," 全中，进入读长度*/
                     {
                         s_ipdState  = 1U;
                         s_ipdLen    = 0UL;
@@ -566,7 +600,7 @@ uint16_t ESP8266_TcpRead(uint8_t *out, uint16_t max, uint32_t waitMs)
                 }
                 else if ((b == ':') && (s_ipdDigits > 0U))
                 {
-                    if (s_ipdLen == 0UL)
+                    if (s_ipdLen == 0UL)      /*"0 字节的包"没有意义，直接重来*/
                     {
                         s_ipdState = 0U;
                         s_ipdMatch = 0U;
@@ -574,7 +608,7 @@ uint16_t ESP8266_TcpRead(uint8_t *out, uint16_t max, uint32_t waitMs)
                     else
                     {
                         s_ipdRemain = s_ipdLen;
-                        s_ipdState  = 2U;
+                        s_ipdState  = 2U;     /*下一轮开始取正文*/
                     }
                 }
                 else
@@ -586,7 +620,11 @@ uint16_t ESP8266_TcpRead(uint8_t *out, uint16_t max, uint32_t waitMs)
             continue;
         }
 
-        /*环里暂时没数据：等 1ms 让出 CPU；超过 waitMs 返回已取到的部分*/
+        /*环里暂时没数据：等 1ms 让出 CPU；超过 waitMs 返回已取到的部分。
+         *为什么 osDelay 而不是空转：WifiTask 优先级 Normal，空转会饿死同优先级
+         *的 GuiTask（界面会卡）；1ms 的粒度足够追上 4MHz 串口的数据速率。
+         *每 500ms 补报一次心跳：等待网络时可能长时间一个字节都收不到，
+         *但任务本身是活着的，不能因此被判死触发 IWDG 复位*/
         if ((uint32_t)(HAL_GetTick() - start) >= waitMs)
         {
             break;

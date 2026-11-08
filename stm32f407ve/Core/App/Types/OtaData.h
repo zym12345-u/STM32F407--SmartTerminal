@@ -37,14 +37,21 @@ typedef enum
     OTA_ERR_QUEUE        /* WifiTask 命令队列不可用（堆分配失败等） */
 } OtaErr_t;
 
+/*字段类型都按"最小够用"选：percent 只要 0~100，uint8 足以，
+ *同时让整个结构只有 12 字节，读一半被打断的窗口尽量短。
+ *volatile 保证的是"每次真去内存读"，【不保证原子性】：
+ *GUI 若写 if (state==DONE && percent==100) 这种复合判断，
+ *可能读到"上一阶段的 percent + 下一阶段的 state"，所以 GUI 侧一律单字段判断。*/
 typedef struct
 {
     volatile uint8_t  state;     /* OtaState_t；WifiTask 写，GuiTask 读 */
     volatile uint8_t  err;       /* OtaErr_t，仅 FAIL 时有意义 */
     volatile uint8_t  percent;   /* 0~100，按阶段划分：擦除 0~20、元数据 20~25、下载 25~95、校验到 100 */
-    volatile uint16_t newVer;    /* 目标版本 (主<<8|次)，来自 app.meta；0=未知 */
+    volatile uint16_t newVer;    /* 目标版本 (主<<8|次)，来自 app.meta；0=未知。
+                                  *只在 DownloadToSlotB 开头清零，失败后保留上次的值，
+                                  *GUI 进页面时要自己判断该不该显示 */
     volatile uint32_t got;       /* 已收到字节数 */
-    volatile uint32_t total;     /* 镜像总字节数，来自 app.meta */
+    volatile uint32_t total;     /* 镜像总字节数，来自 app.meta；只在取到 meta 时写一次，之后不变 */
 } OtaStatus_t;
 
 extern OtaStatus_t g_otaStatus;
