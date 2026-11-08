@@ -1,6 +1,6 @@
 # STM32F407 环境监测智能终端
 
-基于 **STM32F407VET6 + FreeRTOS + LVGL** 的多任务环境监测终端：温湿度/光照采集、触摸屏 UI、WiFi 配网对时、RS485 Modbus RTU 从站、CAN 总线节点、独立看门狗任务健康监控。
+基于 **STM32F407VET6 + FreeRTOS + LVGL** 的多任务环境监测终端：温湿度/光照采集、触摸屏 UI、WiFi 配网对时、RS485 Modbus RTU 从站、CAN 总线节点、串口 IAP / WiFi OTA、独立看门狗任务健康监控。
 
 > 个人学习/求职项目。所有架构取舍均在代码注释中写明理由，欢迎 issue 交流。
 
@@ -63,6 +63,18 @@
 - **ESR 位段读错**：误把低 8 位的标志字节（EWGF/EPVF/BOFF/LEC）当 TEC 打印。健康总线下全是 0 看不出来，只有做故障注入（拔线进 warning→passive）时才暴露——`tec=51`（0x33 = EWGF|EPVF|LEC）物理上不可能，正是这个"不可能的值"暴露了 bug。已改用 CMSIS 宏 `CAN_ESR_TEC/REC`。
 - **接收结构体未清零**：`HAL_CAN_GetRxMessage` 只按 DLC 拷贝有效字节，`dlc<8` 时 `data[]` 尾部是栈垃圾；V1.4 命令处理器直接读 `data[0]/data[1]`，对端发 `dlc=1` 的帧可能误触发 LED。
 
+**V2.0（已验证，2026-11-08）**
+- **BootLoader**：内部 Flash 前 48KB，App 迁至 `0x08010000`；元数据 sector 3 改为追加记录（v3），掉电不留“已擦未写”裸窗
+- **串口 IAP**：上电 3s 窗口 + 屏按钮进入 60s 升级窗口；帧协议、整包 CRC32、断点续传、受控擦写，PC 端工具 `Tools/iap_upgrade.py`
+- **W25Q 双固件槽**：槽 A `0x00800000` 存当前 App 整区备份（448KB），槽 B `0x00871000` 存 OTA 镜像；32B 槽记录含 magic/格式/版本/大小/镜像 CRC/记录 CRC
+- **WiFi OTA**：ESP8266 HTTP 流式下载 `app.meta` / `app.bin` 到槽 B，`+IPD` 二进制分块落盘，下载后整包 CRC 校验
+- **搬运 / 回滚 / 确认**：BootLoader 先校验槽 A 整区 CRC，再把槽 B 搬到内部 App 区并回读双 CRC；连续 3 次上电未确认则自动回滚槽 A
+- **App 侧**：OTA 页显示 Current / New，下载成功自动置 24C02 `0xE8` 搬运请求；MonitorTask 全任务健康 3s 后确认启动
+
+### V2.0 实战踩坑（已修复）
+- **槽 A/B 记录扇区重叠**：原槽 B 基址 `0x00870000` 会让槽 B 的 4KB 记录扇区压住槽 A 448KB 备份的最后 4KB，写 OTA 记录即破坏槽 A 整区 CRC，回滚基线永久失效。已把槽 B 上移到 `0x00871000`；旧槽 A 备份和旧槽 B 镜像必须重新生成。
+- **Rollback 后元数据 size 语义**：回滚用的是槽 A 整区备份，`meta.size` 会记成 448KB 整区而不是实际 App 字节数；不影响启动，列入 V2.1 清理项。
+
 ## 任务一览
 
 | 任务 | 优先级 | 职责 |
@@ -80,8 +92,14 @@
 
 ## 构建
 
-- Keil MDK5（AC5 编译器），工程：`stm32f407ve/MDK-ARM/stm32f407ve.uvprojx`
-- 当前固件指标（V1.2 基线，V1.4 接入 CAN 后待重测）：`Code≈213KB RO≈78KB RW≈1KB ZI≈92.5KB`，FreeRTOS 堆 32KB、稳态余量 ≈18KB
+- Keil MDK5（AC5 编译器）
+  - App 工程：`stm32f407ve/MDK-ARM/stm32f407ve.uvprojx`
+  - BootLoader 工程：`stm32f407ve/MDK-ARM/BootLoader.uvprojx`
+- 当前固件指标（V2.0，2026-11-08 重测）：
+  - App：`Code=232532 (227.1KB) / RO=79624 (77.8KB) / RW=1156 (1.1KB) / ZI=113020 (110.4KB)`
+  - BootLoader：`Code=8140 (7.9KB) / RO=424 (0.4KB) / RW=20B / ZI=5476 (5.3KB)`，远低于 48KB 分区
+  - FreeRTOS 堆 32KB
+- OTA 工具：`Tools/iap_upgrade.py`（串口 IAP）、`Tools/ota_serve.py`（生成 `app.bin`/`app.meta` + 本地 HTTP 服务）
 
 ## 调试入口
 
@@ -89,15 +107,18 @@ USART1（板载 USB-TTL，115200）输出全部运行日志：boot 复位源、�
 
 ## Roadmap（远景）
 
-- OTA 升级：先串口 IAP（BootLoader / Flash 分区 / 固件校验 / 回滚），再叠加 MQTT 通道远程升级
-- SDIO/TF 卡、MQTT 上云
+- V2.1：OTA 产品化（服务器地址可配置、启动/手动检查更新、一键升级并自动复位、失败重试）
+- V2.2：MQTT 上云（传感器上报、下行命令、远程升级通知）
+- SDIO/TF 卡、文件日志
 
 ## 仓库结构
 
 ```
-stm32f407ve/          固件工程（CubeMX + Keil）
+stm32f407ve/
+  BootLoader/         BootLoader 工程（config/port/core 三层，无 HAL）
   Core/App/Tasks/     应用任务层
-  Core/App/Bsp/       板级驱动（RS485/ESP8266/IWDG/Flash/CAN/LCD/触摸/传感器）
+  Core/App/Bsp/       板级驱动（RS485/ESP8266/IWDG/Flash/CAN/LCD/触摸/传感器/OTA/W25Q128）
   Core/Src/           CubeMX 生成 + freertos.c 任务装配
   Middlewares/Third_Party/littlefs/  LittleFS 文件系统
+  Tools/              iap_upgrade.py（串口 IAP）/ ota_serve.py（OTA 包 + HTTP 服务）
 ```
