@@ -3253,6 +3253,16 @@
               <FilePath>..\Core\App\Bsp\OTA\bsp_OTA.h</FilePath>
             </File>
             <File>
+              <FileName>bsp_OtaCfg.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\OTA\bsp_OtaCfg.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_OtaCfg.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\App\Bsp\OTA\bsp_OtaCfg.h</FilePath>
+            </File>
+            <File>
               <FileName>bsp_bootflag.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Bsp\OTA\bsp_bootflag.c</FilePath>

@@ -56,15 +56,20 @@ typedef struct
 extern WifiScanState_t g_wifiScan;
 
 
-/* 命令码 1~3；GuiTask 填并投队列，WifiTask 读 */
-#define WIFI_CMD_SCAN   1U
-#define WIFI_CMD_JOIN   2U
-#define WIFI_CMD_OTA    3U                  /* 下载固件到 W25Q 槽 B，进度看 g_otaStatus */
+/* 命令码 1~5；GuiTask/CommandTask 填并投队列，WifiTask 读 */
+#define WIFI_CMD_SCAN          1U
+#define WIFI_CMD_JOIN          2U
+#define WIFI_CMD_OTA           3U   /* 下载固件到 W25Q 槽 B，进度看 g_otaStatus */
+#define WIFI_CMD_SET_OTA_CFG   4U   /* 写 /ota.conf，只有 WifiTask 能碰 LittleFS */
+#define WIFI_CMD_CHECK_OTA     5U   /* 只 GET app.meta 检查版本，下载仍要用户点 */
 typedef struct
 {
-    uint8_t type;                       /* 1=SCAN 2=JOIN 3=OTA；GuiTask 写，WifiTask 读 */
+    uint8_t type;                       /* 1=SCAN 2=JOIN 3=OTA 4=SET_OTA_CFG 5=CHECK_OTA */
     char    ssid[WIFI_SSID_LEN + 1U];   /* 目标热点名 0~32 字符，仅 JOIN 有效；GuiTask 写，WifiTask 读 */
     char    pwd[WIFI_PWD_LEN + 1U];     /* 密码 0~63 字符，仅 JOIN 有效；GuiTask 写，WifiTask 读 */
+    char    host[64];                   /* 服务器地址 1~63 字符，仅 SET_OTA_CFG 有效 */
+    uint16_t port;                      /* 服务器端口 1~65535，仅 SET_OTA_CFG 有效 */
+    uint8_t manual;                     /* 1=手动检查 0=上电静默检查，仅 CHECK_OTA 有效 */
 } WifiCmd_t;
 
 /* 事件 1~3；WifiTask 填并投队列，GuiTask 在 LVGL 定时器里轮询 */
@@ -100,6 +105,22 @@ void Wifi_PostJoin(const char *ssid, const char *pwd);
   * 补    充：下载进度/结果读 g_otaStatus；只能在本页 WiFi 已连接时发起，否则 err=OTA_ERR_WIFI
   */
 void Wifi_PostOta(void);
+
+/**
+  * 功    能：请求 WifiTask 保存 OTA 服务器地址到 LittleFS（非阻塞，投队列就返回）
+  * 参    数：host  服务器地址 1~63 字符；port  端口 1~65535
+  * 返 回 值：无
+  * 补    充：写文件由 WifiTask 完成；调用方任务绝不能自己碰 LittleFS
+  */
+void Wifi_PostSetOtaCfg(const char *host, uint16_t port);
+
+/**
+  * 功    能：请求 WifiTask 检查更新（只 GET app.meta，不下载）
+  * 参    数：manual  1=用户手动点 Check 0=上电静默检查
+  * 返 回 值：无
+  * 补    充：结果写 g_otaStatus.checkState/checkErr/checkVer；队列不可用时直接置 FAIL
+  */
+void Wifi_PostCheckOta(uint8_t manual);
 
 /*0 tick 超时，绝不阻塞 GUI；事件队列长度由 WifiTask_Create 决定*/
 /**

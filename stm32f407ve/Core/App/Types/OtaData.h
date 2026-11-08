@@ -37,8 +37,16 @@ typedef enum
     OTA_ERR_QUEUE        /* WifiTask 命令队列不可用（堆分配失败等） */
 } OtaErr_t;
 
-/*字段类型都按"最小够用"选：percent 只要 0~100，uint8 足以，
- *同时让整个结构只有 12 字节，读一半被打断的窗口尽量短。
+/*检查更新阶段 0~3；独立于下载状态，避免"检查中"被下载阶段文案覆盖*/
+typedef enum
+{
+    OTA_CHK_IDLE = 0,    /* 本次上电还没检查过 */
+    OTA_CHK_CHECKING,    /* 正在 GET app.meta */
+    OTA_CHK_DONE,        /* 检查完成，checkVer 为发现的新版本；0=已是最新 */
+    OTA_CHK_FAIL         /* 检查失败，原因见 checkErr */
+} OtaCheckState_t;
+
+/*字段类型都按"最小够用"选：percent 只要 0~100，uint8 足以。
  *volatile 保证的是"每次真去内存读"，【不保证原子性】：
  *GUI 若写 if (state==DONE && percent==100) 这种复合判断，
  *可能读到"上一阶段的 percent + 下一阶段的 state"，所以 GUI 侧一律单字段判断。*/
@@ -52,6 +60,12 @@ typedef struct
                                   *GUI 进页面时要自己判断该不该显示 */
     volatile uint32_t got;       /* 已收到字节数 */
     volatile uint32_t total;     /* 镜像总字节数，来自 app.meta；只在取到 meta 时写一次，之后不变 */
+    volatile uint8_t  rebootPending; /* 1=下载完成且搬运标志已写成功，3s 后自动复位；
+                                      *0=不复位（搬运标志写失败时停在 DONE，提示手动复位） */
+    volatile uint8_t  checkState;    /* OtaCheckState_t；检查进度，独立于下载 state */
+    volatile uint8_t  checkErr;      /* OtaErr_t，仅 checkState=FAIL 时有意义 */
+    volatile uint16_t checkVer;      /* 检查发现的更高版本；0=无更新/未知 */
+    volatile uint8_t  checkManual;   /* 1=手动 0=静默；GUI 据此决定是否显示 Checking... */
 } OtaStatus_t;
 
 extern OtaStatus_t g_otaStatus;

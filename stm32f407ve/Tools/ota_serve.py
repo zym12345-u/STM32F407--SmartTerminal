@@ -148,8 +148,10 @@ def main():
     print("[OTA] 目录    : %s" % serve_dir)
     print("[OTA] 地址    : http://%s:%d/app.bin" % (ip, args.port))
     print("")
-    print("把 Core/App/Bsp/OTA/bsp_OTA.h 里的 OTA_SRV_HOST 改成 \"%s\"" % ip)
-    print("改完重新编译并烧录 App，再在屏幕 WiFi OTA 页点 Download")
+    print("开发板服务器地址二选一（默认值见 bsp_OTA.h 的 OTA_SRV_HOST/PORT）：")
+    print("  1) 串口发送: otacfg %s %d" % (ip, args.port))
+    print("  2) 写 LittleFS /ota.conf: host=%s  port=%d 后复位" % (ip, args.port))
+    print("然后在屏幕 WiFi OTA 页点 Check，再点 Download")
     print("按 Ctrl+C 停止服务")
     print("")
 

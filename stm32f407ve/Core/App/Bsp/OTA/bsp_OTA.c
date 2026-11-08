@@ -5,7 +5,8 @@
  *   WifiTask 收到 OTA 命令 → 擦槽 B → GET app.meta → GET app.bin
  *   → 边收边写槽 B → 整包 CRC + 回读 CRC → 写槽记录（格式 2）
  *   → BootFlag_RequestApply()：24C02 页 0xE8 写“下次上电把槽 B 搬进 App 区”
- * 本文件【不会复位、也不会自己切换启动】：复位由用户按键触发，搬运由 BootLoader 做。
+ * 本文件【不切换启动】：下载成功且搬运标志写妥后延时 3s 复位（OTA_RebootToApply），
+ * 复位后的搬运与回滚由 BootLoader 做。
  * 下载失败只是这一次失败：槽 B 没记录、App 照常跑、24C02 也不留搬运标志。
  *
  * ── 与 BootLoader/core/ota2.c 的分工 ──
@@ -25,9 +26,13 @@
  *   都不写记录，槽 B 就是一块“没有记录的垃圾区”，BootLoader 绝不会拿它去覆盖 App。
  */
 #include "bsp_OTA.h"
+#include "bsp_OtaCfg.h"
 #include "bsp_bootflag.h"
 #include "OtaData.h"
 #include "bsp_ESP8266.h"
+#include "CanData.h"
+#include "main.h"          /* HAL_NVIC_SystemReset */
+#include "cmsis_os2.h"     /* osDelay：重试退避与复位前延时要让出 CPU */
 #include "usart.h"
 #include "bsp_IWDG.h"
 
@@ -44,6 +49,18 @@
 /*槽 B 的镜像区从槽基址 + 4KB 开始，最大 444KB*/
 #define OTA_IMG_BASE    (W25Q128_FW_SLOT_B_ADDR + W25Q128_FW_HDR_SIZE)
 #define OTA_IMG_MAX     W25Q128_FW_IMG_MAX
+
+/*取当前版本用的内部 Flash 元数据布局（与 GUI/BootLoader 保持一致）
+ *  [0] magic  [1] 格式版本  [2] 固件版本(主<<8|次)  [3] 镜像字节数  [4] 整包 CRC32 */
+#define OTA_META_ADDR     0x0800C000UL
+#define OTA_META_MAGIC    0x4154454DUL  /*'M''E''T''A'*/
+#define OTA_META_FMT      2UL           /*旧 v2 五字布局，只兼容读*/
+#define OTA_META_FMT_REC  3UL           /*追加记录：带记录自身 CRC*/
+#define OTA_META_SLOT     32UL          /*一条记录占 32 字节*/
+#define OTA_META_SLOTS    (0x4000UL / OTA_META_SLOT)  /*sector 3 共 16KB，512 条*/
+#define OTA_META_END      0x444E454DUL  /*'M''E''N''D'：镜像末尾标记*/
+#define OTA_APP_BASE      0x08010000UL
+#define OTA_APP_SIZE      0x00070000UL  /*448KB，与 BootLoader 的 APP_SIZE 同值*/
 
 /*这些缓冲必须是 static：WifiTask 栈只有 3KB，放栈上直接溢出*/
 static uint8_t  s_hdr[OTA_HDR_MAX];
@@ -64,6 +81,7 @@ static char *OTA_StrCaseStr(const char *hay, const char *needle);
 static uint8_t OTA_HttpGetStart(const char *path);
 static uint8_t OTA_ReadHeader(uint32_t *contentLen);
 static uint8_t OTA_FetchMeta(uint32_t *size, uint32_t *crc, uint16_t *ver);
+static uint8_t OTA_FetchMetaRetry(uint32_t *size, uint32_t *crc, uint16_t *ver);
 static uint8_t OTA_FetchImage(uint32_t size, uint32_t expectCrc);
 static uint8_t OTA_EraseSlot(void);
 static uint8_t OTA_WriteRecord(uint32_t size, uint32_t crc, uint16_t ver);
@@ -155,17 +173,21 @@ static char *OTA_StrCaseStr(const char *hay, const char *needle)
   */
 static uint8_t OTA_HttpGetStart(const char *path)
 {
+    OtaServerCfg_t cfg;
     char req[192];
     uint16_t len;
 
-    if (ESP8266_TcpConnect(OTA_SRV_HOST, OTA_SRV_PORT) == 0U)
+    /*每次请求都重新读缓存：用户在 OTA 页前改了地址，下一次请求就生效*/
+    OTA_Config_Get(&cfg);
+
+    if (ESP8266_TcpConnect(cfg.host, cfg.port) == 0U)
     {
         return 0U;
     }
 
     (void)snprintf(req, sizeof(req),
                    "GET %s HTTP/1.1\r\nHost: %s:%u\r\nConnection: close\r\n\r\n",
-                   path, OTA_SRV_HOST, (unsigned)OTA_SRV_PORT);
+                   path, cfg.host, (unsigned)cfg.port);
     len = (uint16_t)strlen(req);
     return ESP8266_TcpSend((const uint8_t *)req, len);
 }
@@ -199,6 +221,9 @@ static uint8_t OTA_ReadHeader(uint32_t *contentLen)
     while ((uint32_t)(HAL_GetTick() - start) < 5000U)   /*总上限 5s，防止服务端半死不活*/
     {
         uint16_t r;
+
+        /*头最多等 5s，超过 IWDG 3s 判死线，循环里必须补心跳*/
+        Watchdog_Heartbeat(WDT_TASK_WIFI);
 
         if (n >= OTA_HDR_MAX)
         {
@@ -313,6 +338,8 @@ static uint8_t OTA_FetchMeta(uint32_t *size, uint32_t *crc, uint16_t *ver)
         uint16_t want = (uint16_t)(contentLen - (uint32_t)m);
         uint16_t r;
 
+        Watchdog_Heartbeat(WDT_TASK_WIFI);
+
         if (want > (uint16_t)(OTA_META_MAX - 1U - m))
         {
             want = (uint16_t)(OTA_META_MAX - 1U - m);
@@ -372,6 +399,55 @@ static uint8_t OTA_FetchMeta(uint32_t *size, uint32_t *crc, uint16_t *ver)
     *size = (uint32_t)sz;
     *crc  = (uint32_t)cr;
     return OTA_ERR_NONE;
+}
+
+/**
+  * 功    能：带心跳的分段延时（500ms 一步）
+  * 参    数：ms  延时时长
+  * 返 回 值：无
+  * 补    充：IWDG 判死线 3s，整段 3s 的退避不能一口气等，必须中途补报
+  */
+static void OTA_Delay(uint32_t ms)
+{
+    while (ms > 0U)
+    {
+        uint32_t step = (ms > 500U) ? 500U : ms;
+
+        (void)osDelay(step);
+        Watchdog_Heartbeat(WDT_TASK_WIFI);
+        ms -= step;
+    }
+}
+
+/**
+  * 功    能：取 app.meta，失败最多重试到 3 次（退避 1s / 3s）
+  * 参    数：size/crc/ver  同 OTA_FetchMeta
+  * 返 回 值：OTA_ERR_NONE 或最后一次的错误码
+  * 补    充：只重试廉价的 meta 请求；镜像下载不自动重试，避免故障时间翻倍
+  */
+static uint8_t OTA_FetchMetaRetry(uint32_t *size, uint32_t *crc, uint16_t *ver)
+{
+    uint8_t attempt;
+    uint8_t err = OTA_ERR_META;
+
+    for (attempt = 1U; attempt <= 3U; attempt++)
+    {
+        err = OTA_FetchMeta(size, crc, ver);
+        if (err == OTA_ERR_NONE)
+        {
+            return OTA_ERR_NONE;
+        }
+        if (attempt < 3U)
+        {
+            uint32_t waitMs = (attempt == 1U) ? 1000U : 3000U;
+
+            UART_Printf("[OTA] meta retry %u/3 after %lus\r\n",
+                        (unsigned)(attempt + 1U), (unsigned long)(waitMs / 1000U));
+            OTA_Delay(waitMs);
+        }
+    }
+    UART_Printf("[OTA] meta failed after 3 attempts, err=%u\r\n", (unsigned)err);
+    return err;
 }
 
 /**
@@ -641,6 +717,164 @@ static uint8_t OTA_WriteRecord(uint32_t size, uint32_t crc, uint16_t ver)
 }
 
 /**
+  * 功    能：取当前固件版本：元数据可信就用它，否则退回 CanData.h 的编译期常量
+  * 参    数：ver  输出 (主<<8|次)，不能为空
+  * 返 回 值：1 = 读自 sector 3 元数据；0 = 用编译期常量
+  * 补    充：判据与 GUI 原有实现/BootLoader meta_read 一致：magic + 记录格式 +
+  *            大小合理 + 记录自身 CRC + 镜像末尾 'MEND' 标记。
+  *            Keil 直接烧 App 时不会更新 sector 3，旧元数据会留在那儿，
+  *            标记不在就说明这份元数据不是当前镜像的，必须退回编译期版本。
+  */
+uint8_t OTA_GetCurrentVer(uint16_t *ver)
+{
+    uint32_t i;
+    uint32_t addr;
+    uint32_t size = 0UL;
+    uint32_t v    = 0UL;
+    uint8_t  found = 0U;
+
+    if (ver == NULL)
+    {
+        return 0U;
+    }
+    *ver = (uint16_t)((((uint16_t)CAN_FW_VER_MAJOR & 0xFFU) << 8U) |
+                      ((uint16_t)CAN_FW_VER_MINOR & 0xFFU));
+
+    for (i = 0UL; i < OTA_META_SLOTS; i++)
+    {
+        addr = OTA_META_ADDR + (i * OTA_META_SLOT);
+        if (*(volatile uint32_t *)addr != OTA_META_MAGIC)
+        {
+            continue;
+        }
+        if (*(volatile uint32_t *)(addr + 4UL) != OTA_META_FMT_REC)
+        {
+            continue;
+        }
+        size = *(volatile uint32_t *)(addr + 12UL);
+        if ((size < 8UL) || (size > OTA_APP_SIZE) || ((size & 3UL) != 0UL))
+        {
+            continue;
+        }
+        if ((OTA_Crc32(0xFFFFFFFFUL, (const uint8_t *)addr, 20UL) ^ 0xFFFFFFFFUL) !=
+            *(volatile uint32_t *)(addr + 20UL))
+        {
+            continue;   /*掉电写了一半的记录，不算数*/
+        }
+        v     = *(volatile uint32_t *)(addr + 8UL);
+        found = 1U;     /*继续往后扫，最后一条才是最新的*/
+    }
+
+    if (found != 0U)
+    {
+        if ((size < OTA_APP_SIZE) &&
+            (*(volatile uint32_t *)(OTA_APP_BASE + size) != OTA_META_END))
+        {
+            return 0U;  /*标记不在：元数据不是当前这份镜像的*/
+        }
+        *ver = (uint16_t)((((v >> 8U) & 0xFFUL) << 8U) | (v & 0xFFUL));
+        return 1U;
+    }
+
+    /*旧 v2 五字布局兼容：0 偏移处*/
+    if (*(volatile uint32_t *)OTA_META_ADDR != OTA_META_MAGIC)
+    {
+        return 0U;
+    }
+    if (*(volatile uint32_t *)(OTA_META_ADDR + 4UL) != OTA_META_FMT)
+    {
+        return 0U;
+    }
+    v    = *(volatile uint32_t *)(OTA_META_ADDR + 8UL);
+    size = *(volatile uint32_t *)(OTA_META_ADDR + 12UL);
+    if ((size < 8UL) || (size > OTA_APP_SIZE) || ((size & 3UL) != 0UL))
+    {
+        return 0U;
+    }
+    if ((size < OTA_APP_SIZE) &&
+        (*(volatile uint32_t *)(OTA_APP_BASE + size) != OTA_META_END))
+    {
+        return 0U;
+    }
+
+    *ver = (uint16_t)((((v >> 8U) & 0xFFUL) << 8U) | (v & 0xFFUL));
+    return 1U;
+}
+
+/**
+  * 功    能：只 GET /app.meta 检查是否有更高版本：不擦槽、不下载、不写记录
+  * 参    数：newVer  输出发现的更高版本；无更新或失败时为 0
+  * 返 回 值：OTA_ERR_NONE = 检查完成；其它 = 失败原因
+  * 补    充：仅 WifiTask 调用；meta 请求最多 3 次（1s/3s 退避）；
+  *            版本比较按 (主<<8|次)，相等或更低都算“已是最新”，不提示降级
+  */
+uint8_t OTA_CheckUpdate(uint16_t *newVer)
+{
+    uint32_t size = 0UL;
+    uint32_t crc  = 0UL;
+    uint16_t ver  = 0U;
+    uint16_t cur  = 0U;
+    uint8_t  err;
+
+    if (newVer != NULL)
+    {
+        *newVer = 0U;
+    }
+
+    err = OTA_FetchMetaRetry(&size, &crc, &ver);
+    if (err != OTA_ERR_NONE)
+    {
+        return err;
+    }
+    if (ver == 0U)
+    {
+        return OTA_ERR_META;    /* meta 缺 version，不能当作“最新” */
+    }
+
+    (void)OTA_GetCurrentVer(&cur);
+
+    if (ver > cur)
+    {
+        if (newVer != NULL)
+        {
+            *newVer = ver;
+        }
+        UART_Printf("[OTA] check cur=%u.%u new=%u.%u -> update available\r\n",
+                    (unsigned)(cur >> 8U), (unsigned)(cur & 0xFFU),
+                    (unsigned)(ver >> 8U), (unsigned)(ver & 0xFFU));
+    }
+    else
+    {
+        UART_Printf("[OTA] check cur=%u.%u new=%u.%u -> up to date\r\n",
+                    (unsigned)(cur >> 8U), (unsigned)(cur & 0xFFU),
+                    (unsigned)(ver >> 8U), (unsigned)(ver & 0xFFU));
+    }
+    (void)size;
+    (void)crc;
+    return OTA_ERR_NONE;
+}
+
+/**
+  * 功    能：下载成功并写妥搬运标志后，延时 3s 自动复位交给 BootLoader
+  * 参    数：无
+  * 返 回 值：无，NVIC 复位不返回
+  * 补    充：仅 WifiTask 调用；3s 内每 500ms 补一次 WiFi 心跳；
+  *            复位前必须已经确认 BootFlag_RequestApply() 成功，否则不能调用本函数
+  */
+void OTA_RebootToApply(void)
+{
+    uint8_t i;
+
+    UART_Printf("[OTA] reboot to apply in 3s\r\n");
+    for (i = 0U; i < 6U; i++)
+    {
+        (void)osDelay(500U);
+        Watchdog_Heartbeat(WDT_TASK_WIFI);
+    }
+    HAL_NVIC_SystemReset();
+}
+
+/**
   * 功    能：OTA 失败登记（不阻塞、不关连接，供 WifiTask 在“还没开始”时调用）
   * 参    数：err  OtaErr_t
   * 返 回 值：无
@@ -658,26 +892,30 @@ void OTA_ReportFail(uint8_t err)
   * 功    能：OTA 主流程：擦槽 B → 取 meta → 下载镜像 → 双重校验 → 写记录
   * 参    数：无
   * 返 回 值：1 = 成功；0 = 失败
-  * 补    充：仅 WifiTask 调用；成功也只是“槽 B 就绪”，不会自动复位
+  * 补    充：仅 WifiTask 调用；成功是“槽 B 就绪 + 搬运标志已写”，
+  *            此时 rebootPending=1，由 WifiTask 调 OTA_RebootToApply() 完成 3s 复位
   */
 uint8_t OTA_DownloadToSlotB(void)
 {
+    OtaServerCfg_t cfg;
     uint32_t size = 0UL;
     uint32_t crc  = 0UL;
     uint16_t ver  = 0U;
     uint8_t  err  = OTA_ERR_NONE;
     uint32_t t0;
 
-    g_otaStatus.state   = OTA_ST_ERASE;
-    g_otaStatus.err     = OTA_ERR_NONE;
-    g_otaStatus.percent = 0U;
-    g_otaStatus.newVer  = 0U;
-    g_otaStatus.got     = 0UL;
-    g_otaStatus.total   = 0UL;
+    g_otaStatus.state         = OTA_ST_ERASE;
+    g_otaStatus.err           = OTA_ERR_NONE;
+    g_otaStatus.percent       = 0U;
+    g_otaStatus.newVer        = 0U;
+    g_otaStatus.got           = 0UL;
+    g_otaStatus.total         = 0UL;
+    g_otaStatus.rebootPending = 0U;
     t0 = HAL_GetTick();
 
+    OTA_Config_Get(&cfg);
     UART_Printf("\r\n[OTA] download start: %s:%u %s\r\n",
-                OTA_SRV_HOST, (unsigned)OTA_SRV_PORT, OTA_BIN_PATH);
+                cfg.host, (unsigned)cfg.port, OTA_BIN_PATH);
 
     if (W25Q128_ReadJedecId() != W25Q128_JEDEC_ID_EXPECT)
     {
@@ -691,7 +929,7 @@ uint8_t OTA_DownloadToSlotB(void)
     {
         g_otaStatus.state   = OTA_ST_META;
         g_otaStatus.percent = 20U;
-        err = OTA_FetchMeta(&size, &crc, &ver);
+        err = OTA_FetchMetaRetry(&size, &crc, &ver);
 
         if (err == OTA_ERR_NONE)
         {
@@ -723,20 +961,22 @@ uint8_t OTA_DownloadToSlotB(void)
          *DONE 的真实含义是「槽 B 可搬」，不是「已经升级」：
          *本函数不复位，也不碰内部 App 区，实际切换要等用户复位后由 BootLoader 做。
          *GUI 的状态文案必须按这个口径写，否则用户会以为"点完就升级好了"。*/
-        g_otaStatus.state   = OTA_ST_DONE;
-        g_otaStatus.percent = 100U;
-        g_otaStatus.got     = size;
+        g_otaStatus.state    = OTA_ST_DONE;
+        g_otaStatus.percent  = 100U;
+        g_otaStatus.got      = size;
+        g_otaStatus.checkVer = 0U;   /*升级包已在槽 B，主屏不再提示"有新版本"*/
 
         /*向 BootLoader 递"下次上电请搬槽 B"的请求（24C02 页 0xE8，8 字节）。
-         *注意这条是"请求"不是"命令"：写失败时下面的状态仍然是 DONE，
-         *【已知取舍】这里只打日志不改状态——代价是用户看到"就绪"却复位后没反应，
-         *排查时先看串口有没有这一行 FAIL。要彻底解决就得把它做成独立错误码。*/
+         *必须先确认写成功再把 rebootPending 置 1：
+         *写失败时停在 DONE、不自动复位，否则会复位回旧固件却假装升级完成。*/
         if (BootFlag_RequestApply() == 0U)
         {
+            g_otaStatus.rebootPending = 1U;
             UART_Printf("[OTA] boot apply flag set\r\n");
         }
         else
         {
+            g_otaStatus.rebootPending = 0U;
             UART_Printf("[OTA] boot apply flag write FAIL\r\n");
         }
         UART_Printf("[OTA] PASS, slot B ready (%lu ms)\r\n",

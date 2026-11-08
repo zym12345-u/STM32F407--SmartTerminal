@@ -9,6 +9,7 @@
 
 #include "bsp_ESP8266.h"
 #include "bsp_OTA.h"
+#include "bsp_OtaCfg.h"
 #include "OtaData.h"
 #include "bsp_WifiStore.h"
 #include "bsp_WifiStoreLfs.h"
@@ -28,6 +29,7 @@
 #define FIRST_SYNC_TRIES     20U     /* 首次对时最多轮询 20 次 x1s */
 #define RESYNC_PERIOD_MS     (30U * 60U * 1000U)
 #define RECONNECT_PERIOD_MS  10000U  /* 掉线后自动重连间隔 */
+#define OTA_BOOT_CHECK_DELAY_MS 60000U  /* 首次联网后静默检查更新的延时：每 boot 最多一次 */
 
 
 /*任务间队列与共享状态*/
@@ -46,6 +48,13 @@ static char s_resp[2048];
 static WifiCred_t s_cred;
 static uint8_t    s_haveCred = 0U;
 static uint8_t    s_connected = 0U;
+
+/*上电静默检查：从"首次连接成功"起算 60s；60s 内掉线则重新等下次连上。
+ *s_bootChecked 保证每次上电最多查一次，失败也不重试。*/
+static uint32_t s_bootConnTick = 0U;
+static uint8_t  s_bootArmed = 0U;
+static uint8_t  s_bootChecked = 0U;
+static uint8_t  s_prevConnected = 0U;
 
 /*配网/联网状态机，g_wifiScan.status 迁移
  * 状态             含义         进入条件                    超时
@@ -124,9 +133,9 @@ void Wifi_PostOta(void)
     WifiCmd_t cmd;
 
     /*整条命令【按值】投递，不 malloc 指针：
-     *队列里存的是 100 字节的结构体副本，GUI 投完就可以直接返回，
+     *队列里存的是 WifiCmd_t 的结构体副本，GUI 投完就可以直接返回，
      *不存在"谁负责 free"的问题，也不会因为 GUI 任务栈上的变量被回收而踩空。
-     *代价是每次投递多拷 100 字节，但 OTA 一天也点不了几次。*/
+     *代价是每次投递多拷一份结构体，但 OTA 一天也点不了几次。*/
     memset(&cmd, 0, sizeof(cmd));
     cmd.type = WIFI_CMD_OTA;
 
@@ -142,6 +151,61 @@ void Wifi_PostOta(void)
         /*任务还没创建（s_cmdQ 未初始化）：直接把原因写进共享状态，
          *GUI 轮询到 FAIL 会显示"队列不可用"，比什么都不发生强*/
         OTA_ReportFail(OTA_ERR_QUEUE);
+    }
+}
+
+/**
+  * 功    能：请求 WifiTask 保存 OTA 服务器地址：投一条命令就返回
+  * 参    数：host  服务器地址 1~63 字符；port  端口 1~65535
+  * 返 回 值：无
+  * 补    充：LittleFS 只有 WifiTask 能写；队列不可用时静默丢弃并打日志
+  */
+void Wifi_PostSetOtaCfg(const char *host, uint16_t port)
+{
+    WifiCmd_t cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.type = WIFI_CMD_SET_OTA_CFG;
+    cmd.port = port;
+    if (host != NULL)
+    {
+        strncpy(cmd.host, host, sizeof(cmd.host) - 1U);
+    }
+
+    if (s_cmdQ != NULL)
+    {
+        (void)osMessageQueuePut(s_cmdQ, &cmd, 0U, 0U);
+    }
+    else
+    {
+        UART_Printf("[WIFI] PostSetOtaCfg dropped: cmdQ NULL\r\n");
+    }
+}
+
+/**
+  * 功    能：请求 WifiTask 检查更新：投一条命令就返回，结果写 g_otaStatus
+  * 参    数：manual  1=用户手动点 Check 0=上电静默检查
+  * 返 回 值：无
+  * 补    充：队列不可用时直接把检查状态置 FAIL，GUI 能从 checkErr 看出原因
+  */
+void Wifi_PostCheckOta(uint8_t manual)
+{
+    WifiCmd_t cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.type = WIFI_CMD_CHECK_OTA;
+    cmd.manual = (manual != 0U) ? 1U : 0U;
+
+    if (s_cmdQ != NULL)
+    {
+        (void)osMessageQueuePut(s_cmdQ, &cmd, 0U, 0U);
+    }
+    else
+    {
+        g_otaStatus.checkManual = cmd.manual;
+        g_otaStatus.checkErr    = OTA_ERR_QUEUE;
+        g_otaStatus.checkState  = OTA_CHK_FAIL;
+        UART_Printf("[WIFI] PostCheckOta dropped: cmdQ NULL\r\n");
     }
 }
 
@@ -594,6 +658,64 @@ static void DoJoinCmd(const WifiCmd_t *cmd)
 }
 
 
+/**
+  * 功    能：执行一次检查更新，结果写 g_otaStatus 的 checkState/checkErr/checkVer
+  * 参    数：manual  1=手动 0=上电静默
+  * 返 回 值：无
+  * 补    充：只 GET app.meta；检查期间补 WIFI 心跳（最长十几秒）；
+  *            静默检查失败只打日志，不弹窗
+  */
+static void DoCheckOta(uint8_t manual)
+{
+    uint16_t ver = 0U;
+    uint8_t  err;
+
+    g_otaStatus.checkManual = (manual != 0U) ? 1U : 0U;
+    g_otaStatus.checkErr    = OTA_ERR_NONE;
+    g_otaStatus.checkVer    = 0U;
+    g_otaStatus.checkState  = OTA_CHK_CHECKING;
+
+    if (manual != 0U)
+    {
+        UART_Printf("[OTA] check start manual\r\n");
+    }
+    else
+    {
+        UART_Printf("[OTA] check start boot\r\n");
+    }
+
+    if (s_connected == 0U)
+    {
+        err = OTA_ERR_WIFI;
+    }
+    else
+    {
+        err = OTA_CheckUpdate(&ver);
+    }
+
+    if (err == OTA_ERR_NONE)
+    {
+        g_otaStatus.checkVer   = ver;
+        g_otaStatus.checkState = OTA_CHK_DONE;
+    }
+    else
+    {
+        UART_Printf("[OTA] check fail err=%u\r\n", (unsigned)err);
+        if (manual != 0U)
+        {
+            g_otaStatus.checkErr   = err;
+            g_otaStatus.checkState = OTA_CHK_FAIL;
+        }
+        else
+        {
+            /*静默检查失败只留日志，不回写失败状态，避免用户进 OTA 页看到过期错误*/
+            g_otaStatus.checkErr   = OTA_ERR_NONE;
+            g_otaStatus.checkState = OTA_CHK_IDLE;
+        }
+    }
+}
+
+
 /*任务入口*/
 /**
   * 功    能：WiFi 任务主循环：等命令队列 → 处理扫描/连接 → 走时钟 → 报心跳。死循环不返回
@@ -616,6 +738,10 @@ void StartWifiTask(void *argument)
 
     /* A. 开机：有保存凭据则自动连(先迁后读) */
     (void)WifiStoreLfs_Migrate();
+
+    /* 凭据迁移完成后再读 OTA 配置：同一 LittleFS，且只有本任务能碰 */
+    OTA_Config_Init();
+
     if (WifiStoreLfs_Load(&s_cred) != 0U)
     {
         s_haveCred = 1U;
@@ -649,6 +775,19 @@ void StartWifiTask(void *argument)
         /*下面 DoScan()/DoJoinCmd() 一跑几秒到 20s，此处走不到，存活靠 ESP8266_Cmd() 内部补报*/
         Watchdog_Heartbeat(WDT_TASK_WIFI);
 
+        /*连接状态跳变：首次连上/重连成功都从这里开始计 60s；
+         *60s 内掉线则 s_bootArmed 清零，等下次连上重新计时*/
+        if ((s_connected != 0U) && (s_prevConnected == 0U))
+        {
+            s_bootConnTick = osKernelGetTickCount();
+            s_bootArmed    = 1U;
+        }
+        else if ((s_connected == 0U) && (s_prevConnected != 0U))
+        {
+            s_bootArmed = 0U;
+        }
+        s_prevConnected = s_connected;
+
         /*已连接 1s 醒一次走秒，未连接 200ms 醒一次以快速响应配网/重连*/
         st = osMessageQueueGet(s_cmdQ, &cmd, NULL, s_connected ? 1000U : 200U);
 
@@ -675,10 +814,31 @@ void StartWifiTask(void *argument)
                 {
                     OTA_ReportFail(OTA_ERR_WIFI);
                 }
-                else
+                else if (OTA_DownloadToSlotB() != 0U)
                 {
-                    (void)OTA_DownloadToSlotB();
+                    /*成功且搬运标志已写：3s 后自动复位，交给 BootLoader 搬运。
+                     *标志写失败时 rebootPending=0，停在 DONE 提示手动复位，绝不假装升级*/
+                    if (g_otaStatus.rebootPending != 0U)
+                    {
+                        OTA_RebootToApply();
+                    }
+                    else
+                    {
+                        UART_Printf("[OTA] reboot skipped: apply flag not set\r\n");
+                    }
                 }
+            }
+            else if (cmd.type == WIFI_CMD_SET_OTA_CFG)
+            {
+                /*写 /ota.conf 只能在 WifiTask 里做；失败时缓存保持原值，运行不受影响*/
+                if (OTA_Config_Set(cmd.host, cmd.port) == 0U)
+                {
+                    UART_Printf("[WIFI] ota cfg save failed\r\n");
+                }
+            }
+            else if (cmd.type == WIFI_CMD_CHECK_OTA)
+            {
+                DoCheckOta(cmd.manual);
             }
             continue;
         }
@@ -701,6 +861,16 @@ void StartWifiTask(void *argument)
                     now.week = net.week; now.synced = 1U;
                     ClockData_Set(&now);
                 }
+            }
+
+            /*上电静默检查：首次连上起算 60s，仍在线且本 boot 未查过才执行一次。
+             *只 GET meta（最长十几秒，内部补心跳），失败不重试、不弹窗*/
+            if ((s_bootArmed != 0U) && (s_bootChecked == 0U) &&
+                ((uint32_t)(osKernelGetTickCount() - s_bootConnTick) >= OTA_BOOT_CHECK_DELAY_MS))
+            {
+                s_bootArmed   = 0U;
+                s_bootChecked = 1U;
+                DoCheckOta(0U);
             }
         }
         else if (s_haveCred)

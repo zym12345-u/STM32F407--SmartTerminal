@@ -54,12 +54,14 @@
 #include "bsp_24C02.h"      /*固件升级入口：写 BootLoader 认的升级标志*/
 #include "bsp_bootflag.h"   /*OTA-2：下载成功置搬运请求、串口 IAP 前清请求*/
 #include "bsp_W25Q128.h"    /*固件备份：把内部 App 区整段写进外部 Flash 槽 A*/
-#include "bsp_OTA.h"        /*WiFi OTA：服务器地址/端口与下载入口*/
+#include "bsp_OTA.h"        /*WiFi OTA：检查更新/当前版本/下载入口*/
+#include "bsp_OtaCfg.h"     /*服务器地址只读缓存：本任务不碰 LittleFS*/
 #include "OtaData.h"        /*OTA 进度共享区，WifiTask 写、本任务轮询*/
 #include "CanData.h"        /*固件版本号的编译期常量，元数据不可信时退回它*/
 #include "usart.h"
 #include "PowerMgr.h"
 #include <stdio.h>
+#include <string.h>
 
 /* LEDQueue 由 freertos.c 中 CubeMX 生成的代码创建 */
 extern osMessageQueueId_t LEDQueueHandle;
@@ -91,18 +93,6 @@ static lv_obj_t *labelClock;
 static lv_obj_t *labelWifiIcon;
 static lv_obj_t *labelFwVer;
 
-/* 升级元数据（sector 3）：布局与 BootLoader/main.c 的 meta_write 一一对应
- *   [0] magic  [1] 格式版本  [2] 固件版本(主<<8|次)  [3] 镜像字节数  [4] 整包 CRC32 */
-#define OTA_META_ADDR     0x0800C000UL
-#define OTA_META_MAGIC    0x4154454DUL  /*'M''E''T''A'*/
-#define OTA_META_FMT      2UL           /*旧 v2 五字布局，只兼容读*/
-#define OTA_META_FMT_REC  3UL           /*追加记录：带记录自身 CRC*/
-#define OTA_META_SLOT     32UL          /*一条记录占 32 字节*/
-#define OTA_META_SLOTS    (0x4000UL / OTA_META_SLOT)  /*sector 3 共 16KB，512 条*/
-#define OTA_META_END      0x444E454DUL  /*'M''E''N''D'：镜像末尾标记*/
-#define OTA_APP_BASE      0x08010000UL
-#define OTA_APP_SIZE      0x00070000UL  /*448KB，与 BootLoader 的 APP_SIZE 同值*/
-
 /* WiFi 配网页控件 */
 static lv_obj_t *s_mainScr;
 static lv_obj_t *s_wifiScr;
@@ -125,9 +115,14 @@ static lv_obj_t *s_lblOtaState;
 static lv_obj_t *s_lblOtaDetail;
 static lv_obj_t *s_barOta;
 static lv_obj_t *s_btnOtaStart;
+static lv_obj_t *s_btnOtaCheck;
 static uint8_t   s_otaCurMajor;
 static uint8_t   s_otaCurMinor;
 static uint8_t   s_otaUiDirty = 1U;   /*进入页面时置 1，让轮询函数丢弃上次的显示缓存*/
+
+/* 主屏 OTA 入口按钮：检查到新版本时这里换成蓝色高亮，避免新开弹窗 */
+static lv_obj_t *s_btnMainOta;
+static lv_obj_t *s_lblMainOta;
 
 #define GUI_TASK_STACK_SIZE   2560U
 
@@ -323,123 +318,20 @@ static lv_obj_t *GUI_CreateSensorCard(lv_obj_t *parent, int16_t x, int16_t y,
 
 /*状态栏*/
 /**
-  * 功    能：对几个字做 CRC32（与 BootLoader 的 meta_rec_crc 同一算法）
-  * 参    数：w 首地址；n 字数
-  * 返 回 值：CRC32
-  * 补    充：只用于 20 字节的记录校验，逐位算即可，不引查表占空间
-  */
-static uint32_t OTA_Crc32Words(const volatile uint32_t *w, uint32_t n)
-{
-  uint32_t crc = 0xFFFFFFFFUL;
-  uint32_t i;
-  uint8_t  k;
-
-  for (i = 0UL; i < n; i++)
-  {
-    for (k = 0U; k < 4U; k++)
-    {
-      uint32_t b = (w[i] >> (8U * k)) & 0xFFUL;
-      uint8_t  bit;
-      for (bit = 0U; bit < 8U; bit++)
-      {
-        uint32_t mix = (crc ^ b) & 1UL;
-        crc >>= 1U;
-        if (mix != 0UL)
-        {
-          crc ^= 0xEDB88320UL;
-        }
-        b >>= 1U;
-      }
-    }
-  }
-  return crc ^ 0xFFFFFFFFUL;
-}
-
-/**
   * 功    能：取当前固件版本：元数据可信就用它，否则退回 CanData.h 的编译期版本
   * 参    数：major/minor 输出版本号；fromMeta 输出 1=读自元数据 0=编译期常量
   * 返 回 值：无
-  * 补    充：为什么不是直接用元数据：Keil 直接烧 App 时不会更新 sector 3，
-  *            旧元数据里的版本号和大小会留在那儿。判据是「格式对 + 大小合理 +
-  *            记录自身 CRC 对 + 镜像末尾标记 'MEND' 在位」——标记由 IAP 写完镜像后写，
-  *            Keil 烧录擦不出它，标记不在就说明这份元数据不是当前这份镜像的，
-  *            退回编译期版本才不会显示错。
-  *            元数据是往后追加的记录，取槽号最大的那条（BootLoader 的 meta_read 同判据）。
+  * 补    充：判据已抽到 bsp_OTA.c 的 OTA_GetCurrentVer()，检查更新与这里共用一份，
+  *            避免两套判据漂移；本函数只做拆分显示
   */
 static void GUI_GetFwVersion(uint8_t *major, uint8_t *minor, uint8_t *fromMeta)
 {
-  uint32_t i;
-  uint32_t addr;
-  uint32_t size = 0UL;
-  uint32_t ver  = 0UL;
-  uint8_t  found = 0U;
+  uint16_t ver = 0U;
+  uint8_t  from = OTA_GetCurrentVer(&ver);
 
-  *fromMeta = 0U;
-  *major    = CAN_FW_VER_MAJOR;
-  *minor    = CAN_FW_VER_MINOR;
-
-  for (i = 0UL; i < OTA_META_SLOTS; i++)
-  {
-    addr = OTA_META_ADDR + (i * OTA_META_SLOT);
-    if (*(volatile uint32_t *)addr != OTA_META_MAGIC)
-    {
-      continue;   /*空槽或别的东西*/
-    }
-    if (*(volatile uint32_t *)(addr + 4UL) != OTA_META_FMT_REC)
-    {
-      continue;
-    }
-    size = *(volatile uint32_t *)(addr + 12UL);
-    if ((size < 8UL) || (size > OTA_APP_SIZE) || ((size & 3UL) != 0UL))
-    {
-      continue;
-    }
-    if (OTA_Crc32Words((const volatile uint32_t *)addr, 5UL) !=
-        *(volatile uint32_t *)(addr + 20UL))
-    {
-      continue;   /*掉电写了一半的记录，不算数*/
-    }
-    ver   = *(volatile uint32_t *)(addr + 8UL);
-    found = 1U;   /*继续往后扫，最后一条才是最新的*/
-  }
-
-  if (found != 0U)
-  {
-    if ((size < OTA_APP_SIZE) &&
-        (*(volatile uint32_t *)(OTA_APP_BASE + size) != OTA_META_END))
-    {
-      return;   /*标记不在：元数据不是当前这份镜像的，不可信*/
-    }
-    *major    = (uint8_t)((ver >> 8U) & 0xFFUL);
-    *minor    = (uint8_t)(ver & 0xFFUL);
-    *fromMeta = 1U;
-    return;
-  }
-
-  /*旧 v2 五字布局兼容：0 偏移处*/
-  if (*(volatile uint32_t *)OTA_META_ADDR != OTA_META_MAGIC)
-  {
-    return;
-  }
-  if (*(volatile uint32_t *)(OTA_META_ADDR + 4UL) != OTA_META_FMT)
-  {
-    return;
-  }
-  ver  = *(volatile uint32_t *)(OTA_META_ADDR + 8UL);
-  size = *(volatile uint32_t *)(OTA_META_ADDR + 12UL);
-  if ((size < 8UL) || (size > OTA_APP_SIZE) || ((size & 3UL) != 0UL))
-  {
-    return;
-  }
-  if ((size < OTA_APP_SIZE) &&
-      (*(volatile uint32_t *)(OTA_APP_BASE + size) != OTA_META_END))
-  {
-    return;
-  }
-
-  *major    = (uint8_t)((ver >> 8U) & 0xFFUL);
-  *minor    = (uint8_t)(ver & 0xFFUL);
-  *fromMeta = 1U;
+  *major    = (uint8_t)((ver >> 8U) & 0xFFU);
+  *minor    = (uint8_t)(ver & 0xFFU);
+  *fromMeta = from;
 }
 
 /**
@@ -932,6 +824,46 @@ static void OtaBackEventCb(lv_event_t *event)
 }
 
 /**
+  * 功    能：把当前生效的服务器地址刷到 OTA 页（读缓存，不碰 LittleFS）
+  * 参    数：无
+  * 返 回 值：无
+  */
+static void GUI_UpdateOtaServer(void)
+{
+  OtaServerCfg_t cfg;
+  char txt[80];
+
+  OTA_Config_Get(&cfg);
+  snprintf(txt, sizeof(txt), "Server  %s : %u", cfg.host, (unsigned)cfg.port);
+  lv_label_set_text(s_lblOtaServer, txt);
+}
+
+/**
+  * 功    能：点「Check」：只检查版本，不下载
+  * 参    数：event LVGL 事件
+  * 返 回 值：无
+  * 补    充：检查由 WifiTask 执行；这里只投命令并先给一行即时反馈
+  */
+static void OtaCheckEventCb(lv_event_t *event)
+{
+  (void)event;
+
+  /*下载占用 W25Q 期间不允许并发检查，避免两段 TCP 收包互相踩*/
+  if (GUI_OtaBusy() != 0U)
+  {
+    return;
+  }
+  if (g_wifiScan.status != WIFI_ST_CONNECTED)
+  {
+    lv_label_set_text(s_lblOtaState, "WiFi not connected - open WiFi Setup");
+    return;
+  }
+
+  Wifi_PostCheckOta(1U);
+  lv_label_set_text(s_lblOtaState, "Checking...");
+}
+
+/**
   * 功    能：点「Download」：检查 WiFi 后投递 OTA 命令
   * 参    数：event LVGL 事件
   * 返 回 值：无
@@ -942,6 +874,12 @@ static void OtaStartEventCb(lv_event_t *event)
   (void)event;
 
   if (GUI_OtaBusy() != 0U)
+  {
+    return;
+  }
+  /*检查还在跑时先别开始下载：WifiTask 串行处理，下载会排在检查后面，
+   *不如让用户看清检查结果再点*/
+  if (g_otaStatus.checkState == OTA_CHK_CHECKING)
   {
     return;
   }
@@ -956,10 +894,11 @@ static void OtaStartEventCb(lv_event_t *event)
 }
 
 /**
-  * 功    能：进入 OTA 页时刷新“当前版本”，并清掉上次遗留的显示缓存
+  * 功    能：进入 OTA 页时刷新服务器地址与“当前版本”，并清掉上次遗留的显示缓存
   * 参    数：event LVGL 事件
   * 返 回 值：无
-  * 补    充：版本号仍从 GUI_GetFwVersion 取，和状态栏显示保持一致
+  * 补    充：版本号仍从 GUI_GetFwVersion 取，和状态栏显示保持一致；
+  *            服务器地址每次都读缓存，串口改完配置回页面就能看到新值
   */
 static void OtaEntryEventCb(lv_event_t *event)
 {
@@ -967,6 +906,7 @@ static void OtaEntryEventCb(lv_event_t *event)
   char    txt[64];
 
   (void)event;
+  GUI_UpdateOtaServer();
   GUI_GetFwVersion(&s_otaCurMajor, &s_otaCurMinor, &fromMeta);
   (void)fromMeta;
   snprintf(txt, sizeof(txt), "Current v%u.%u  ->  New: --",
@@ -985,16 +925,23 @@ static void OtaEntryEventCb(lv_event_t *event)
   */
 static void OtaStatusTimerCb(lv_timer_t *timer)
 {
-  static uint8_t  lastState = 0xFFU;
-  static uint8_t  lastErr   = 0xFFU;
-  static uint8_t  lastPct   = 0xFFU;
-  static uint8_t  lastWifi  = 0xFFU;
-  static uint32_t lastKb    = 0xFFFFFFFFUL;
+  static uint8_t  lastPct    = 0xFFU;
+  static uint8_t  lastWifi   = 0xFFU;
+  static uint32_t lastKb     = 0xFFFFFFFFUL;
+  static uint16_t lastVer    = 0xFFFFU;
+  static uint8_t  lastDisDl  = 0xFFU;
+  static uint8_t  lastDisChk = 0xFFU;
+  static char     lastStateTxt[48] = {0};
   uint8_t  st;
   uint8_t  err;
-  const char *txtState;
+  uint8_t  chk;
+  uint8_t  chkErr;
+  uint8_t  disDl;
+  uint8_t  disChk;
   char     txt[80];
+  char     stateTxt[48];
   uint32_t kb;
+  uint16_t targetVer;
 
   (void)timer;
   if (lv_scr_act() != s_otaScr)
@@ -1006,11 +953,13 @@ static void OtaStatusTimerCb(lv_timer_t *timer)
   if (s_otaUiDirty != 0U)
   {
     s_otaUiDirty = 0U;
-    lastState = 0xFFU;
-    lastErr   = 0xFFU;
-    lastPct   = 0xFFU;
-    lastWifi  = 0xFFU;
-    lastKb    = 0xFFFFFFFFUL;
+    lastPct    = 0xFFU;
+    lastWifi   = 0xFFU;
+    lastKb     = 0xFFFFFFFFUL;
+    lastVer    = 0xFFFFU;
+    lastDisDl  = 0xFFU;
+    lastDisChk = 0xFFU;
+    lastStateTxt[0] = '\0';
   }
 
   /*WiFi 状态只在变化时刷*/
@@ -1022,31 +971,86 @@ static void OtaStatusTimerCb(lv_timer_t *timer)
                                                               : "WiFi: not connected");
   }
 
-  st  = g_otaStatus.state;
-  err = g_otaStatus.err;
-  if ((lastState != st) || (lastErr != err))
+  st     = g_otaStatus.state;
+  err    = g_otaStatus.err;
+  chk    = g_otaStatus.checkState;
+  chkErr = g_otaStatus.checkErr;
+
+  /*状态行优先级：下载进行中 > 检查进行中 > 下载结果 > 检查结果 > 空闲。
+   *这样检查失败不会覆盖下载失败文案，下载失败也不会被一次检查成功冲掉。*/
+  if ((st == OTA_ST_ERASE) || (st == OTA_ST_META) ||
+      (st == OTA_ST_DOWNLOAD) || (st == OTA_ST_VERIFY))
   {
-    lastState = st;
-    lastErr   = err;
     switch (st)
     {
-      case OTA_ST_ERASE:    txtState = "Erasing slot B..."; break;
-      case OTA_ST_META:     txtState = "Fetching app.meta..."; break;
-      case OTA_ST_DOWNLOAD: txtState = "Downloading app.bin..."; break;
-      case OTA_ST_VERIFY:   txtState = "Verifying image..."; break;
-      case OTA_ST_DONE:     txtState = "Slot B ready - reboot to apply"; break;
-      case OTA_ST_FAIL:     txtState = GUI_OtaErrText(err); break;
-      default:              txtState = "Idle - tap Download"; break;
+      case OTA_ST_ERASE:    (void)snprintf(stateTxt, sizeof(stateTxt), "Erasing slot B..."); break;
+      case OTA_ST_META:     (void)snprintf(stateTxt, sizeof(stateTxt), "Fetching app.meta..."); break;
+      case OTA_ST_DOWNLOAD: (void)snprintf(stateTxt, sizeof(stateTxt), "Downloading app.bin..."); break;
+      default:              (void)snprintf(stateTxt, sizeof(stateTxt), "Verifying image..."); break;
     }
-    lv_label_set_text(s_lblOtaState, txtState);
+  }
+  else if (chk == OTA_CHK_CHECKING)
+  {
+    (void)snprintf(stateTxt, sizeof(stateTxt), "Checking...");
+  }
+  else if (st == OTA_ST_DONE)
+  {
+    /*rebootPending=1 才是真的会自动复位；标志写失败时停在 DONE 等用户手动复位*/
+    (void)snprintf(stateTxt, sizeof(stateTxt), "%s",
+                   (g_otaStatus.rebootPending != 0U) ? "Done - rebooting..."
+                                                     : "Slot B ready - reboot manually");
+  }
+  else if (st == OTA_ST_FAIL)
+  {
+    (void)snprintf(stateTxt, sizeof(stateTxt), "%s", GUI_OtaErrText(err));
+  }
+  else if (chk == OTA_CHK_DONE)
+  {
+    if (g_otaStatus.checkVer != 0U)
+    {
+      (void)snprintf(stateTxt, sizeof(stateTxt), "New v%u.%u available",
+                     (unsigned)((g_otaStatus.checkVer >> 8U) & 0xFFU),
+                     (unsigned)(g_otaStatus.checkVer & 0xFFU));
+    }
+    else
+    {
+      (void)snprintf(stateTxt, sizeof(stateTxt), "Up to date (v%u.%u)",
+                     (unsigned)s_otaCurMajor, (unsigned)s_otaCurMinor);
+    }
+  }
+  else if (chk == OTA_CHK_FAIL)
+  {
+    (void)snprintf(stateTxt, sizeof(stateTxt), "%s", GUI_OtaErrText(chkErr));
+  }
+  else
+  {
+    (void)snprintf(stateTxt, sizeof(stateTxt), "Idle - tap Check or Download");
   }
 
-  if (g_otaStatus.newVer != 0U)
+  if (strcmp(lastStateTxt, stateTxt) != 0)
   {
-    snprintf(txt, sizeof(txt), "Current v%u.%u  ->  New v%u.%u",
-             (unsigned)s_otaCurMajor, (unsigned)s_otaCurMinor,
-             (unsigned)((g_otaStatus.newVer >> 8U) & 0xFFU),
-             (unsigned)(g_otaStatus.newVer & 0xFFU));
+    (void)strncpy(lastStateTxt, stateTxt, sizeof(lastStateTxt) - 1U);
+    lastStateTxt[sizeof(lastStateTxt) - 1U] = '\0';
+    lv_label_set_text(s_lblOtaState, lastStateTxt);
+  }
+
+  /*目标版本：优先显示下载时取到的 newVer，其次显示检查发现的 checkVer*/
+  targetVer = (g_otaStatus.newVer != 0U) ? g_otaStatus.newVer : g_otaStatus.checkVer;
+  if (lastVer != targetVer)
+  {
+    lastVer = targetVer;
+    if (targetVer != 0U)
+    {
+      (void)snprintf(txt, sizeof(txt), "Current v%u.%u  ->  New v%u.%u",
+                     (unsigned)s_otaCurMajor, (unsigned)s_otaCurMinor,
+                     (unsigned)((targetVer >> 8U) & 0xFFU),
+                     (unsigned)(targetVer & 0xFFU));
+    }
+    else
+    {
+      (void)snprintf(txt, sizeof(txt), "Current v%u.%u  ->  New: --",
+                     (unsigned)s_otaCurMajor, (unsigned)s_otaCurMinor);
+    }
     lv_label_set_text(s_lblOtaVer, txt);
   }
 
@@ -1054,8 +1058,8 @@ static void OtaStatusTimerCb(lv_timer_t *timer)
   if (lastKb != kb)
   {
     lastKb = kb;
-    snprintf(txt, sizeof(txt), "%lu KB / %lu KB",
-             (unsigned long)kb, (unsigned long)(g_otaStatus.total / 1024UL));
+    (void)snprintf(txt, sizeof(txt), "%lu KB / %lu KB",
+                   (unsigned long)kb, (unsigned long)(g_otaStatus.total / 1024UL));
     lv_label_set_text(s_lblOtaDetail, txt);
   }
 
@@ -1065,14 +1069,33 @@ static void OtaStatusTimerCb(lv_timer_t *timer)
     lv_bar_set_value(s_barOta, (int32_t)lastPct, LV_ANIM_OFF);
   }
 
-  /*忙时禁用下载按钮，避免连点把命令队列刷满*/
-  if (GUI_OtaBusy() != 0U)
+  /*忙时禁用按钮，避免连点把命令队列刷满：检查期间锁 Download，下载期间两个都锁*/
+  disDl  = ((GUI_OtaBusy() != 0U) || (chk == OTA_CHK_CHECKING)) ? 1U : 0U;
+  disChk = (GUI_OtaBusy() != 0U) ? 1U : 0U;
+
+  if (lastDisDl != disDl)
   {
-    lv_obj_add_state(s_btnOtaStart, LV_STATE_DISABLED);
+    lastDisDl = disDl;
+    if (disDl != 0U)
+    {
+      lv_obj_add_state(s_btnOtaStart, LV_STATE_DISABLED);
+    }
+    else
+    {
+      lv_obj_clear_state(s_btnOtaStart, LV_STATE_DISABLED);
+    }
   }
-  else
+  if (lastDisChk != disChk)
   {
-    lv_obj_clear_state(s_btnOtaStart, LV_STATE_DISABLED);
+    lastDisChk = disChk;
+    if (disChk != 0U)
+    {
+      lv_obj_add_state(s_btnOtaCheck, LV_STATE_DISABLED);
+    }
+    else
+    {
+      lv_obj_clear_state(s_btnOtaCheck, LV_STATE_DISABLED);
+    }
   }
 }
 
@@ -1117,11 +1140,10 @@ static void GUI_CreateOtaScreen(void)
   lv_obj_set_style_pad_all(card, 8, 0);
 
   s_lblOtaServer = lv_label_create(card);
-  snprintf(txt, sizeof(txt), "Server  " OTA_SRV_HOST " : %u",
-           (unsigned)OTA_SRV_PORT);
-  lv_label_set_text(s_lblOtaServer, txt);
+  lv_label_set_text(s_lblOtaServer, "Server  --");
   lv_obj_add_style(s_lblOtaServer, &s_styleCardSub, 0);
   lv_obj_set_pos(s_lblOtaServer, 0, 0);
+  GUI_UpdateOtaServer();   /*建页时先按缓存填一次，Init 跑完/改配置后进页再刷*/
 
   s_lblOtaVer = lv_label_create(card);
   snprintf(txt, sizeof(txt), "Current v%u.%u  ->  New: --",
@@ -1131,7 +1153,7 @@ static void GUI_CreateOtaScreen(void)
   lv_obj_set_pos(s_lblOtaVer, 0, 20);
 
   s_lblOtaState = lv_label_create(card);
-  lv_label_set_text(s_lblOtaState, "Idle - tap Download");
+  lv_label_set_text(s_lblOtaState, "Idle - tap Check or Download");
   lv_label_set_long_mode(s_lblOtaState, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(s_lblOtaState, 288);
   lv_obj_set_style_text_color(s_lblOtaState, COLOR_TEXT, 0);
@@ -1163,30 +1185,42 @@ static void GUI_CreateOtaScreen(void)
   lv_obj_set_pos(lbl, 8, 166);
 
   lbl = lv_label_create(s_otaScr);
-  lv_label_set_text(lbl, "Phase 1: download to slot B only, no reboot");
+  lv_label_set_text(lbl, "Check first, then Download (auto reboot 3s)");
   lv_obj_add_style(lbl, &s_styleStatus, 0);
   lv_obj_set_pos(lbl, 8, 182);
+
+  /*三按钮横排：6+96 / 106+100 / 210+100，总宽 304，右留 6px；文案取短词防裁字*/
+  s_btnOtaCheck = lv_btn_create(s_otaScr);
+  lv_obj_remove_style_all(s_btnOtaCheck);
+  lv_obj_add_style(s_btnOtaCheck, &s_styleBtnBlue, 0);
+  lv_obj_set_style_bg_opa(s_btnOtaCheck, LV_OPA_60, LV_STATE_PRESSED);
+  lv_obj_set_size(s_btnOtaCheck, 96, 32);
+  lv_obj_set_pos(s_btnOtaCheck, 6, 202);
+  lv_obj_add_event_cb(s_btnOtaCheck, OtaCheckEventCb, LV_EVENT_CLICKED, NULL);
+  lbl = lv_label_create(s_btnOtaCheck);
+  lv_label_set_text(lbl, LV_SYMBOL_REFRESH " Check");
+  lv_obj_center(lbl);
 
   s_btnOtaStart = lv_btn_create(s_otaScr);
   lv_obj_remove_style_all(s_btnOtaStart);
   lv_obj_add_style(s_btnOtaStart, &s_styleBtnGreen, 0);
   lv_obj_set_style_bg_opa(s_btnOtaStart, LV_OPA_60, LV_STATE_PRESSED);
-  lv_obj_set_size(s_btnOtaStart, 150, 32);
-  lv_obj_set_pos(s_btnOtaStart, 6, 202);
+  lv_obj_set_size(s_btnOtaStart, 100, 32);
+  lv_obj_set_pos(s_btnOtaStart, 106, 202);
   lv_obj_add_event_cb(s_btnOtaStart, OtaStartEventCb, LV_EVENT_CLICKED, NULL);
   lbl = lv_label_create(s_btnOtaStart);
-  lv_label_set_text(lbl, LV_SYMBOL_DOWNLOAD "  Download");
+  lv_label_set_text(lbl, LV_SYMBOL_DOWNLOAD " Download");
   lv_obj_center(lbl);
 
   lv_obj_t *btn = lv_btn_create(s_otaScr);
   lv_obj_remove_style_all(btn);
   lv_obj_add_style(btn, &s_styleBtnWifi, 0);
   lv_obj_set_style_bg_opa(btn, LV_OPA_60, LV_STATE_PRESSED);
-  lv_obj_set_size(btn, 150, 32);
-  lv_obj_set_pos(btn, 164, 202);
+  lv_obj_set_size(btn, 100, 32);
+  lv_obj_set_pos(btn, 210, 202);
   lv_obj_add_event_cb(btn, OtaBackEventCb, LV_EVENT_CLICKED, NULL);
   lbl = lv_label_create(btn);
-  lv_label_set_text(lbl, LV_SYMBOL_LEFT "  Back");
+  lv_label_set_text(lbl, LV_SYMBOL_LEFT " Back");
   lv_obj_center(lbl);
 }
 
@@ -1210,17 +1244,17 @@ static void GUI_CreateFwEntry(lv_obj_t *scr)
   lv_label_set_text(lbl, LV_SYMBOL_DOWNLOAD "  FW Update");
   lv_obj_center(lbl);
 
-  btn = lv_btn_create(scr);
-  lv_obj_remove_style_all(btn);
-  lv_obj_add_style(btn, &s_styleBtnWifi, 0);
-  lv_obj_set_style_bg_opa(btn, LV_OPA_60, LV_STATE_PRESSED);
-  lv_obj_set_size(btn, 150, 28);
-  lv_obj_set_pos(btn, 164, 206);
-  lv_obj_add_event_cb(btn, OtaEntryEventCb, LV_EVENT_CLICKED, NULL);
+  s_btnMainOta = lv_btn_create(scr);
+  lv_obj_remove_style_all(s_btnMainOta);
+  lv_obj_add_style(s_btnMainOta, &s_styleBtnWifi, 0);
+  lv_obj_set_style_bg_opa(s_btnMainOta, LV_OPA_60, LV_STATE_PRESSED);
+  lv_obj_set_size(s_btnMainOta, 150, 28);
+  lv_obj_set_pos(s_btnMainOta, 164, 206);
+  lv_obj_add_event_cb(s_btnMainOta, OtaEntryEventCb, LV_EVENT_CLICKED, NULL);
 
-  lbl = lv_label_create(btn);
-  lv_label_set_text(lbl, LV_SYMBOL_WIFI "  OTA");
-  lv_obj_center(lbl);
+  s_lblMainOta = lv_label_create(s_btnMainOta);
+  lv_label_set_text(s_lblMainOta, LV_SYMBOL_WIFI "  OTA");
+  lv_obj_center(s_lblMainOta);
 }
 
 /*主屏*/
@@ -1319,6 +1353,27 @@ static void SensorRefreshTimerCb(lv_timer_t *timer)
     else
       snprintf(buf, sizeof(buf), "syncing...");
     lv_label_set_text(labelClock, buf);
+  }
+
+  /*主屏 OTA 入口：检查到新版本就换蓝底 + 上箭头，下载成功（checkVer 清零）后恢复。
+   *只改局部样式，不动共享的 s_styleBtnWifi，避免影响其他按钮*/
+  if (s_btnMainOta != NULL)
+  {
+    static uint8_t otaHi = 0U;
+    uint8_t hi = (g_otaStatus.checkVer != 0U) ? 1U : 0U;
+
+    if (hi != otaHi)
+    {
+      otaHi = hi;
+      lv_obj_set_style_bg_color(s_btnMainOta,
+                                (hi != 0U) ? COLOR_ACCENT_BLUE : lv_color_hex(0x334155), 0);
+      lv_obj_set_style_bg_grad_color(s_btnMainOta,
+                                     (hi != 0U) ? COLOR_ACCENT_BLUE_D : lv_color_hex(0x1e293b), 0);
+      lv_obj_set_style_border_color(s_btnMainOta,
+                                    (hi != 0U) ? COLOR_ACCENT_BLUE_D : COLOR_CARD_BORDER, 0);
+      lv_label_set_text(s_lblMainOta,
+                        (hi != 0U) ? "OTA  " LV_SYMBOL_UP : LV_SYMBOL_WIFI "  OTA");
+    }
   }
 }
 
