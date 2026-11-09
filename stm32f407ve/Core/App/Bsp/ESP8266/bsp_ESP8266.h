@@ -91,6 +91,15 @@ uint8_t ESP8266_TcpConnect(const char *host, uint16_t port);
 uint8_t ESP8266_TcpSend(const uint8_t *data, uint16_t len);
 
 /**
+  * 功    能：发一段数据并等 "SEND OK"（连续发包用；只窥探不取走，不丢 +IPD）
+  * 参    数：data  数据首地址，不允许 NULL；len  字节数，1~2048
+  *            ackTimeoutMs  等 SEND OK 的超时，0 按 1000ms 处理
+  * 返 回 值：1 = 模块回 SEND OK；0 = 没拿到 '>' 或没等到 SEND OK
+  * 补    充：上一条 CIPSEND 未完成时模块回 busy p...，用本函数可避免背靠背发送失败
+  */
+uint8_t ESP8266_TcpSendWait(const uint8_t *data, uint16_t len, uint32_t ackTimeoutMs);
+
+/**
   * 功    能：关掉 TCP 连接（没连接时模块回 ERROR，属正常）
   * 参    数：无
   * 返 回 值：无

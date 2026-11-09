@@ -47,7 +47,7 @@ static char    s_line[CMD_LINE_BUF_SIZE];
 static uint8_t s_lineLen = 0U;
 
 /**
-  * 功    能：解析一行文本命令；目前只支持 otacfg <host> [port]
+  * 功    能：解析一行文本命令；支持 otacfg <host> [port] 与调试用 at <原始指令>
   * 参    数：line  以 '\0' 结尾的一行
   * 返 回 值：无
   * 补    充：这里只解析并投队列，写 /ota.conf 由 WifiTask 完成；
@@ -82,6 +82,15 @@ static void Command_HandleLine(const char *line)
 
     Wifi_PostSetOtaCfg(host, (uint16_t)port);
     UART_Printf("[CMD] otacfg queued: %s:%u\r\n", host, port);
+    PowerMgr_Feed();
+    return;
+  }
+
+  /*调试：at <原始指令>，由 WifiTask 转发给 ESP8266 并打印应答*/
+  if ((strncmp(line, "at ", 3U) == 0) && (line[3] != '\0'))
+  {
+    Wifi_PostAtProbe(line + 3);
+    UART_Printf("[CMD] at queued: %s\r\n", line + 3);
     PowerMgr_Feed();
   }
 }

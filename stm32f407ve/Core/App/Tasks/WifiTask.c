@@ -10,11 +10,14 @@
 #include "bsp_ESP8266.h"
 #include "bsp_OTA.h"
 #include "bsp_OtaCfg.h"
+#include "bsp_Mqtt.h"
 #include "OtaData.h"
 #include "bsp_WifiStore.h"
 #include "bsp_WifiStoreLfs.h"
 #include "bsp_IWDG.h"
 #include "ClockData.h"
+#include "SensorData.h"
+#include "LEDType.h"
 #include "WifiNet.h"
 #include "usart.h"
 #include <stdio.h>
@@ -30,6 +33,10 @@
 #define RESYNC_PERIOD_MS     (30U * 60U * 1000U)
 #define RECONNECT_PERIOD_MS  10000U  /* 掉线后自动重连间隔 */
 #define OTA_BOOT_CHECK_DELAY_MS 60000U  /* 首次联网后静默检查更新的延时：每 boot 最多一次 */
+#define MQTT_PUB_PERIOD_MS   1000U   /* 遥测上报周期：1Hz，本地 Broker 足够 */
+
+/* LED 队列句柄由 freertos.c 创建，WifiTask 收到 MQTT 命令后投递点灯消息 */
+extern osMessageQueueId_t LEDQueueHandle;
 
 
 /*任务间队列与共享状态*/
@@ -206,6 +213,33 @@ void Wifi_PostCheckOta(uint8_t manual)
         g_otaStatus.checkErr    = OTA_ERR_QUEUE;
         g_otaStatus.checkState  = OTA_CHK_FAIL;
         UART_Printf("[WIFI] PostCheckOta dropped: cmdQ NULL\r\n");
+    }
+}
+
+/**
+  * 功    能：调试入口：把一条原始 AT 指令转发给 ESP8266（仅 WifiTask 能碰 AT 串口）
+  * 参    数：atcmd  不含 CRLF 的 AT 指令，如 "AT+GMR"
+  * 返 回 值：无
+  * 补    充：只用于联调；队列不可用时打日志丢弃
+  */
+void Wifi_PostAtProbe(const char *atcmd)
+{
+    WifiCmd_t cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.type = WIFI_CMD_AT_PROBE;
+    if (atcmd != NULL)
+    {
+        strncpy(cmd.atcmd, atcmd, sizeof(cmd.atcmd) - 1U);
+    }
+
+    if (s_cmdQ != NULL)
+    {
+        (void)osMessageQueuePut(s_cmdQ, &cmd, 0U, 0U);
+    }
+    else
+    {
+        UART_Printf("[WIFI] PostAtProbe dropped: cmdQ NULL\r\n");
     }
 }
 
@@ -716,6 +750,225 @@ static void DoCheckOta(uint8_t manual)
 }
 
 
+/**
+  * 功    能：调试：发一条原始 AT 指令并把模块应答逐行打到调试串口
+  * 参    数：atcmd  不含 CRLF 的 AT 指令
+  * 返 回 值：无
+  * 补    充：仅 WifiTask 调用；应答快照放 static，避免占 3KB 任务栈
+  */
+static void DoAtProbe(const char *atcmd)
+{
+    static char buf[512];
+    char line[96];
+    uint16_t n;
+    uint16_t i;
+    uint16_t k = 0U;
+    char     tmp[80];
+
+    if (atcmd == NULL)
+    {
+        return;
+    }
+
+    (void)snprintf(tmp, sizeof(tmp), "%s\r\n", atcmd);
+    UART_Printf("[AT] >> %s\r\n", atcmd);
+
+    /* 不关心成败：ASSOC/ERROR/超时都要把原始应答打出来 */
+    (void)ESP8266_Cmd(tmp, "OK", 2000U);
+
+    n = ESP8266_CopyResponse(buf, (uint16_t)(sizeof(buf) - 1U));
+    buf[n] = '\0';
+
+    for (i = 0U; i < n; i++)
+    {
+        char c = buf[i];
+        if ((c == '\r') || (c == '\n'))
+        {
+            if (k > 0U)
+            {
+                line[k] = '\0';
+                UART_Printf("[AT] << %s\r\n", line);
+                k = 0U;
+            }
+        }
+        else if (k < (uint16_t)(sizeof(line) - 1U))
+        {
+            line[k++] = c;
+        }
+    }
+    if (k > 0U)
+    {
+        line[k] = '\0';
+        UART_Printf("[AT] << %s\r\n", line);
+    }
+}
+
+/*MQTT 下行命令与遥测*/
+/**
+  * 功    能：在 JSON 文本里找 "key" 后的值起点（跳过空格和冒号）
+  * 参    数：json  以 '\0' 结尾的 JSON；key  字段名（不带引号）
+  * 返 回 值：值首字符指针；找不到/格式不对返回 NULL
+  * 补    充：只做演示用的极简解析，不处理嵌套和转义
+  */
+static const char *Wifi_JsonValue(const char *json, const char *key)
+{
+    char        pat[24];
+    const char *p;
+    int         n;
+
+    if ((json == NULL) || (key == NULL))
+    {
+        return NULL;
+    }
+    n = snprintf(pat, sizeof(pat), "\"%s\"", key);
+    if ((n <= 0) || (n >= (int)sizeof(pat)))
+    {
+        return NULL;
+    }
+
+    p = strstr(json, pat);
+    if (p == NULL)
+    {
+        return NULL;
+    }
+    p += strlen(pat);
+    while ((*p == ' ') || (*p == '\t'))
+    {
+        p++;
+    }
+    if (*p != ':')
+    {
+        return NULL;
+    }
+    p++;
+    while ((*p == ' ') || (*p == '\t'))
+    {
+        p++;
+    }
+    return p;
+}
+
+/**
+  * 功    能：float 转四舍五入后的十分位整数（避免 printf 浮点支持问题）
+  * 参    数：v  物理量
+  * 返 回 值：v×10 取整
+  */
+static int Wifi_ToTenths(float v)
+{
+    return (int)(v * 10.0f + ((v >= 0.0f) ? 0.5f : -0.5f));
+}
+
+/**
+  * 功    能：float 转四舍五入整数
+  * 参    数：v  物理量
+  * 返 回 值：取整结果
+  */
+static int Wifi_ToInt(float v)
+{
+    return (int)(v + ((v >= 0.0f) ? 0.5f : -0.5f));
+}
+
+/**
+  * 功    能：把一条点灯消息投给 LEDTask（WifiTask 不直接碰 GPIO）
+  * 参    数：color  0=绿 1=蓝；state  0=灭 1=亮
+  * 返 回 值：无
+  */
+static void Wifi_PostLed(LEDColor color, LEDState state)
+{
+    LEDMessage *msg = pvPortMalloc(sizeof(LEDMessage));
+
+    if (msg == NULL)
+    {
+        UART_Printf("[MQTT] led dropped: no heap\r\n");
+        return;
+    }
+    msg->color = color;
+    msg->state = state;
+    if (osMessageQueuePut(LEDQueueHandle, &msg, 0U, 0U) != osOK)
+    {
+        vPortFree(msg);
+    }
+}
+
+/**
+  * 功    能：把当前传感器与时间打成 JSON 发到遥测主题
+  * 参    数：now  当前时钟，不可为 NULL
+  * 返 回 值：无
+  * 补    充：全部用整数打印，不依赖 printf 的 %f；1Hz 调用，失败下轮自动重试
+  */
+static void Wifi_PublishTelemetry(const ClockData_t *now)
+{
+    char json[176];
+    int  t10;
+    int  h10;
+    int  lux;
+    int  n;
+
+    if (now == NULL)
+    {
+        return;
+    }
+
+    t10 = Wifi_ToTenths(g_sensorData.temperature);
+    h10 = Wifi_ToTenths(g_sensorData.humidity);
+    lux = Wifi_ToInt(g_sensorData.light);
+
+    n = snprintf(json, sizeof(json),
+                 "{\"temp\":%d.%d,\"humi\":%d.%d,\"lux\":%d,\"ok\":%u,"
+                 "\"ts\":\"%04u-%02u-%02u %02u:%02u:%02u\"}",
+                 t10 / 10, ((t10 < 0) ? -t10 : t10) % 10,
+                 h10 / 10, ((h10 < 0) ? -h10 : h10) % 10,
+                 lux,
+                 (unsigned)g_sensorData.temp_valid,
+                 (unsigned)now->year, (unsigned)now->month, (unsigned)now->day,
+                 (unsigned)now->hour, (unsigned)now->min, (unsigned)now->sec);
+
+    if (n > 0)
+    {
+        (void)Mqtt_Publish(MQTT_TOPIC_TELEMETRY, json, MQTT_QOS0, 0U);
+    }
+}
+
+/**
+  * 功    能：处理 MQTT 下行命令：ping 回 pong，led 控制灯，其它回 unknown
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：命令 JSON 形如 {"cmd":"ping"} 或 {"cmd":"led","color":"blue","on":1}
+  */
+static void Wifi_HandleMqttCommands(void)
+{
+    MqttCommand_t c;
+    char          ack[96];
+
+    while (Mqtt_TakeCommand(&c) != 0U)
+    {
+        const char *cmd = Wifi_JsonValue(c.payload, "cmd");
+
+        if ((cmd != NULL) && (strncmp(cmd, "\"ping\"", 6U) == 0))
+        {
+            (void)Mqtt_Publish(MQTT_TOPIC_TELEMETRY, "{\"ack\":\"pong\"}", MQTT_QOS1, 0U);
+        }
+        else if ((cmd != NULL) && (strncmp(cmd, "\"led\"", 5U) == 0))
+        {
+            const char *color = Wifi_JsonValue(c.payload, "color");
+            const char *on    = Wifi_JsonValue(c.payload, "on");
+            LEDColor    ledColor = ((color != NULL) && (strncmp(color, "\"blue\"", 6U) == 0))
+                                   ? LEDColor_Blue : LEDColor_Green;
+            LEDState    ledState = ((on != NULL) && (on[0] == '1'))
+                                   ? LEDState_On : LEDState_Off;
+
+            Wifi_PostLed(ledColor, ledState);
+            (void)snprintf(ack, sizeof(ack), "{\"ack\":\"led\",\"ok\":1,\"on\":%u}",
+                           (unsigned)((ledState == LEDState_On) ? 1U : 0U));
+            (void)Mqtt_Publish(MQTT_TOPIC_TELEMETRY, ack, MQTT_QOS1, 0U);
+        }
+        else
+        {
+            (void)Mqtt_Publish(MQTT_TOPIC_TELEMETRY, "{\"ack\":\"unknown\"}", MQTT_QOS0, 0U);
+        }
+    }
+}
+
 /*任务入口*/
 /**
   * 功    能：WiFi 任务主循环：等命令队列 → 处理扫描/连接 → 走时钟 → 报心跳。死循环不返回
@@ -729,9 +982,12 @@ void StartWifiTask(void *argument)
     ClockData_t now;
     uint32_t    lastResync = 0U;
     uint32_t    lastReconnect = 0U;
+    uint32_t    lastClockTick;
+    uint32_t    lastPubTick;
 
     memset(&now, 0, sizeof(now));
     ESP8266_Init();
+    Mqtt_Init();       /*只清本地状态，真正建链等 WiFi 连上后 Mqtt_Start */
     UART_Printf("[WIFI] ESP8266 USART2(PA2/PA3) init ok\r\n");
 
     osDelay(2000U);    /* 等模块上电稳定 + 避开开机 LVGL 首屏渲染 */
@@ -767,6 +1023,9 @@ void StartWifiTask(void *argument)
         Wifi_SetStatus(WIFI_ST_IDLE);
     }
 
+    lastClockTick = osKernelGetTickCount();
+    lastPubTick   = lastClockTick;
+
     for (;;)
     {
         WifiCmd_t   cmd;
@@ -781,30 +1040,41 @@ void StartWifiTask(void *argument)
         {
             s_bootConnTick = osKernelGetTickCount();
             s_bootArmed    = 1U;
+            Mqtt_Start();          /*WiFi 刚连上：允许 MQTT 建链*/
         }
         else if ((s_connected == 0U) && (s_prevConnected != 0U))
         {
             s_bootArmed = 0U;
+            Mqtt_Stop(0U);         /*WiFi 已掉：不发 AT，只清 MQTT 本地状态*/
         }
         s_prevConnected = s_connected;
 
-        /*已连接 1s 醒一次走秒，未连接 200ms 醒一次以快速响应配网/重连*/
-        st = osMessageQueueGet(s_cmdQ, &cmd, NULL, s_connected ? 1000U : 200U);
+        /*已连接 50ms 醒一次跑 MQTT 收包/心跳；未连接 200ms 醒一次以快速响应配网/重连*/
+        st = osMessageQueueGet(s_cmdQ, &cmd, NULL, s_connected ? 50U : 200U);
 
         if (st == osOK)
         {
             if (cmd.type == WIFI_CMD_SCAN)
             {
+                /*扫描会长时间占用 AT 串口，先把 MQTT 长连接让出去*/
+                Mqtt_Stop(1U);
                 DoScan();
+                if (s_connected)
+                {
+                    Mqtt_Start();
+                }
             }
             else if (cmd.type == WIFI_CMD_JOIN)
             {
+                Mqtt_Stop(1U);
                 DoJoinCmd(&cmd);
                 if (s_connected)
                 {
                     /*DoJoinCmd 已写 ClockData，走秒基准从当前值继续*/
                     ClockData_Get(&now);
-                    lastResync = osKernelGetTickCount();
+                    lastResync    = osKernelGetTickCount();
+                    lastClockTick = lastResync;
+                    Mqtt_Start();      /*换 AP 后原 TCP 已断，重新建链*/
                 }
             }
             else if (cmd.type == WIFI_CMD_OTA)
@@ -814,17 +1084,27 @@ void StartWifiTask(void *argument)
                 {
                     OTA_ReportFail(OTA_ERR_WIFI);
                 }
-                else if (OTA_DownloadToSlotB() != 0U)
+                else
                 {
-                    /*成功且搬运标志已写：3s 后自动复位，交给 BootLoader 搬运。
-                     *标志写失败时 rebootPending=0，停在 DONE 提示手动复位，绝不假装升级*/
-                    if (g_otaStatus.rebootPending != 0U)
+                    /*OTA 要独占 ESP8266 的 TCP 通道，必须先断开 MQTT 再 CIPSTART*/
+                    Mqtt_Stop(1U);
+                    if (OTA_DownloadToSlotB() != 0U)
                     {
-                        OTA_RebootToApply();
+                        /*成功且搬运标志已写：3s 后自动复位，交给 BootLoader 搬运。
+                         *标志写失败时 rebootPending=0，停在 DONE 提示手动复位，绝不假装升级*/
+                        if (g_otaStatus.rebootPending != 0U)
+                        {
+                            OTA_RebootToApply();
+                        }
+                        else
+                        {
+                            UART_Printf("[OTA] reboot skipped: apply flag not set\r\n");
+                            Mqtt_Start();
+                        }
                     }
                     else
                     {
-                        UART_Printf("[OTA] reboot skipped: apply flag not set\r\n");
+                        Mqtt_Start();      /*下载失败留在当前固件，恢复 MQTT*/
                     }
                 }
             }
@@ -838,22 +1118,55 @@ void StartWifiTask(void *argument)
             }
             else if (cmd.type == WIFI_CMD_CHECK_OTA)
             {
+                /*检查更新走一次性 HTTP，与 MQTT 长连接互斥*/
+                Mqtt_Stop(1U);
                 DoCheckOta(cmd.manual);
+                Mqtt_Start();
+            }
+            else if (cmd.type == WIFI_CMD_AT_PROBE)
+            {
+                /*裸 AT 调试会打乱 MQTT 字节流，先断开再探测*/
+                Mqtt_Stop(1U);
+                DoAtProbe(cmd.atcmd);
+                Mqtt_Start();
             }
             continue;
         }
 
         if (s_connected)
         {
-            /* 本地走秒 */
-            Clock_TickOneSecond(&now);
-            ClockData_Set(&now);
+            uint32_t tickNow;
 
-            /*30 分钟重同步，校准本地漂移*/
+            /* 本地走秒：50ms 轮询下按 1s 边界推进，避免固定 1s 超时导致 MQTT 收包延迟。
+             *用 +=1000 而不是 =tickNow：轮询周期有抖动，直接取当前 tick 会让走秒变慢；
+             *长阻塞（如 OTA 检查）返回后这里会补上错过的秒数。*/
+            tickNow = osKernelGetTickCount();
+            while ((uint32_t)(tickNow - lastClockTick) >= 1000U)
+            {
+                lastClockTick += 1000U;
+                Clock_TickOneSecond(&now);
+                ClockData_Set(&now);
+            }
+
+            /*MQTT 收包/心跳/重连；连接阶段会阻塞数秒，内部已补喂看门狗*/
+            Mqtt_Poll();
+            Wifi_HandleMqttCommands();
+
+            /*遥测 1Hz；未连 Broker 时 Mqtt_Publish 直接返回 0，不阻塞*/
+            tickNow = osKernelGetTickCount();
+            if ((uint32_t)(tickNow - lastPubTick) >= MQTT_PUB_PERIOD_MS)
+            {
+                lastPubTick = tickNow;
+                Wifi_PublishTelemetry(&now);
+            }
+
+            /*30 分钟重同步，校准本地漂移。SNTP 走 AT 命令，会清串口环，
+             *必须先把 MQTT 断开，否则收到的半包会被清掉导致字节流错位*/
             if ((uint32_t)(osKernelGetTickCount() - lastResync) >= RESYNC_PERIOD_MS)
             {
                 ESP8266_Time_t net;
                 lastResync = osKernelGetTickCount();
+                Mqtt_Stop(1U);
                 if (ESP8266_FetchTime(&net) == 1U)
                 {
                     now.year = net.year; now.month = net.month; now.day = net.day;
@@ -861,6 +1174,8 @@ void StartWifiTask(void *argument)
                     now.week = net.week; now.synced = 1U;
                     ClockData_Set(&now);
                 }
+                lastClockTick = osKernelGetTickCount();
+                Mqtt_Start();
             }
 
             /*上电静默检查：首次连上起算 60s，仍在线且本 boot 未查过才执行一次。
@@ -870,7 +1185,9 @@ void StartWifiTask(void *argument)
             {
                 s_bootArmed   = 0U;
                 s_bootChecked = 1U;
+                Mqtt_Stop(1U);
                 DoCheckOta(0U);
+                Mqtt_Start();
             }
         }
         else if (s_haveCred)
@@ -884,6 +1201,7 @@ void StartWifiTask(void *argument)
                 {
                     s_connected = 1U;
                     lastResync = osKernelGetTickCount();
+                    lastClockTick = lastResync;
                     ClockData_Set(&now);
                     Wifi_SetStatus(WIFI_ST_CONNECTED);
                 }

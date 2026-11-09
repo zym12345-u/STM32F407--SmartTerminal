@@ -207,6 +207,105 @@ static uint16_t ESP_RingPop(uint8_t *out, uint16_t max)
 static uint8_t s_snap[ESP_RX_BUF_SIZE];
 
 
+/**
+  * 功    能：环形缓冲里当前可读字节数
+  * 参    数：无
+  * 返 回 值：可读字节数，0~ESP_RX_BUF_SIZE-1
+  * 补    充：仅任务侧调用；head 可能在此期间继续增长，少算几个字节无影响
+  */
+static uint16_t ESP_RingCount(void)
+{
+    uint16_t h = s_rxHead;
+
+    return (uint16_t)((h + ESP_RX_BUF_SIZE - s_rxTail) % ESP_RX_BUF_SIZE);
+}
+
+/**
+  * 功    能：从「相对读指针 offset」处窥探数据，不推进读指针
+  * 参    数：offset  相对 s_rxTail 的偏移；out  输出缓冲；max  最多拷多少
+  * 返 回 值：实际拷贝字节数，0 表示该偏移之后暂时没有数据
+  * 补    充：给「等 CIPSEND 的 '>' / SEND OK」用：只看不取，随后的 TcpRead
+  *            仍能按 +IPD 状态机把这些字节正常消费掉
+  */
+static uint16_t ESP_RingPeek(uint16_t offset, uint8_t *out, uint16_t max)
+{
+    uint16_t avail = ESP_RingCount();
+    uint16_t idx;
+    uint16_t n = 0U;
+
+    if (offset >= avail)
+    {
+        return 0U;
+    }
+    avail = (uint16_t)(avail - offset);
+    if (avail > max)
+    {
+        avail = max;
+    }
+    idx = (uint16_t)((s_rxTail + offset) % ESP_RX_BUF_SIZE);
+    while (n < avail)
+    {
+        out[n++] = s_rx[idx];
+        idx = (uint16_t)((idx + 1U) % ESP_RX_BUF_SIZE);
+    }
+    return n;
+}
+
+/**
+  * 功    能：在「相对读指针 base 之后新到的数据」里等一个关键字
+  * 参    数：base  起始偏移（之前的内容不算，避免匹配到上一条命令的残留）
+  *            token  要等的关键字；timeoutMs  超时
+  * 返 回 值：1 = 出现；0 = 超时
+  * 补    充：只窥探不取走；等待期间每 500ms 补报一次 WifiTask 心跳
+  */
+static uint8_t ESP_WaitTokenAfter(uint16_t base, const char *token, uint32_t timeoutMs)
+{
+    uint8_t  tmp[192];
+    uint16_t scanned  = base;
+    uint16_t tlen     = (uint16_t)strlen(token);
+    uint32_t start    = HAL_GetTick();
+    uint32_t lastBeat = start;
+
+    for (;;)
+    {
+        if (ESP_RingCount() > scanned)
+        {
+            uint16_t from = (scanned > tlen) ? (uint16_t)(scanned - tlen) : 0U;
+            uint16_t n;
+
+            if (from < base)
+            {
+                from = base;
+            }
+            n = ESP_RingPeek(from, tmp, (uint16_t)(sizeof(tmp) - 1U));
+            if (n > 0U)
+            {
+                tmp[n] = '\0';
+                if (strstr((char *)tmp, token) != NULL)
+                {
+                    return 1U;
+                }
+                if ((uint16_t)(from + n) > scanned)
+                {
+                    scanned = (uint16_t)(from + n);
+                }
+            }
+        }
+
+        if ((uint32_t)(HAL_GetTick() - start) >= timeoutMs)
+        {
+            return 0U;
+        }
+        osDelay(5U);
+        if ((uint32_t)(HAL_GetTick() - lastBeat) >= 500U)
+        {
+            Watchdog_Heartbeat(WDT_TASK_WIFI);
+            lastBeat = HAL_GetTick();
+        }
+    }
+}
+
+
 /*对外接口*/
 /**
   * 功    能：初始化 ESP8266 的串口和环形缓冲。只配本地，不探测模块在不在线
@@ -501,6 +600,60 @@ uint8_t ESP8266_TcpSend(const uint8_t *data, uint16_t len)
     }
     Watchdog_Heartbeat(WDT_TASK_WIFI);                        /* 长数据发送期间补报一次 */
     return 1U;
+}
+
+/**
+  * 功    能：发一段数据并等模块回 "SEND OK"（MQTT 这类要连续发包的场景用）
+  * 参    数：data  数据首地址；len  字节数，1~2048；ackTimeoutMs  等 SEND OK 的超时
+  * 返 回 值：1 = 模块确认收下（SEND OK）；0 = 没拿到 '>' 或没等到 SEND OK
+  * 补    充：与 ESP8266_TcpSend 的区别是「等到 SEND OK 才返回」：
+  *            上一条 CIPSEND 没结束时模块会回 busy p...，紧接着再发就会失败。
+  *            这里全程只窥探环形缓冲、不 Flush 不 Pop，先到的 +IPD 不会被清掉，
+  *            随后的 ESP8266_TcpRead 照常能读到。
+  *            '>' 等不到时重试 3 轮（模块可能还在收上一条的尾巴）
+  */
+uint8_t ESP8266_TcpSendWait(const uint8_t *data, uint16_t len, uint32_t ackTimeoutMs)
+{
+    char     cmd[24];
+    uint16_t base;
+    uint8_t  attempt;
+
+    if ((data == NULL) || (len == 0U) || (len > 2048U))
+    {
+        return 0U;
+    }
+    if (ackTimeoutMs == 0U)
+    {
+        ackTimeoutMs = 1000U;
+    }
+
+    for (attempt = 0U; attempt < 3U; attempt++)
+    {
+        /*base 取「当前已收字节数」：只认这条命令之后新到的 '>'，
+         *避免命中上一条 CIPSEND 残留的提示符*/
+        base = ESP_RingCount();
+        (void)snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%u\r\n", (unsigned)len);
+        if (HAL_UART_Transmit(&huart_esp, (uint8_t *)cmd, (uint16_t)strlen(cmd), 2000U) != HAL_OK)
+        {
+            return 0U;
+        }
+        if (ESP_WaitTokenAfter(base, ">", 1000U) != 0U)
+        {
+            break;
+        }
+    }
+    if (attempt >= 3U)
+    {
+        return 0U;
+    }
+
+    if (HAL_UART_Transmit(&huart_esp, (uint8_t *)data, len, 3000U) != HAL_OK)
+    {
+        return 0U;
+    }
+    Watchdog_Heartbeat(WDT_TASK_WIFI);
+
+    return ESP_WaitTokenAfter(base, "SEND OK", ackTimeoutMs);
 }
 
 /**

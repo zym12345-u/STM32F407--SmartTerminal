@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F407xx,MY_DISP_HOR_RES=320,MY_DISP_VER_RES=240</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/I2CBus;../Core/App/Bsp/24C02;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/WifiStore;../Core/App/Bsp/RS485;../Core/App/Bsp/IWDG;../Core/App/Bsp/W25Q128;../Core/App/Bsp/OTA;../Middlewares/Third_Party/littlefs;../Core/App/Bsp/LittleFS;../Core/App/Bsp/Font;../Core/App/Bsp/CAN</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/I2CBus;../Core/App/Bsp/24C02;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/WifiStore;../Core/App/Bsp/RS485;../Core/App/Bsp/IWDG;../Core/App/Bsp/W25Q128;../Core/App/Bsp/OTA;../Middlewares/Third_Party/littlefs;../Core/App/Bsp/LittleFS;../Core/App/Bsp/Font;../Core/App/Bsp/CAN;../Core/App/Bsp/MQTT</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -3271,6 +3271,26 @@
               <FileName>bsp_bootflag.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Core\App\Bsp\OTA\bsp_bootflag.h</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_Mqtt.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\MQTT\bsp_Mqtt.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_Mqtt.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\App\Bsp\MQTT\bsp_Mqtt.h</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_MqttKit.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\MQTT\bsp_MqttKit.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_MqttKit.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\App\Bsp\MQTT\bsp_MqttKit.h</FilePath>
             </File>
             <File>
               <FileName>bsp_lfs_port.c</FileName>
