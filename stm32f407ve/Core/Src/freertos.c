@@ -96,7 +96,10 @@ const osThreadAttr_t LEDTask_attributes = {
 osThreadId_t CommandTaskHandle;
 const osThreadAttr_t CommandTask_attributes = {
   .name = "CommandTask",
-  .stack_size = 128 * 4,
+  /* 1536 字节：栈上要同时放 Command_HandleLine 的解析帧(host[64]+两个配置结构)
+   * 和 Wifi_Post* 里按值投递的 WifiCmd_t(240B)，再加 UART_Printf 的格式化帧。
+   * 原来 512 字节时 vTaskList 只剩 79 字余量，发 mqttcfg/otacfg/at 必溢出 */
+  .stack_size = 1536U,
   .priority = (osPriority_t) osPriorityHigh1,
 };
 /* Definitions for LEDQueue */

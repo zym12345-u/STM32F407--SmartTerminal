@@ -21,11 +21,12 @@
 #include <stdint.h>
 
 #include "bsp_MqttKit.h"    /* 复用 MQTT_QOS0/1 等协议常量 */
+#include "bsp_MqttCfg.h"    /* Broker 地址可配置：宏默认 + /mqtt.conf */
 
 
 /*══════ 部署参数：编译期默认值 ══════
  * 本地 Mosquitto：PC 192.168.10.3:1883，allow_anonymous true。
- * 换网络/换 PC 时改这里重新编译；后续可扩展成 /mqtt.conf。*/
+ * 运行时可用串口命令 mqttcfg <host> [port] 改 /mqtt.conf 覆盖，无需重编。*/
 #define MQTT_BROKER_HOST      "192.168.10.3"
 #define MQTT_BROKER_PORT      1883U
 #define MQTT_CLIENT_ID        "stm32f407ve-dev01"
@@ -66,6 +67,14 @@ typedef struct
   * 补    充：只初始化本地变量，不碰 AT 串口
   */
 void Mqtt_Init(void);
+
+/**
+  * 功    能：从 Mqtt_Config 缓存重新装载 Broker 地址（改配置后调用）
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：仅 WifiTask 调用；调用前应先 Mqtt_Stop(1)，调用后 Mqtt_Start()
+  */
+void Mqtt_ReloadConfig(void);
 
 /**
   * 功    能：允许 MQTT 工作；下一次 Mqtt_Poll 会立即尝试连接 Broker

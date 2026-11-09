@@ -112,6 +112,24 @@ void Mqtt_Init(void)
 }
 
 /**
+  * 功    能：从配置缓存重新装载 Broker 地址
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：仅 WifiTask 调用；改完配置后 Stop/Reload/Start 完成热切换
+  */
+void Mqtt_ReloadConfig(void)
+{
+    MqttBrokerCfg_t cfg;
+
+    Mqtt_Config_Get(&cfg);
+    (void)strncpy(s_host, cfg.host, sizeof(s_host) - 1U);
+    s_host[sizeof(s_host) - 1U] = '\0';
+    s_port = cfg.port;
+
+    UART_Printf("[MQTT] broker -> %s:%u\r\n", s_host, (unsigned)s_port);
+}
+
+/**
   * 功    能：允许 MQTT 工作，下一次 Poll 立即尝试连接
   * 参    数：无
   * 返 回 值：无

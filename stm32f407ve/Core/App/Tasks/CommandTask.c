@@ -19,6 +19,7 @@
 #include "FreeRTOS.h"
 #include "bsp_IWDG.h"
 #include "bsp_OtaCfg.h"
+#include "bsp_MqttCfg.h"
 #include "LEDType.h"
 #include "PowerMgr.h"
 #include "WifiNet.h"
@@ -40,18 +41,18 @@ extern osMessageQueueId_t LEDQueueHandle;
 #define CMD_COLOR_BLUE      3U
 #define CMD_COLOR_INVALID   0xFFU
 
-/*文本行命令缓冲：otacfg <host> [port]，与 0xAA 二进制帧共用 USART1*/
+/*文本行命令缓冲：otacfg/mqttcfg <host> [port]，与 0xAA 二进制帧共用 USART1*/
 #define CMD_LINE_BUF_SIZE   80U
 
 static char    s_line[CMD_LINE_BUF_SIZE];
 static uint8_t s_lineLen = 0U;
 
 /**
-  * 功    能：解析一行文本命令；支持 otacfg <host> [port] 与调试用 at <原始指令>
+  * 功    能：解析一行文本命令；支持 otacfg / mqttcfg 与调试用 at <原始指令>
   * 参    数：line  以 '\0' 结尾的一行
   * 返 回 值：无
-  * 补    充：这里只解析并投队列，写 /ota.conf 由 WifiTask 完成；
-  *            绝不能在本任务直接调用 OTA_Config_Set()（LittleFS 单写者）
+  * 补    充：这里只解析并投队列，写文件由 WifiTask 完成；
+  *            绝不能在本任务直接调用 OTA_Config_Set()/Mqtt_Config_Set()（LittleFS 单写者）
   */
 static void Command_HandleLine(const char *line)
 {
@@ -59,6 +60,7 @@ static void Command_HandleLine(const char *line)
   unsigned int port = 0U;
   int n;
   OtaServerCfg_t cfg;
+  MqttBrokerCfg_t mqttCfg;
 
   if ((strncmp(line, "otacfg", 6U) == 0) && (line[6] == ' '))
   {
@@ -82,6 +84,32 @@ static void Command_HandleLine(const char *line)
 
     Wifi_PostSetOtaCfg(host, (uint16_t)port);
     UART_Printf("[CMD] otacfg queued: %s:%u\r\n", host, port);
+    PowerMgr_Feed();
+    return;
+  }
+
+  if ((strncmp(line, "mqttcfg", 7U) == 0) && (line[7] == ' '))
+  {
+    n = sscanf(line + 8, "%63s %u", host, &port);
+    if(n < 1)
+    {
+      UART_Printf("[CMD] usage: mqttcfg <host> [port]\r\n");
+      return;
+    }
+    if(n == 1)
+    {
+      /*没给端口就沿用当前生效值*/
+      Mqtt_Config_Get(&mqttCfg);
+      port = mqttCfg.port;
+    }
+    if((port < 1U) || (port > 65535U))
+    {
+      UART_Printf("[CMD] usage: mqttcfg <host> [port]\r\n");
+      return;
+    }
+
+    Wifi_PostSetMqttCfg(host, (uint16_t)port);
+    UART_Printf("[CMD] mqttcfg queued: %s:%u\r\n", host, port);
     PowerMgr_Feed();
     return;
   }

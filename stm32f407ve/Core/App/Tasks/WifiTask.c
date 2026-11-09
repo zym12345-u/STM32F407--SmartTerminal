@@ -190,6 +190,34 @@ void Wifi_PostSetOtaCfg(const char *host, uint16_t port)
 }
 
 /**
+  * 功    能：请求 WifiTask 保存 MQTT Broker 地址：投一条命令就返回
+  * 参    数：host  Broker 地址 1~63 字符；port  端口 1~65535
+  * 返 回 值：无
+  * 补    充：LittleFS 只有 WifiTask 能写；队列不可用时静默丢弃并打日志
+  */
+void Wifi_PostSetMqttCfg(const char *host, uint16_t port)
+{
+    WifiCmd_t cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.type = WIFI_CMD_SET_MQTT_CFG;
+    cmd.port = port;
+    if (host != NULL)
+    {
+        strncpy(cmd.host, host, sizeof(cmd.host) - 1U);
+    }
+
+    if (s_cmdQ != NULL)
+    {
+        (void)osMessageQueuePut(s_cmdQ, &cmd, 0U, 0U);
+    }
+    else
+    {
+        UART_Printf("[WIFI] PostSetMqttCfg dropped: cmdQ NULL\r\n");
+    }
+}
+
+/**
   * 功    能：请求 WifiTask 检查更新：投一条命令就返回，结果写 g_otaStatus
   * 参    数：manual  1=用户手动点 Check 0=上电静默检查
   * 返 回 值：无
@@ -995,8 +1023,10 @@ void StartWifiTask(void *argument)
     /* A. 开机：有保存凭据则自动连(先迁后读) */
     (void)WifiStoreLfs_Migrate();
 
-    /* 凭据迁移完成后再读 OTA 配置：同一 LittleFS，且只有本任务能碰 */
+    /* 凭据迁移完成后再读 OTA / MQTT 配置：同一 LittleFS，且只有本任务能碰 */
     OTA_Config_Init();
+    Mqtt_Config_Init();
+    Mqtt_ReloadConfig();
 
     if (WifiStoreLfs_Load(&s_cred) != 0U)
     {
@@ -1114,6 +1144,21 @@ void StartWifiTask(void *argument)
                 if (OTA_Config_Set(cmd.host, cmd.port) == 0U)
                 {
                     UART_Printf("[WIFI] ota cfg save failed\r\n");
+                }
+            }
+            else if (cmd.type == WIFI_CMD_SET_MQTT_CFG)
+            {
+                UART_Printf("[WIFI] set mqtt cfg %s:%u\r\n", cmd.host, (unsigned)cmd.port);
+                /*写 /mqtt.conf 只能在本任务；成功后断开旧 Broker 并按新地址重连*/
+                if (Mqtt_Config_Set(cmd.host, cmd.port) != 0U)
+                {
+                    Mqtt_Stop(1U);
+                    Mqtt_ReloadConfig();
+                    Mqtt_Start();
+                }
+                else
+                {
+                    UART_Printf("[WIFI] mqtt cfg save failed\r\n");
                 }
             }
             else if (cmd.type == WIFI_CMD_CHECK_OTA)
