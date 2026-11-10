@@ -79,7 +79,7 @@ static void    Mqtt_RxPump(void);
 static void    Mqtt_ProcessRx(void);
 static void    Mqtt_HandlePublish(uint32_t total);
 static uint8_t Mqtt_SendRaw(uint16_t len);
-static void    Mqtt_EnqueueCommand(const uint8_t *payload, uint32_t len);
+static void    Mqtt_EnqueueCommand(const char *topic, const uint8_t *payload, uint32_t len);
 
 
 /**
@@ -385,12 +385,22 @@ static uint8_t Mqtt_Connect(void)
         return 0U;
     }
 
-    /*订阅命令主题；SUBACK 不阻塞等，收到时只打日志*/
+    /*订阅命令与 OTA 两个主题；SUBACK 不阻塞等，收到时只打日志。
+     *分两条 SUBSCRIBE 发：组包函数只支持单主题，且这样每个 pktId 各自对应，
+     *SUBACK 返回值不会互相覆盖。*/
     s_pktId = (s_pktId == 0xFFFFU) ? 1U : (uint16_t)(s_pktId + 1U);
     n = MqttKit_BuildSubscribe(s_tx, sizeof(s_tx), MQTT_TOPIC_CMD, MQTT_QOS1, s_pktId);
     if ((n == 0U) || (Mqtt_SendRaw((uint16_t)n) == 0U))
     {
-        UART_Printf("[MQTT] subscribe fail\r\n");
+        UART_Printf("[MQTT] subscribe cmd fail\r\n");
+        return 0U;
+    }
+
+    s_pktId = (s_pktId == 0xFFFFU) ? 1U : (uint16_t)(s_pktId + 1U);
+    n = MqttKit_BuildSubscribe(s_tx, sizeof(s_tx), MQTT_TOPIC_OTA, MQTT_QOS1, s_pktId);
+    if ((n == 0U) || (Mqtt_SendRaw((uint16_t)n) == 0U))
+    {
+        UART_Printf("[MQTT] subscribe ota fail\r\n");
         return 0U;
     }
 
@@ -400,7 +410,7 @@ static uint8_t Mqtt_Connect(void)
     s_lastRxTick   = s_lastPingTick;
     s_needReconnect = 0U;
 
-    UART_Printf("[MQTT] connected, sub %s\r\n", MQTT_TOPIC_CMD);
+    UART_Printf("[MQTT] connected, sub %s + %s\r\n", MQTT_TOPIC_CMD, MQTT_TOPIC_OTA);
 
     /*上线状态（retained）：后订阅的设备/客户端也能立即看到在线*/
     (void)Mqtt_Publish(MQTT_TOPIC_STATUS, MQTT_PAYLOAD_ONLINE, MQTT_QOS1, 1U);
@@ -547,24 +557,32 @@ static void Mqtt_HandlePublish(uint32_t total)
         }
     }
 
+    /*两条下行主题都要收：cmd 是控制命令，ota 是服务器推送的版本通知/升级触发。
+     *topic 原样带给上层，由 WifiTask 决定怎么处理，会话层不解释业务语义。*/
     if ((msg.topicLen == (uint16_t)strlen(MQTT_TOPIC_CMD)) &&
         (memcmp(msg.topic, MQTT_TOPIC_CMD, msg.topicLen) == 0))
     {
-        Mqtt_EnqueueCommand(msg.payload, msg.payloadLen);
+        Mqtt_EnqueueCommand(MQTT_TOPIC_CMD, msg.payload, msg.payloadLen);
+    }
+    else if ((msg.topicLen == (uint16_t)strlen(MQTT_TOPIC_OTA)) &&
+             (memcmp(msg.topic, MQTT_TOPIC_OTA, msg.topicLen) == 0))
+    {
+        Mqtt_EnqueueCommand(MQTT_TOPIC_OTA, msg.payload, msg.payloadLen);
     }
 }
 
 /**
   * 功    能：把下行命令复制进命令队列；队列满则丢弃并打日志
-  * 参    数：payload  消息体；len  字节数
+  * 参    数：topic  消息来源主题；payload  消息体；len  字节数
   * 返 回 值：无
+  * 补    充：topic 必须以 '\0' 结尾，且长度小于 MqttCommand_t.topic
   */
-static void Mqtt_EnqueueCommand(const uint8_t *payload, uint32_t len)
+static void Mqtt_EnqueueCommand(const char *topic, const uint8_t *payload, uint32_t len)
 {
     uint8_t next;
     MqttCommand_t *slot;
 
-    if ((payload == NULL) || (len == 0U) || (len > MQTT_CMD_PAYLOAD_MAX))
+    if ((topic == NULL) || (payload == NULL) || (len == 0U) || (len > MQTT_CMD_PAYLOAD_MAX))
     {
         UART_Printf("[MQTT] cmd dropped: len=%u\r\n", (unsigned)len);
         return;
@@ -578,14 +596,14 @@ static void Mqtt_EnqueueCommand(const uint8_t *payload, uint32_t len)
     }
 
     slot = &s_cmdQ[s_cmdHead];
-    (void)strncpy(slot->topic, MQTT_TOPIC_CMD, sizeof(slot->topic) - 1U);
+    (void)strncpy(slot->topic, topic, sizeof(slot->topic) - 1U);
     slot->topic[sizeof(slot->topic) - 1U] = '\0';
     memcpy(slot->payload, payload, len);
     slot->payload[len] = '\0';
     slot->len = (uint16_t)len;
 
     s_cmdHead = next;
-    UART_Printf("[MQTT] cmd in: %s\r\n", slot->payload);
+    UART_Printf("[MQTT] cmd in (%s): %s\r\n", slot->topic, slot->payload);
 }
 
 /**

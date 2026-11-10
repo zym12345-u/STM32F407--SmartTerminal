@@ -31,7 +31,8 @@
 #define MQTT_BROKER_PORT      1883U
 #define MQTT_CLIENT_ID        "stm32f407ve-dev01"
 
-/*主题按项目约定：遥测上行 / 命令下行 / 在线状态（retained）/ OTA 预留*/
+/*主题按项目约定：遥测上行 / 命令下行 / 在线状态（retained）/ OTA 通知与远程触发
+ *cmd 承载设备控制，ota 承载服务器推送的版本通知与升级指令，两条都订阅*/
 #define MQTT_TOPIC_TELEMETRY  "stm32/dev01/telemetry"
 #define MQTT_TOPIC_CMD        "stm32/dev01/cmd"
 #define MQTT_TOPIC_STATUS     "stm32/dev01/status"
@@ -51,10 +52,10 @@
 #define MQTT_CMD_PAYLOAD_MAX  128U
 
 
-/*下行命令：Mqtt_Poll 收到 PUBLISH 后按队列交给 WifiTask 处理*/
+/*下行消息：Mqtt_Poll 收到 PUBLISH 后按队列交给 WifiTask，topic 标明来源主题*/
 typedef struct
 {
-    char     topic[40];                         /* 命令主题，'\0' 结尾 */
+    char     topic[40];                         /* 来源主题（cmd / ota），'\0' 结尾 */
     char     payload[MQTT_CMD_PAYLOAD_MAX + 1U];/* 命令 JSON，'\0' 结尾 */
     uint16_t len;                               /* payload 实际字节数 */
 } MqttCommand_t;
