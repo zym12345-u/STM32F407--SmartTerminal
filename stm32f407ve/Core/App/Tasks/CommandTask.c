@@ -20,6 +20,7 @@
 #include "bsp_IWDG.h"
 #include "bsp_OtaCfg.h"
 #include "bsp_MqttCfg.h"
+#include "bsp_LogFile.h"
 #include "LEDType.h"
 #include "PowerMgr.h"
 #include "WifiNet.h"
@@ -120,6 +121,16 @@ static void Command_HandleLine(const char *line)
     Wifi_PostAtProbe(line + 3);
     UART_Printf("[CMD] at queued: %s\r\n", line + 3);
     PowerMgr_Feed();
+    return;
+  }
+
+  /*调试：把 TF 卡上的日志文件回传到串口，电脑端无需读卡器*/
+  if (strcmp(line, "logdump") == 0)
+  {
+    LogFile_RequestDump();
+    UART_Printf("[CMD] logdump queued\r\n");
+    PowerMgr_Feed();
+    return;
   }
 }
 

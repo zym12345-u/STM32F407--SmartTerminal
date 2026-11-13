@@ -3402,6 +3402,16 @@
               <FileType>5</FileType>
               <FilePath>../Core/App/Bsp/SDCard/bsp_SDCard.h</FilePath>
             </File>
+            <File>
+              <FileName>bsp_LogFile.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Bsp/SDCard/bsp_LogFile.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_LogFile.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/App/Bsp/SDCard/bsp_LogFile.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

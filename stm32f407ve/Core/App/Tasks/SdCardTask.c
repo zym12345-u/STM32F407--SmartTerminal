@@ -9,13 +9,14 @@
 #include "cmsis_os2.h"
 
 #include "bsp_SDCard.h"
+#include "bsp_LogFile.h"
 #include "sdio.h"
 #include "usart.h"
 #include "ff.h"
 #include <string.h>
 
 #define SDCARD_INIT_DELAY_MS   3000U   /*先让 GUI/WiFi 稳定，再动 SDIO*/
-#define SDCARD_TASK_STACK      1024U   /*字节；SD 轮询不用大缓冲，留足调用链*/
+#define SDCARD_TASK_STACK      2048U   /*字节；多了 FatFS f_write/f_sync 调用链，1KB 偏紧*/
 
 /**
   * 功    能：挂载失败时读扇区 0 做诊断：区分"读卡失败"与"卡里没有 FAT 文件系统"
@@ -141,6 +142,16 @@ static void StartSdCardTask(void *argument)
     if (ret == SDCARD_OK)
     {
         SdCard_RwTest();
+
+        /*日志落盘：队列就绪后，UART_Printf 的内容会同步写进 0:/LOG.TXT*/
+        if (LogFile_Init() == LOGFILE_OK)
+        {
+            UART_Printf("[LOG] file logging started\r\n");
+        }
+        else
+        {
+            UART_Printf("[LOG] open log file failed\r\n");
+        }
     }
     else
     {
@@ -153,7 +164,9 @@ static void StartSdCardTask(void *argument)
 
     for (;;)
     {
-        (void)osDelay(10000U);
+        /*低优先级消费日志队列：写卡慢也只影响本任务，不挡 GUI/WiFi*/
+        LogFile_TaskRun();
+        (void)osDelay(20U);
     }
 }
 
