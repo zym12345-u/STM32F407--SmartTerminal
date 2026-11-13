@@ -150,6 +150,19 @@ static int8_t Kit_DecodeHeader(const uint8_t *buf, uint32_t len,
 
 
 /*══════ 对外：组包 ══════*/
+/**
+  * 功    能：计算一帧报文的总长度（固定头 + 剩余长度字段 + 剩余内容）
+  * 参    数：buf  接收流首地址；len  当前已收字节数
+  * 返 回 值：>0 = 整帧总字节数；0 = 数据还不够一帧；-1 = 长度字段非法
+  * 补    充：用于从 TCP 字节流里切帧，调用方按返回值判断是否收齐。
+  *
+  * ── MQTT 的"剩余长度"为什么这么麻烦 ──
+  *   它是【变长编码】：每字节只有低 7 位是数据，最高位是"后面还有"的续位。
+  *   127 以内 1 字节，16383 以内 2 字节……最多 4 字节，表示到 256MB。
+  *   所以只看第一个字节根本不知道这帧多长——必须从第 2 字节起逐字节解码，
+  *   解到"没有续位"为止才知道固定头到底占了几个字节。
+  *   这也是 TCP 粘包/半包的标准解法：FrameLength 返回 0 就继续等下一批字节。
+  */
 int32_t MqttKit_FrameLength(const uint8_t *buf, uint32_t len)
 {
     uint32_t i;
@@ -190,6 +203,19 @@ int32_t MqttKit_FrameLength(const uint8_t *buf, uint32_t len)
     return 0;       /* 长度字段还没收全 */
 }
 
+/**
+  * 功    能：组 CONNECT 报文（clean session，无用户名密码，可带遗嘱）
+  * 参    数：buf  输出缓冲；cap  容量；clientId  客户端 ID；keepAliveSec  保活秒数
+  *            willTopic/willPayload  遗嘱主题与内容，传 NULL 表示不带遗嘱
+  *            willQos  遗嘱 QoS（0/1）；willRetain  1=遗嘱保留
+  * 返 回 值：写入字节数，0=参数非法或缓冲不足
+  * 补    充：CONNECT 是唯一的可变头 10 字节的报文：
+  *            "MQTT"(4B) + 协议级别(1B) + 连接标志(1B) + keepAlive(2B) = 8，
+  *            加上协议名自己的 2 字节长度前缀正好 10。
+  *            遗嘱（LWT）是 Broker 替设备发的"遗言"：设备断电/断网没来得及发
+  *            DISCONNECT 时，Broker 把 willPayload 发到 willTopic——
+  *            本项目用它把 stm32/dev01/status 置成 online=0，Web 端才知道设备掉了。
+  */
 uint32_t MqttKit_BuildConnect(uint8_t *buf, uint32_t cap,
                               const char *clientId, uint16_t keepAliveSec,
                               const char *willTopic, const char *willPayload,
@@ -252,6 +278,16 @@ uint32_t MqttKit_BuildConnect(uint8_t *buf, uint32_t cap,
     return Kit_Finish(&w);
 }
 
+/**
+  * 功    能：组 PUBLISH 报文
+  * 参    数：buf/cap  输出缓冲；topic  主题；payload  消息体，可为 NULL（长度为 0）
+  *            payloadLen  消息体字节数；qos  0/1；retain  1=保留消息；pktId  QoS>0 时的标识
+  * 返 回 值：写入字节数，0=参数非法或缓冲不足
+  * 补    充：PUBLISH 的固定头低 4 位本身就是 flags：bit1~2=QoS、bit0=retain，
+  *            所以首字节不能像其他报文那样只写类型，要类型<<4 再拼 flags。
+  *            QoS1 时报文标识 pktId 紧跟在 topic 后面、payload 前面——
+  *            位置是协议规定的，Broker 靠它把 PUBACK 对回这条消息。
+  */
 uint32_t MqttKit_BuildPublish(uint8_t *buf, uint32_t cap, const char *topic,
                               const uint8_t *payload, uint16_t payloadLen,
                               uint8_t qos, uint8_t retain, uint16_t pktId)
@@ -298,6 +334,15 @@ uint32_t MqttKit_BuildPublish(uint8_t *buf, uint32_t cap, const char *topic,
     return Kit_Finish(&w);
 }
 
+/**
+  * 功    能：组 SUBSCRIBE 报文（单主题）
+  * 参    数：buf/cap  输出缓冲；topic  主题过滤器；qos  请求 QoS；pktId  报文标识（不能为 0）
+  * 返 回 值：写入字节数，0=失败
+  * 补    充：固定头低 4 位固定写 0x02（协议规定 SUBSCRIBE 必须带这个标志位，
+  *            不是 QoS）；载荷顺序是 pktId + (2B 长度 + topic) + 1B 请求 QoS。
+  *            协议本允许一条 SUBSCRIBE 带多个主题，这里只组单主题——
+  *            组包代码简单一半，调用方多组几条就行（见 bsp_Mqtt.c 的两连发）。
+  */
 uint32_t MqttKit_BuildSubscribe(uint8_t *buf, uint32_t cap, const char *topic,
                                 uint8_t qos, uint16_t pktId)
 {
@@ -332,6 +377,14 @@ uint32_t MqttKit_BuildSubscribe(uint8_t *buf, uint32_t cap, const char *topic,
     return Kit_Finish(&w);
 }
 
+/**
+  * 功    能：组 PINGREQ（2 字节）
+  * 参    数：buf/cap  输出缓冲
+  * 返 回 值：2，0=失败
+  * 补    充：整个 MQTT 协议里最小的报文：1 字节类型 + 1 字节剩余长度 0。
+  *            keepAlive 只有 CONNECT 时声明，真正续命靠的是这条；
+  *            Broker 在 1.5 倍 keepAlive 内没收到任何报文就断开连接。
+  */
 uint32_t MqttKit_BuildPingReq(uint8_t *buf, uint32_t cap)
 {
     if ((buf == NULL) || (cap < 2U))
@@ -343,6 +396,14 @@ uint32_t MqttKit_BuildPingReq(uint8_t *buf, uint32_t cap)
     return 2U;
 }
 
+/**
+  * 功    能：组 DISCONNECT（2 字节）
+  * 参    数：buf/cap  输出缓冲
+  * 返 回 值：2，0=失败
+  * 补    充：主动下线必须发它：Broker 收到后才【不发】遗嘱。
+  *            不发 DISCONNECT 直接断 TCP（拔网线场景），Broker 会替你把
+  *            遗嘱发出去——主动下线和意外掉线就是靠这一条报文区分的。
+  */
 uint32_t MqttKit_BuildDisconnect(uint8_t *buf, uint32_t cap)
 {
     if ((buf == NULL) || (cap < 2U))
@@ -354,6 +415,14 @@ uint32_t MqttKit_BuildDisconnect(uint8_t *buf, uint32_t cap)
     return 2U;
 }
 
+/**
+  * 功    能：组 PUBACK（4 字节）
+  * 参    数：buf/cap  输出缓冲；pktId  要确认的报文标识
+  * 返 回 值：4，0=失败
+  * 补    充：QoS1 的"收到确认"：设备收到 QoS1 的 PUBLISH 后必须回 PUBACK，
+  *            pktId 原样带回，Broker 才知道哪条投递成功了；
+  *            不回的话 Broker 会按重发间隔用 dup=1 重投同一条消息。
+  */
 uint32_t MqttKit_BuildPubAck(uint8_t *buf, uint32_t cap, uint16_t pktId)
 {
     if ((buf == NULL) || (cap < 4U))
@@ -369,6 +438,14 @@ uint32_t MqttKit_BuildPubAck(uint8_t *buf, uint32_t cap, uint16_t pktId)
 
 
 /*══════ 对外：解包 ══════*/
+/**
+  * 功    能：解 CONNACK
+  * 参    数：buf/len  整帧报文；rc  输出连接返回码，0=成功
+  * 返 回 值：0=解析成功；-1=不是合法 CONNACK
+  * 补    充：载荷 2 字节：第 0 字节是连接确认标志（当前必为 0），
+  *            第 1 字节才是返回码——0=接受、1=协议版本错、2=clientId 被拒、
+  *            5=未授权。调试时 rc 打出来基本能定位"连不上"的配置问题。
+  */
 int8_t MqttKit_ParseConnAck(const uint8_t *buf, uint32_t len, uint8_t *rc)
 {
     uint32_t hdrLen;
@@ -394,6 +471,15 @@ int8_t MqttKit_ParseConnAck(const uint8_t *buf, uint32_t len, uint8_t *rc)
     return 0;
 }
 
+/**
+  * 功    能：解 PUBLISH，topic/payload 指针指向 buf 内部
+  * 参    数：buf/len  整帧报文；out  输出解析结果
+  * 返 回 值：0=成功；-1=报文非法
+  * 补    充：【零拷贝设计】topic/payload 不复制，直接指向原缓冲里的位置，
+  *            生命周期 = 调用方的那块 buf——调用方处理完才能动缓冲。
+  *            省一次拷贝看起来小事，但命令队列里存的是【拷贝后的副本】
+  *            （见 bsp_Mqtt.c Mqtt_EnqueueCommand），这里的指针只活到入队前。
+  */
 int8_t MqttKit_ParsePublish(const uint8_t *buf, uint32_t len, MqttMessage_t *out)
 {
     uint32_t hdrLen;
@@ -458,6 +544,14 @@ int8_t MqttKit_ParsePublish(const uint8_t *buf, uint32_t len, MqttMessage_t *out
     return 0;
 }
 
+/**
+  * 功    能：解 SUBACK
+  * 参    数：buf/len  整帧报文；rc  输出第一个主题的返回码（0/1/2 成功，0x80 失败）
+  * 返 回 值：0=解析成功；-1=不是合法 SUBACK
+  * 补    充：返回码与请求的 QoS 对应：0=QoS0、1=QoS1、2=QoS2 通过并降级，
+  *            0x80=Broker 拒绝订阅（主题无权限等）。本项目只发 QoS1，
+  *            所以正常应回 0x01；收到 0x80 说明 Broker 配置有问题。
+  */
 int8_t MqttKit_ParseSubAck(const uint8_t *buf, uint32_t len, uint8_t *rc)
 {
     uint32_t hdrLen;

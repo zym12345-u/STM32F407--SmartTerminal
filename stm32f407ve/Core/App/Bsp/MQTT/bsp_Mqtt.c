@@ -254,6 +254,15 @@ void Mqtt_Poll(void)
     }
 }
 
+/**
+  * 功    能：发布一条消息
+  * 参    数：topic  主题；payload  以 '\0' 结尾的文本消息；qos  0/1；retain  1=保留消息
+  * 返 回 值：1=已写入 ESP8266；0=未连接/发送失败
+  * 补    充：QoS1 只发一次不重传——本项目消息都是"新的覆盖旧的"（遥测/状态），
+  *            Broker 没收到就等下一条，不需要重传语义。
+  *            pktId 全局递增且跳过 0xFFFF 回绕到 1：0 是协议保留值，
+  *            会话内不重复的 pktId 能让 PUBACK 一眼对回是哪条消息。
+  */
 uint8_t Mqtt_Publish(const char *topic, const char *payload, uint8_t qos, uint8_t retain)
 {
     uint32_t n;
@@ -285,6 +294,14 @@ uint8_t Mqtt_Publish(const char *topic, const char *payload, uint8_t qos, uint8_
     return Mqtt_SendRaw((uint16_t)n);
 }
 
+/**
+  * 功    能：取一条下行命令（非阻塞）
+  * 参    数：out  输出命令，不可为 NULL
+  * 返 回 值：1=取到；0=没有命令
+  * 补    充：整个结构体按值拷出，取出后槽位立刻可复用；
+  *            只在 WifiTask 主循环调用（生产者 Mqtt_Poll 与消费者都在同一任务，
+  *            这个环形队列不需要加锁）。
+  */
 uint8_t Mqtt_TakeCommand(MqttCommand_t *out)
 {
     if ((out == NULL) || (s_cmdTail == s_cmdHead))
@@ -296,6 +313,13 @@ uint8_t Mqtt_TakeCommand(MqttCommand_t *out)
     return 1U;
 }
 
+/**
+  * 功    能：查询 MQTT 是否已连接
+  * 参    数：无
+  * 返 回 值：1=CONNACK 成功且未掉线；0=其他
+  * 补    充：CONNECTING/BACKOFF 阶段都不算连上——别的模块据此决定
+  *            "能不能现在发遥测"，比拿 s_state 原始值判断更不容易出错。
+  */
 uint8_t Mqtt_IsConnected(void)
 {
     return (s_state == MQTT_ST_CONNECTED) ? 1U : 0U;
