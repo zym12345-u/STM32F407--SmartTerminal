@@ -56,6 +56,7 @@ extern void WifiTask_Create(void);     /*ESP8266 SNTP 对时*/
 extern void ModbusTask_Create(void);    /*RS485 Modbus RTU 从站*/
 extern void CanTask_Create(void);       /*CAN1 500Kbps 收发*/
 extern void MonitorTask_Create(void);   /*心跳监控 + IWDG 喂狗*/
+extern void SDCardTask_Create(void);    /*TF 卡延后初始化*/
 #include "bsp_W25Q128.h"               /*外部 Flash 自检*/
 #include "bsp_lfs_port.h"              /*LittleFS 挂载*/
 #include "bsp_font_gbk.h"              /*外挂 GBK 字库自检*/
@@ -193,6 +194,7 @@ void MX_FREERTOS_Init(void) {
   ModbusTask_Create();    /*RS485 Modbus 从站*/
   CanTask_Create();       /*CAN1 报文收发*/
   MonitorTask_Create();   /*心跳检测 + IWDG 喂狗*/
+  SDCardTask_Create();    /*TF 卡延后初始化，低优先级，不挡 GUI*/
   /* 每 5s 打印任务栈水位和 CPU 占比 */
   {
     static const osThreadAttr_t statsTaskAttr = {

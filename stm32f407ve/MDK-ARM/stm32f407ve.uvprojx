@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F407xx,MY_DISP_HOR_RES=320,MY_DISP_VER_RES=240</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/I2CBus;../Core/App/Bsp/24C02;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/WifiStore;../Core/App/Bsp/RS485;../Core/App/Bsp/IWDG;../Core/App/Bsp/W25Q128;../Core/App/Bsp/OTA;../Middlewares/Third_Party/littlefs;../Core/App/Bsp/LittleFS;../Core/App/Bsp/Font;../Core/App/Bsp/CAN;../Core/App/Bsp/MQTT</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/I2CBus;../Core/App/Bsp/24C02;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/WifiStore;../Core/App/Bsp/RS485;../Core/App/Bsp/IWDG;../Core/App/Bsp/W25Q128;../Core/App/Bsp/OTA;../Middlewares/Third_Party/littlefs;../Core/App/Bsp/LittleFS;../Core/App/Bsp/Font;../Core/App/Bsp/CAN;../Core/App/Bsp/MQTT;../Middlewares/Third_Party/FatFS/src;../Core/App/Bsp/SDCard</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -587,6 +587,21 @@
               <FileType>1</FileType>
               <FilePath>../Core/Src/can.c</FilePath>
             </File>
+            <File>
+              <FileName>sdio.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/sdio.c</FilePath>
+            </File>
+            <File>
+              <FileName>sd_diskio.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/sd_diskio.c</FilePath>
+            </File>
+            <File>
+              <FileName>fatfs.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/fatfs.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -656,6 +671,11 @@
               <FileName>MonitorTask.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Tasks\MonitorTask.c</FilePath>
+            </File>
+            <File>
+              <FileName>SdCardTask.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Tasks\SdCardTask.c</FilePath>
             </File>
             <File>
               <FileName>PowerMgr.c</FileName>
@@ -919,6 +939,16 @@
               <FileName>stm32f4xx_hal_can.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32f4xx_hal_sd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_sd.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32f4xx_ll_sdmmc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_sdmmc.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -1563,6 +1593,31 @@
                   </Cads>
                 </FileArmAds>
               </FileOption>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Middlewares/FatFS</GroupName>
+          <Files>
+            <File>
+              <FileName>ff.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFS/src/ff.c</FilePath>
+            </File>
+            <File>
+              <FileName>diskio.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFS/src/diskio.c</FilePath>
+            </File>
+            <File>
+              <FileName>ff_gen_drv.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFS/src/ff_gen_drv.c</FilePath>
+            </File>
+            <File>
+              <FileName>ffconf.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFS/src/ffconf.h</FilePath>
             </File>
           </Files>
         </Group>
@@ -3336,6 +3391,16 @@
               <FileName>bsp_CAN.h</FileName>
               <FileType>5</FileType>
               <FilePath>../Core/App/Bsp/CAN/bsp_CAN.h</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_SDCard.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Bsp/SDCard/bsp_SDCard.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_SDCard.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/App/Bsp/SDCard/bsp_SDCard.h</FilePath>
             </File>
           </Files>
         </Group>

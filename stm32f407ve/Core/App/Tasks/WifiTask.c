@@ -19,6 +19,7 @@
 #include "SensorData.h"
 #include "LEDType.h"
 #include "WifiNet.h"
+#include "bsp_SDCard.h"
 #include "usart.h"
 #include <stdio.h>
 #include <string.h>
@@ -1239,17 +1240,21 @@ static void Wifi_PublishTelemetry(const ClockData_t *now)
     lux = Wifi_ToInt(g_sensorData.light);
     Wifi_VerText(s_curVer, fw, sizeof(fw));
 
-    /*带 fw：远程端不用额外查询就能确认升级后的设备是否已跑在新版本上*/
+    /*带 fw：远程端不用额外查询就能确认升级后的设备是否已跑在新版本上；
+     * 带 sd/sdkb：远程确认 TF 卡是否被识别及容量，便于 SDIO 联调期间免串口观察*/
     n = snprintf(json, sizeof(json),
                  "{\"temp\":%d.%d,\"humi\":%d.%d,\"lux\":%d,\"ok\":%u,"
-                 "\"ts\":\"%04u-%02u-%02u %02u:%02u:%02u\",\"fw\":\"%s\"}",
+                 "\"ts\":\"%04u-%02u-%02u %02u:%02u:%02u\",\"fw\":\"%s\","
+                 "\"sd\":%u,\"sdkb\":%lu}",
                  t10 / 10, ((t10 < 0) ? -t10 : t10) % 10,
                  h10 / 10, ((h10 < 0) ? -h10 : h10) % 10,
                  lux,
                  (unsigned)g_sensorData.temp_valid,
                  (unsigned)now->year, (unsigned)now->month, (unsigned)now->day,
                  (unsigned)now->hour, (unsigned)now->min, (unsigned)now->sec,
-                 fw);
+                 fw,
+                 (unsigned)SDCard_IsReady(),
+                 (unsigned long)SDCard_GetCapacityKB());
 
     if (n > 0)
     {

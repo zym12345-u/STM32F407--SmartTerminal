@@ -173,6 +173,6 @@ typedef struct
 
 /* 版本号高低字节 0x00~0xFF；编译期常量，CanTask 填入应答帧 [2..3] */
 #define CAN_FW_VER_MAJOR    0x01U
-#define CAN_FW_VER_MINOR    0x06U
+#define CAN_FW_VER_MINOR    0x08U
 
 #endif /* __CAN_DATA_H */
