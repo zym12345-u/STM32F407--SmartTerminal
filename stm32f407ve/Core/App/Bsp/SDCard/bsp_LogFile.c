@@ -22,6 +22,8 @@
 #define LOG_QUEUE_LEN     16U    /*约 16×68B，共 1KB 左右*/
 #define LOG_SYNC_EVERY    4U     /*每写 4 条同步一次*/
 #define LOG_PATH          "0:/LOG.TXT"   /*FatFS 未开长文件名，必须 8.3 格式*/
+#define LOG_OLD_PATH      "0:/LOG.OLD"   /*滚动后的上一份日志*/
+#define LOG_MAX_BYTES     65536UL        /*单文件上限 64KB，加备份最多占 128KB*/
 
 typedef struct
 {
@@ -126,6 +128,35 @@ void LogFile_Push(const char *data, uint16_t len)
 }
 
 /**
+  * 功    能：日志文件超限后滚动：当前文件改名为 LOG.OLD，新建空 LOG.TXT
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：只保留一份备份，占用上限约为阈值的 2 倍；
+  *            滚动失败时 s_fileOpen 保持 0，调用方应停止本轮写入
+  */
+static void LogFile_Rollover(void)
+{
+    UINT bw = 0U;
+    const char *mark = "[LOG] --- rotated ---\r\n";
+
+    (void)f_close(&s_file);
+    s_fileOpen = 0U;
+    s_syncPending = 0U;
+
+    /*旧备份先删：f_rename 不覆盖已存在的目标文件*/
+    (void)f_unlink(LOG_OLD_PATH);
+    (void)f_rename(LOG_PATH, LOG_OLD_PATH);
+
+    if (f_open(&s_file, LOG_PATH, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
+    {
+        s_fileOpen = 1U;
+        /*新文件首行留个标记，回看时能区分"从哪开始是新一段"*/
+        (void)f_write(&s_file, mark, (UINT)strlen(mark), &bw);
+        (void)f_sync(&s_file);
+    }
+}
+
+/**
   * 功    能：把日志文件内容分块读到串口
   * 参    数：无
   * 返 回 值：无
@@ -225,6 +256,16 @@ void LogFile_TaskRun(void)
         s_dumpReq = 0U;
         LogFile_Dump();
         return;
+    }
+
+    /*写之前看文件是否到上限：f_size 只读 FIL 字段，不访问卡，开销可忽略*/
+    if (f_size(&s_file) >= (FSIZE_t)LOG_MAX_BYTES)
+    {
+        LogFile_Rollover();
+        if (s_fileOpen == 0U)
+        {
+            return;   /*滚动失败，本轮丢弃，避免往已关闭对象写*/
+        }
     }
 
     if (osMessageQueueGet(s_queue, &item, 0U, 0U) != osOK)
