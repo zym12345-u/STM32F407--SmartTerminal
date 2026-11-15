@@ -114,8 +114,6 @@ static lv_obj_t *s_lblOtaVer;
 static lv_obj_t *s_lblOtaState;
 static lv_obj_t *s_lblOtaDetail;
 static lv_obj_t *s_barOta;
-static lv_obj_t *s_btnOtaStart;
-static lv_obj_t *s_btnOtaCheck;
 static uint8_t   s_otaCurMajor;
 static uint8_t   s_otaCurMinor;
 static uint8_t   s_otaUiDirty = 1U;   /*进入页面时置 1，让轮询函数丢弃上次的显示缓存*/
@@ -591,6 +589,10 @@ static uint8_t BK_WriteHeader(uint32_t slot, uint32_t size, uint32_t crc, uint32
   return 1U;
 }
 
+/*备份进度文案：备份函数在这两个宏定义之前，所以单独提前定义*/
+#define TXT_ST_BKPCT       "\xE5\xA4\x87\xE4\xBB\xBD\x20\x25\x6C\x75\x25\x25"   /* 备份 %lu%% */
+#define TXT_ST_BKPCT_PASS  "\xE5\xA4\x87\xE4\xBB\xBD\x20\x31\x30\x30\x25"   /* 备份 100% */
+
 /**
   * 功    能：把内部 App 区 448KB 整段备份到 W25Q 指定槽，并回读校验
   * 参    数：slot 槽基址（W25Q128_FW_SLOT_A_ADDR / B）；lbl 进度标签；ver 版本号(主<<8|次)
@@ -628,7 +630,8 @@ static uint8_t GUI_BackupFwToSlot(uint32_t slot, lv_obj_t *lbl, uint32_t ver)
               (unsigned long)((ver >> 8U) & 0xFFUL), (unsigned long)(ver & 0xFFUL));
   t0 = HAL_GetTick();
 
-  lv_label_set_text(lbl, "Backup 0%");
+  (void)snprintf(txt, sizeof(txt), TXT_ST_BKPCT, 0UL);
+  lv_label_set_text(lbl, txt);
   lv_refr_now(NULL);
 
   /*记录扇区先擦空：镜像全部校验通过后才往里写记录*/
@@ -671,8 +674,8 @@ static uint8_t GUI_BackupFwToSlot(uint32_t slot, lv_obj_t *lbl, uint32_t ver)
     Watchdog_Heartbeat(WDT_TASK_GUI);
     if (((sect + 1UL) % 8UL) == 0UL)
     {
-      snprintf(txt, sizeof(txt), "Backup %lu%%",
-               (unsigned long)(((sect + 1UL) * 100UL) / BK_SECTORS));
+      (void)snprintf(txt, sizeof(txt), TXT_ST_BKPCT,
+                     (unsigned long)(((sect + 1UL) * 100UL) / BK_SECTORS));
       lv_label_set_text(lbl, txt);
       lv_refr_now(NULL);
     }
@@ -695,9 +698,69 @@ static uint8_t GUI_BackupFwToSlot(uint32_t slot, lv_obj_t *lbl, uint32_t ver)
   }
 
   UART_Printf("[BK] PASS %lu ms\r\n", (unsigned long)(HAL_GetTick() - t0));
-  lv_label_set_text(lbl, "Backup 100%");
+  lv_label_set_text(lbl, TXT_ST_BKPCT_PASS);
   lv_refr_now(NULL);
   return 1U;
+}
+
+/**
+  * 功    能：读槽 A 记录里的版本号
+  * 参    数：ver 输出，主<<8|次
+  * 返 回 值：1 = 记录有效且是整区备份；0 = 槽 A 没有可用备份
+  * 补    充：只验 magic / 格式 / 记录自身 CRC，不读 448KB 镜像本体——
+  *            这里只决定"要不要重做备份"，镜像完好与否由 BootLoader 搬运前自己验
+  */
+static uint8_t BK_ReadSlotAVer(uint32_t *ver)
+{
+  uint32_t hdr[8];
+  uint32_t crc;
+
+  if (W25Q128_ReadData(W25Q128_FW_SLOT_A_ADDR, (uint8_t *)hdr, 32UL) != HAL_OK)
+  {
+    return 0U;
+  }
+  if ((hdr[0] != W25Q128_FW_MAGIC) || (hdr[1] != 1UL))
+  {
+    return 0U;
+  }
+  crc = BK_Crc32Bytes(0xFFFFFFFFUL, (const uint8_t *)hdr, 20UL) ^ 0xFFFFFFFFUL;
+  if (crc != hdr[5])
+  {
+    return 0U;
+  }
+
+  *ver = hdr[2];
+  return 1U;
+}
+
+/**
+  * 功    能：确保槽 A 里存的就是"正在跑的这版"固件
+  * 参    数：lbl 进度标签（备份过程要显示百分比）
+  * 返 回 值：1 = 槽 A 可用；0 = 备份失败
+  * 补    充：版本一致就跳过，避免每次升级都白磨 448KB；
+  *            槽 A 是 BootLoader 搬运失败或新固件连不上时的唯一回滚基线，
+  *            必须先立住再下载，否则 BootLoader 会直接 apply refused
+  */
+static uint8_t GUI_EnsureSlotABackup(lv_obj_t *lbl)
+{
+  uint8_t  major;
+  uint8_t  minor;
+  uint8_t  fromMeta;
+  uint32_t ver;
+  uint32_t slotVer = 0UL;
+
+  GUI_GetFwVersion(&major, &minor, &fromMeta);
+  (void)fromMeta;
+  ver = (((uint32_t)major & 0xFFUL) << 8U) | ((uint32_t)minor & 0xFFUL);
+
+  if ((BK_ReadSlotAVer(&slotVer) != 0U) && (slotVer == ver))
+  {
+    UART_Printf("[BK] slot A already v%lu.%lu, skip\r\n",
+                (unsigned long)major, (unsigned long)minor);
+    return 1U;
+  }
+
+  return GUI_BackupFwToSlot(W25Q128_FW_SLOT_A_ADDR, lbl, ver);
 }
 
 /**
@@ -719,26 +782,78 @@ static uint8_t GUI_OtaBusy(void)
   return 0U;
 }
 
-/*固件升级入口：先备份到槽 A，再写 24C02 标志后软复位，交给 BootLoader*/
+/*串口升级入口：先备份到槽 A，再写 24C02 标志后软复位，交给 BootLoader 的 3 秒窗口*/
 #define OTA_FLAG_ADDR   0xF0U   /*与 BootLoader 的 EE_OTA_MEM 是同一页*/
 
+/*弹窗确认键的动作：同一个弹窗要服务「下载」和「串口升级」两条路径*/
+#define MSG_ACT_DOWNLOAD   1U
+#define MSG_ACT_SERIAL     2U
+
+static uint8_t s_msgAct = MSG_ACT_DOWNLOAD;
+
+/* 弹窗中文文案：必须写成 UTF-8 字节转义，不能直接写汉字。
+ * armcc 5 按本地代码页解析源码，源码里的 UTF-8 汉字会让字符串提前结束
+ * （报 invalid multibyte character sequence / missing closing quote）。
+ * 字节仍是 UTF-8，LVGL 侧配 BSP_Font_Gbk16 即可正常显示。 */
+#define TXT_SERIAL_CONFIRM   "\xE4\xB8\xB2\xE5\x8F\xA3\xE5\x8D\x87\xE7\xBA\xA7\xEF\xBC\x9F\x0A\xE5\xB1\x8F\xE5\xB9\x95\xE4\xBC\x9A\xE9\xBB\x91\xE5\xB1\x8F\xE7\xBA\xA6\x20\x33\x20\xE7\xA7\x92\xE3\x80\x82"   /* 串口升级？\n屏幕会黑屏约 3 秒。 */
+#define TXT_SERIAL_OK        "\xE4\xB8\xB2\xE5\x8F\xA3"                     /* 串口 */
+#define TXT_BK_FAIL          "\xE5\xA4\x87\xE4\xBB\xBD\xE5\xA4\xB1\xE8\xB4\xA5\xEF\xBC\x8C\x0A\xE6\x9C\xAA\xE5\xBC\x80\xE5\xA7\x8B\xE4\xB8\x8B\xE8\xBD\xBD\xE3\x80\x82"   /* 备份失败，\n未开始下载。 */
+#define TXT_NO_WIFI          "\x57\x69\x46\x69\x20\xE6\x9C\xAA\xE8\xBF\x9E\xE6\x8E\xA5\xEF\xBC\x8C\x0A\xE8\xAF\xB7\xE5\x85\x88\xE8\xBF\x9B\xE5\x85\xA5\x20\x57\x69\x46\x69\x20\xE9\x85\x8D\xE7\xBD\x91\xE3\x80\x82"   /* WiFi 未连接，\n请先进入 WiFi 配网。 */
+#define TXT_NEW_VER          "\xE5\x8F\x91\xE7\x8E\xB0\xE6\x96\xB0\xE7\x89\x88\xE6\x9C\xAC\x20\x76\x25\x75\x2E\x25\x75\x0A\xE7\x8E\xB0\xE5\x9C\xA8\xE5\x8D\x87\xE7\xBA\xA7\xEF\xBC\x9F"   /* 发现新版本 v%u.%u\n现在升级？ */
+#define TXT_UPDATE           "\xE5\x8D\x87\xE7\xBA\xA7"                     /* 升级 */
+#define TXT_UP_TO_DATE       "\xE5\xB7\xB2\xE6\x98\xAF\xE6\x9C\x80\xE6\x96\xB0\xE7\x89\x88\xE6\x9C\xAC\x20\x28\x76\x25\x75\x2E\x25\x75\x29\xE3\x80\x82"   /* 已是最新版本 (v%u.%u)。 */
+#define TXT_OK               "\xE7\xA1\xAE\xE5\xAE\x9A"                     /* 确定 */
+#define TXT_LATER            "\xE7\xA8\x8D\xE5\x90\x8E"                     /* 稍后 */
+#define TXT_TIMEOUT          "\xE6\xA3\x80\xE6\x9F\xA5\xE8\xB6\x85\xE6\x97\xB6\xEF\xBC\x8C\x0A\xE8\xAF\xB7\xE7\xA1\xAE\xE8\xAE\xA4\x20\x50\x43\x20\xE6\x9C\x8D\xE5\x8A\xA1\xE5\xB7\xB2\xE5\x90\xAF\xE5\x8A\xA8\xE3\x80\x82"   /* 检查超时，\n请确认 PC 服务已启动。 */
+
+/* OTA 页状态行动态文案（中文）。字体换成 BSP_Font_Gbk16 后才能显示 */
+#define TXT_ST_BACKUP      "\xE5\xA4\x87\xE4\xBB\xBD\xE4\xB8\xAD\xEF\xBC\x8C\xE8\xAF\xB7\xE7\xA8\x8D\xE5\x80\x99\x2E\x2E\x2E"   /* 备份中，请稍候... */
+#define TXT_ST_BK_FAIL     "\xE5\xA4\x87\xE4\xBB\xBD\xE5\xA4\xB1\xE8\xB4\xA5\xEF\xBC\x8C\xE5\xB7\xB2\xE5\x8F\x96\xE6\xB6\x88\xE4\xB8\x8B\xE8\xBD\xBD"   /* 备份失败，已取消下载 */
+#define TXT_ST_SENT        "\xE5\xB7\xB2\xE5\x8F\x91\xE9\x80\x81\xEF\xBC\x8C\xE7\xAD\x89\xE5\xBE\x85\xE5\x93\x8D\xE5\xBA\x94\x2E\x2E\x2E"   /* 已发送，等待响应... */
+#define TXT_ST_ERASE       "\xE6\x93\xA6\xE9\x99\xA4\xE6\xA7\xBD\x20\x42\x2E\x2E\x2E"   /* 擦除槽 B... */
+#define TXT_ST_META        "\xE8\x8E\xB7\xE5\x8F\x96\x20\x61\x70\x70\x2E\x6D\x65\x74\x61\x2E\x2E\x2E"   /* 获取 app.meta... */
+#define TXT_ST_DOWNLOAD    "\xE6\xAD\xA3\xE5\x9C\xA8\xE4\xB8\x8B\xE8\xBD\xBD\x20\x61\x70\x70\x2E\x62\x69\x6E\x2E\x2E\x2E"   /* 正在下载 app.bin... */
+#define TXT_ST_VERIFY      "\xE6\xA0\xA1\xE9\xAA\x8C\xE9\x95\x9C\xE5\x83\x8F\x2E\x2E\x2E"   /* 校验镜像... */
+#define TXT_ST_CHECKING    "\xE6\xAD\xA3\xE5\x9C\xA8\xE6\xA3\x80\xE6\x9F\xA5\xE6\x9B\xB4\xE6\x96\xB0\x2E\x2E\x2E"   /* 正在检查更新... */
+#define TXT_ST_REBOOT      "\xE5\xAE\x8C\xE6\x88\x90\xEF\xBC\x8C\xE5\x8D\xB3\xE5\xB0\x86\xE9\x87\x8D\xE5\x90\xAF\x2E\x2E\x2E"   /* 完成，即将重启... */
+#define TXT_ST_MANUAL      "\xE6\xA7\xBD\x20\x42\x20\xE5\xB0\xB1\xE7\xBB\xAA\xEF\xBC\x8C\xE8\xAF\xB7\xE6\x89\x8B\xE5\x8A\xA8\xE9\x87\x8D\xE5\x90\xAF"   /* 槽 B 就绪，请手动重启 */
+#define TXT_ST_NEWVER      "\xE5\x8F\x91\xE7\x8E\xB0\xE6\x96\xB0\xE7\x89\x88\xE6\x9C\xAC\x20\x76\x25\x75\x2E\x25\x75"   /* 发现新版本 v%u.%u */
+#define TXT_ST_UPTODATE    "\xE5\xB7\xB2\xE6\x98\xAF\xE6\x9C\x80\xE6\x96\xB0\x20\x28\x76\x25\x75\x2E\x25\x75\x29"   /* 已是最新 (v%u.%u) */
+#define TXT_ST_IDLE        "\xE7\xA9\xBA\xE9\x97\xB2\xEF\xBC\x8C\xE7\x82\xB9\x20\x55\x70\x64\x61\x74\x65\x20\xE6\xA3\x80\xE6\x9F\xA5"   /* 空闲，点 Update 检查 */
+#define TXT_ST_RETRY       "\xE5\xA4\xB1\xE8\xB4\xA5\xEF\xBC\x8C\xE7\x82\xB9\x20\x55\x70\x64\x61\x74\x65\x20\xE9\x87\x8D\xE8\xAF\x95"   /* 失败，点 Update 重试 */
+#define TXT_ST_NOWIFI      "\x57\x69\x46\x69\x20\xE6\x9C\xAA\xE8\xBF\x9E\xE6\x8E\xA5"   /* WiFi 未连接 */
+#define TXT_ST_BUSY        "\xE5\x8D\x87\xE7\xBA\xA7\xE4\xB8\xAD\xEF\xBC\x8C\xE8\xAF\xB7\xE7\xA8\x8D\xE5\x90\x8E\xE5\x86\x8D\xE8\xAF\x95"   /* 升级中，请稍后再试 */
+#define TXT_ST_BKFAIL2     "\xE5\xA4\x87\xE4\xBB\xBD\xE5\xA4\xB1\xE8\xB4\xA5\xEF\xBC\x8C\xE8\xAF\xB7\xE9\x87\x8D\xE8\xAF\x95"   /* 备份失败，请重试 */
+#define TXT_ST_BKOK        "\xE5\xA4\x87\xE4\xBB\xBD\xE5\xAE\x8C\xE6\x88\x90\xEF\xBC\x8C\xE6\xAD\xA3\xE5\x9C\xA8\xE9\x87\x8D\xE5\x90\xAF\x2E\x2E\x2E"   /* 备份完成，正在重启... */
+#define TXT_ST_EEPROM      "\x45\x45\x50\x52\x4F\x4D\x20\xE5\x86\x99\xE5\x85\xA5\xE5\xA4\xB1\xE8\xB4\xA5\xEF\xBC\x8C\xE8\xAF\xB7\xE9\x87\x8D\xE8\xAF\x95"   /* EEPROM 写入失败，请重试 */
+
+/* OTA 错误码的中文说明（弹窗用） */
+#define E_WIFI               "\x57\x69\x46\x69\x20\xE6\x9C\xAA\xE8\xBF\x9E\xE6\x8E\xA5\xEF\xBC\x8C\xE8\xAF\xB7\xE5\x85\x88\xE9\x85\x8D\xE7\xBD\x91"   /* WiFi 未连接，请先配网 */
+#define E_FLASH              "\x57\x32\x35\x51\x20\xE6\x9C\xAA\xE5\xB0\xB1\xE7\xBB\xAA"                     /* W25Q 未就绪 */
+#define E_ERASE              "\xE6\x93\xA6\xE9\x99\xA4\xE6\xA7\xBD\x20\x42\x20\xE5\xA4\xB1\xE8\xB4\xA5"                     /* 擦除槽 B 失败 */
+#define E_CONNECT            "\xE8\xBF\x9E\xE4\xB8\x8D\xE4\xB8\x8A\x20\x50\x43\x20\xE6\x9C\x8D\xE5\x8A\xA1\xE5\x99\xA8"                     /* 连不上 PC 服务器 */
+#define E_HTTP               "\x48\x54\x54\x50\x20\xE9\x94\x99\xE8\xAF\xAF\xEF\xBC\x8C\xE6\xA3\x80\xE6\x9F\xA5\xE6\x9C\x8D\xE5\x8A\xA1"                     /* HTTP 错误，检查服务 */
+#define E_META               "\x61\x70\x70\x2E\x6D\x65\x74\x61\x20\xE7\xBC\xBA\xE5\xA4\xB1\xE6\x88\x96\xE6\x8D\x9F\xE5\x9D\x8F"                     /* app.meta 缺失或损坏 */
+#define E_SIZE               "\xE9\x95\xBF\xE5\xBA\xA6\xE4\xB8\x8D\xE7\xAC\xA6\xEF\xBC\x8C\xE8\xAF\xB7\xE9\x87\x8D\xE6\x96\xB0\xE7\x94\x9F\xE6\x88\x90"                     /* 长度不符，请重新生成 */
+#define E_TIMEOUT            "\xE8\xB6\x85\xE6\x97\xB6\xEF\xBC\x8C\xE6\xA3\x80\xE6\x9F\xA5\x20\x57\x69\x46\x69\x20\xE4\xBF\xA1\xE5\x8F\xB7"                     /* 超时，检查 WiFi 信号 */
+#define E_CRC                "\x43\x52\x43\x20\xE6\xA0\xA1\xE9\xAA\x8C\xE5\xA4\xB1\xE8\xB4\xA5\xEF\xBC\x8C\xE8\xAF\xB7\xE9\x87\x8D\xE8\xAF\x95"                     /* CRC 校验失败，请重试 */
+#define E_RECORD             "\xE6\xA7\xBD\xE8\xAE\xB0\xE5\xBD\x95\xE5\x86\x99\xE5\x85\xA5\xE5\xA4\xB1\xE8\xB4\xA5"                     /* 槽记录写入失败 */
+#define E_QUEUE              "\xE5\x86\x85\xE9\x83\xA8\xE9\x98\x9F\xE5\x88\x97\xE4\xB8\x8D\xE5\x8F\xAF\xE7\x94\xA8"                     /* 内部队列不可用 */
+#define E_UNKNOWN            "\xE6\x9C\xAA\xE7\x9F\xA5\xE9\x94\x99\xE8\xAF\xAF"                     /* 未知错误 */
+
+static void GUI_ShowMsg(const char *txt, uint8_t confirm, const char *okText);
+
 /**
-  * 功    能：点击「固件升级」：先把当前 App 备份到 W25Q 槽 A，成功后再写标志并复位
-  * 参    数：event  LVGL 事件（取按钮对象用来改文字）
+  * 功    能：准备串口 IAP：确保槽 A 有回滚基线，写 0xF0 标志后软复位
+  * 参    数：lbl 显示进度与结果的状态标签（不再是小按钮里的文字，避免被裁）
   * 返 回 值：无（成功时不返回，直接复位）
   * 补    充：备份失败就停在原地、不写 24C02、不复位——否则进了升级模式又没有可回滚的镜像，
   *            等于把最后一层保险也丢了。写的是 0xF0 页 8 字节：'U''P''G''2' + 已写字节数 0，
   *            magic 与 BootLoader 的 EE_OTA_MAGIC(0x32475055) 是同一个值（小端序）。
   */
-static void FwUpdateEventCb(lv_event_t *event)
+static void GUI_SerialUpdate(lv_obj_t *lbl)
 {
-  lv_obj_t *btn = lv_event_get_target(event);
-  lv_obj_t *lbl = lv_obj_get_child(btn, 0);
   uint8_t flag[8] = { 'U', 'P', 'G', '2', 0U, 0U, 0U, 0U };
-  uint8_t major;
-  uint8_t minor;
-  uint8_t fromMeta;
-  uint32_t ver;
 
   /*下载期间槽 B 正在被写，此时再做 448KB 整区备份必然抢总线、两边都出错*/
   if (GUI_OtaBusy() != 0U)
@@ -748,19 +863,15 @@ static void FwUpdateEventCb(lv_event_t *event)
     return;
   }
 
-  GUI_GetFwVersion(&major, &minor, &fromMeta);
-  (void)fromMeta;   /*备份记录里只关心版本号本身，来源不影响回滚*/
-  ver = (((uint32_t)major & 0xFFUL) << 8U) | ((uint32_t)minor & 0xFFUL);
-
-  if (GUI_BackupFwToSlot(W25Q128_FW_SLOT_A_ADDR, lbl, ver) == 0U)
+  if (GUI_EnsureSlotABackup(lbl) == 0U)
   {
-    lv_label_set_text(lbl, "Backup failed, retry");
+    lv_label_set_text(lbl, TXT_ST_BKFAIL2);
     lv_refr_now(NULL);
     return;
   }
 
   /* 让用户看到反馈再复位：lv_refr_now 直接刷一帧，不等下一轮 5ms 的 handler */
-  lv_label_set_text(lbl, "Backup OK, rebooting...");
+  lv_label_set_text(lbl, TXT_ST_BKOK);
   lv_refr_now(NULL);
 
   /*串口 IAP 与槽 B 搬运只能选一个：先清掉 OTA-2 的搬运请求*/
@@ -769,7 +880,7 @@ static void FwUpdateEventCb(lv_event_t *event)
   if (AT24C02_WriteBytes(OTA_FLAG_ADDR, flag, sizeof(flag)) != 0U)
   {
     /* EEPROM 不在位或写失败：原地提示，不改布局也不复位；槽里的备份仍然有效 */
-    lv_label_set_text(lbl, "EEPROM error, retry");
+    lv_label_set_text(lbl, TXT_ST_EEPROM);
     lv_refr_now(NULL);
     return;
   }
@@ -781,45 +892,233 @@ static void FwUpdateEventCb(lv_event_t *event)
   }
 }
 
+/**
+  * 功    能：OTA 页标题栏的 Serial 按钮：先弹确认窗，防误触
+  * 参    数：event LVGL 事件
+  * 返 回 值：无
+  * 补    充：按下会备份并复位，屏幕会黑 3~5 秒（BootLoader 不初始化背光），
+  *            所以必须让用户明确确认；备份进度与失败原因仍打在 s_lblOtaState 上
+  */
+static void SerialUpdateEventCb(lv_event_t *event)
+{
+  (void)event;
+
+  if (GUI_OtaBusy() != 0U)
+  {
+    lv_label_set_text(s_lblOtaState, TXT_ST_BUSY);
+    return;
+  }
+
+  s_msgAct = MSG_ACT_SERIAL;
+  GUI_ShowMsg(TXT_SERIAL_CONFIRM, 1U, TXT_SERIAL_OK);
+}
+
 /*════════════ WiFi OTA 下载页（第一阶段：只下载到槽 B）════════════
  * 为什么不复用弹窗：下载要几十秒，必须能看到“擦除 / 取 meta / 下载 / 校验 / 失败原因”；
  * 为什么退出页面还继续下载：下载由 WifiTask 执行，界面只是观察者，关页面不该中断传输。
  */
 
 /**
-  * 功    能：把 OtaErr_t 翻译成一句能看懂的中文提示（界面全英文，避免字库依赖）
-  * 参    数：err  OtaErr_t
-  * 返 回 值：状态文字指针
-  * 补    充：不拼字符串、不跨任务传字符串，GUI 只按码查表
+  * 功    能：OTA 错误码对应的中文提示（弹窗用）
+  * 参    数：err OTA_ERR_* 错误码
+  * 返 回 值：中文描述
+  * 补    充：状态行仍用英文短句（宽度只够一行），弹窗给人看所以用中文；
+  *            每行控制在 14 个汉字内，16px 字库下正好放进 256px 的卡片
   */
-static const char *GUI_OtaErrText(uint8_t err)
+static const char *GUI_OtaErrTextCn(uint8_t err)
 {
   switch (err)
   {
-    case OTA_ERR_WIFI:    return "WiFi not connected - open WiFi Setup";
-    case OTA_ERR_FLASH:   return "W25Q not ready";
-    case OTA_ERR_ERASE:   return "Erase slot B failed";
-    case OTA_ERR_CONNECT: return "Cannot reach PC server";
-    case OTA_ERR_HTTP:    return "HTTP error - check server";
-    case OTA_ERR_META:    return "app.meta missing or bad";
-    case OTA_ERR_SIZE:    return "Size mismatch - regenerate app.meta";
-    case OTA_ERR_TIMEOUT: return "Timeout - check WiFi signal";
-    case OTA_ERR_CRC:     return "CRC mismatch - retry download";
-    case OTA_ERR_RECORD:  return "Slot record write failed";
-    case OTA_ERR_QUEUE:   return "Internal queue unavailable";
-    default:              return "Unknown error";
+    case OTA_ERR_WIFI:    return E_WIFI;
+    case OTA_ERR_FLASH:   return E_FLASH;
+    case OTA_ERR_ERASE:   return E_ERASE;
+    case OTA_ERR_CONNECT: return E_CONNECT;
+    case OTA_ERR_HTTP:    return E_HTTP;
+    case OTA_ERR_META:    return E_META;
+    case OTA_ERR_SIZE:    return E_SIZE;
+    case OTA_ERR_TIMEOUT: return E_TIMEOUT;
+    case OTA_ERR_CRC:     return E_CRC;
+    case OTA_ERR_RECORD:  return E_RECORD;
+    case OTA_ERR_QUEUE:   return E_QUEUE;
+    default:              return E_UNKNOWN;
   }
+}
+
+/*一键更新交互：进页面自动检查 → 按结果弹窗 → 确认后备份槽 A 再下载。
+ * 为什么要有 s_otaFlow：检查是 WifiTask 异步做的（让出 MQTT、建 TCP、GET app.meta），
+ * 晚 0.5~3 秒才有结果；只有本页发起的那一次才弹窗，
+ * MQTT 远程检查和开机 60s 静默检查都不能在用户面前弹窗*/
+#define OTA_UI_FLOW_NONE     0U
+#define OTA_UI_FLOW_CHECK    1U
+#define OTA_UI_FLOW_DOWNLOAD 2U   /*本页发起的下载：失败时弹一次中文窗*/
+
+static uint8_t   s_otaFlow;
+static uint8_t   s_otaCheckSeen;   /*是否看到过 CHECKING：防止把上一次遗留的结果当成本次的*/
+static uint8_t   s_otaFailNotified;/*下载失败已弹过窗：状态行不再停在错误文案上*/
+static uint32_t  s_otaCheckT0;
+static lv_obj_t *s_msgbox;
+
+static void GUI_StartOtaDownload(void);
+
+/**
+  * 功    能：关掉当前弹窗（没有就什么都不做）
+  * 参    数：无
+  * 返 回 值：无
+  */
+static void GUI_CloseMsg(void)
+{
+  if (s_msgbox != NULL)
+  {
+    lv_obj_del(s_msgbox);
+    s_msgbox = NULL;
+  }
+}
+
+/**
+  * 功    能：弹窗里的 Later：只关窗，不改任何状态
+  * 参    数：event LVGL 事件
+  * 返 回 值：无
+  */
+static void MsgLaterEventCb(lv_event_t *event)
+{
+  (void)event;
+  GUI_CloseMsg();
+}
+
+/**
+  * 功    能：弹窗确认键：按 s_msgAct 分派到「下载」或「串口升级」
+  * 参    数：event LVGL 事件
+  * 返 回 值：无
+  * 补    充：备份必须排在下载之前——BootLoader 搬运前验不到槽 A 就会 apply refused
+  */
+static void MsgConfirmEventCb(lv_event_t *event)
+{
+  (void)event;
+  GUI_CloseMsg();
+
+  if (s_msgAct == MSG_ACT_SERIAL)
+  {
+    GUI_SerialUpdate(s_lblOtaState);
+  }
+  else
+  {
+    GUI_StartOtaDownload();
+  }
+}
+
+/**
+  * 功    能：弹模态提示框：全屏遮罩 + 居中卡片
+  * 参    数：txt 正文（中文，用外挂 GBK 16px 字库）；confirm 1=给两个键；
+  *            okText 确认键文案（NULL 用「升级」）
+  * 返 回 值：无
+  * 补    充：不用 lv_msgbox：默认样式的按钮在 240 高的屏上偏大、长文案会被裁；
+  *            这里复用 s_styleCard / s_styleBtnGreen / s_styleBtnBlue，观感和页面一致
+  */
+static void GUI_ShowMsg(const char *txt, uint8_t confirm, const char *okText)
+{
+  lv_obj_t *mask;
+  lv_obj_t *box;
+  lv_obj_t *lbl;
+  lv_obj_t *btn;
+
+  GUI_CloseMsg();
+
+  mask = lv_obj_create(lv_layer_top());
+  lv_obj_remove_style_all(mask);
+  lv_obj_set_style_bg_color(mask, lv_color_black(), 0);
+  lv_obj_set_style_bg_opa(mask, LV_OPA_50, 0);
+  lv_obj_set_size(mask, 320, 240);
+  lv_obj_clear_flag(mask, LV_OBJ_FLAG_SCROLLABLE);
+
+  box = lv_obj_create(mask);
+  lv_obj_remove_style_all(box);
+  lv_obj_add_style(box, &s_styleCard, 0);
+  lv_obj_set_size(box, 280, (confirm != 0U) ? 150 : 118);
+  lv_obj_align(box, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_pad_all(box, 12, 0);
+
+  lbl = lv_label_create(box);
+  lv_label_set_text(lbl, txt);
+  lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(lbl, 256);
+  lv_obj_set_style_text_color(lbl, COLOR_TEXT, 0);
+  lv_obj_set_style_text_font(lbl, BSP_Font_Gbk16(), 0);
+  lv_obj_set_pos(lbl, 0, 0);
+
+  btn = lv_btn_create(box);
+  lv_obj_remove_style_all(btn);
+  lv_obj_add_style(btn, (confirm != 0U) ? &s_styleBtnGreen : &s_styleBtnBlue, 0);
+  lv_obj_set_style_bg_opa(btn, LV_OPA_60, LV_STATE_PRESSED);
+  lv_obj_set_size(btn, 118, 30);
+  lv_obj_set_pos(btn, (confirm != 0U) ? 0 : 69, (confirm != 0U) ? 104 : 64);
+  lv_obj_add_event_cb(btn, (confirm != 0U) ? MsgConfirmEventCb : MsgLaterEventCb,
+                      LV_EVENT_CLICKED, NULL);
+  lbl = lv_label_create(btn);
+  lv_label_set_text(lbl, (confirm != 0U) ? ((okText != NULL) ? okText : TXT_UPDATE) : TXT_OK);
+  lv_obj_set_style_text_font(lbl, BSP_Font_Gbk16(), 0);
+  lv_obj_center(lbl);
+
+  if (confirm != 0U)
+  {
+    btn = lv_btn_create(box);
+    lv_obj_remove_style_all(btn);
+    lv_obj_add_style(btn, &s_styleBtnBlue, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_60, LV_STATE_PRESSED);
+    lv_obj_set_size(btn, 118, 30);
+    lv_obj_set_pos(btn, 138, 104);
+    lv_obj_add_event_cb(btn, MsgLaterEventCb, LV_EVENT_CLICKED, NULL);
+    lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, TXT_LATER);
+    lv_obj_set_style_text_font(lbl, BSP_Font_Gbk16(), 0);
+    lv_obj_center(lbl);
+  }
+
+  s_msgbox = mask;
+}
+
+/**
+  * 功    能：下载前置：确保槽 A 有当前版本备份，再投 OTA 命令
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：备份失败就中止、不发下载命令——"下载成功却搬不进去"比不下载更糟；
+  *            备份耗时 5~7 秒，进度直接打在页面状态行上
+  */
+static void GUI_StartOtaDownload(void)
+{
+  if (GUI_OtaBusy() != 0U)
+  {
+    return;
+  }
+
+  lv_label_set_text(s_lblOtaState, TXT_ST_BACKUP);
+  lv_refr_now(NULL);
+
+  if (GUI_EnsureSlotABackup(s_lblOtaState) == 0U)
+  {
+    lv_label_set_text(s_lblOtaState, TXT_ST_BK_FAIL);
+    GUI_ShowMsg(TXT_BK_FAIL, 0U, NULL);
+    return;
+  }
+
+  Wifi_PostOta();
+  s_otaFlow         = OTA_UI_FLOW_DOWNLOAD;   /*失败时由页面轮询负责弹窗*/
+  s_otaFailNotified = 0U;
+  lv_label_set_text(s_lblOtaState, TXT_ST_SENT);
 }
 
 /**
   * 功    能：OTA 页返回主屏
   * 参    数：event LVGL 事件
   * 返 回 值：无
-  * 补    充：不取消下载；WifiTask 仍在跑，回来还能看到进度
+  * 补    充：不取消下载；WifiTask 仍在跑，回来还能看到进度。
+  *            离开页面要清掉本页的检查流程，否则结果会在主屏上弹窗
   */
 static void OtaBackEventCb(lv_event_t *event)
 {
   (void)event;
+  s_otaFlow = OTA_UI_FLOW_NONE;
+  GUI_CloseMsg();
   lv_scr_load_anim(s_mainScr, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
 }
 
@@ -839,66 +1138,12 @@ static void GUI_UpdateOtaServer(void)
 }
 
 /**
-  * 功    能：点「Check」：只检查版本，不下载
+  * 功    能：进入 OTA 页：刷新服务器地址/当前版本，并自动发起一次手动检查
   * 参    数：event LVGL 事件
   * 返 回 值：无
-  * 补    充：检查由 WifiTask 执行；这里只投命令并先给一行即时反馈
-  */
-static void OtaCheckEventCb(lv_event_t *event)
-{
-  (void)event;
-
-  /*下载占用 W25Q 期间不允许并发检查，避免两段 TCP 收包互相踩*/
-  if (GUI_OtaBusy() != 0U)
-  {
-    return;
-  }
-  if (g_wifiScan.status != WIFI_ST_CONNECTED)
-  {
-    lv_label_set_text(s_lblOtaState, "WiFi not connected - open WiFi Setup");
-    return;
-  }
-
-  Wifi_PostCheckOta(1U);
-  lv_label_set_text(s_lblOtaState, "Checking...");
-}
-
-/**
-  * 功    能：点「Download」：检查 WiFi 后投递 OTA 命令
-  * 参    数：event LVGL 事件
-  * 返 回 值：无
-  * 补    充：只投命令、不在这里下载——ESP8266 与 W25Q 都由 WifiTask 独占
-  */
-static void OtaStartEventCb(lv_event_t *event)
-{
-  (void)event;
-
-  if (GUI_OtaBusy() != 0U)
-  {
-    return;
-  }
-  /*检查还在跑时先别开始下载：WifiTask 串行处理，下载会排在检查后面，
-   *不如让用户看清检查结果再点*/
-  if (g_otaStatus.checkState == OTA_CHK_CHECKING)
-  {
-    return;
-  }
-  if (g_wifiScan.status != WIFI_ST_CONNECTED)
-  {
-    lv_label_set_text(s_lblOtaState, "WiFi not connected - open WiFi Setup");
-    return;
-  }
-
-  Wifi_PostOta();
-  lv_label_set_text(s_lblOtaState, "Request sent...");
-}
-
-/**
-  * 功    能：进入 OTA 页时刷新服务器地址与“当前版本”，并清掉上次遗留的显示缓存
-  * 参    数：event LVGL 事件
-  * 返 回 值：无
-  * 补    充：版本号仍从 GUI_GetFwVersion 取，和状态栏显示保持一致；
-  *            服务器地址每次都读缓存，串口改完配置回页面就能看到新值
+  * 补    充：用户只按一个 Update，不区分"检查"和"下载"；
+  *            检查结果由 150ms 轮询在 OtaStatusTimerCb 里弹窗，
+  *            这里只负责投命令并把 s_otaFlow 立起来
   */
 static void OtaEntryEventCb(lv_event_t *event)
 {
@@ -914,6 +1159,25 @@ static void OtaEntryEventCb(lv_event_t *event)
   lv_label_set_text(s_lblOtaVer, txt);
   s_otaUiDirty = 1U;
   lv_scr_load_anim(s_otaScr, LV_SCR_LOAD_ANIM_FADE_ON, 250, 0, false);
+
+  /*下载占用 W25Q 期间不做检查：两段 TCP 收包会互相踩*/
+  if (GUI_OtaBusy() != 0U)
+  {
+    return;
+  }
+  if (Wifi_IsConnected() == 0U)
+  {
+    lv_label_set_text(s_lblOtaState, TXT_ST_NOWIFI);
+    GUI_ShowMsg(TXT_NO_WIFI, 0U, NULL);
+    return;
+  }
+
+  s_otaFlow         = OTA_UI_FLOW_CHECK;
+  s_otaCheckSeen    = 0U;
+  s_otaFailNotified = 0U;   /*重新检查就把上次的失败提示清掉*/
+  s_otaCheckT0      = lv_tick_get();
+  Wifi_PostCheckOta(1U);
+  lv_label_set_text(s_lblOtaState, TXT_ST_CHECKING);
 }
 
 /**
@@ -929,17 +1193,13 @@ static void OtaStatusTimerCb(lv_timer_t *timer)
   static uint8_t  lastWifi   = 0xFFU;
   static uint32_t lastKb     = 0xFFFFFFFFUL;
   static uint16_t lastVer    = 0xFFFFU;
-  static uint8_t  lastDisDl  = 0xFFU;
-  static uint8_t  lastDisChk = 0xFFU;
-  static char     lastStateTxt[48] = {0};
+  static char     lastStateTxt[96] = {0};
   uint8_t  st;
   uint8_t  err;
   uint8_t  chk;
   uint8_t  chkErr;
-  uint8_t  disDl;
-  uint8_t  disChk;
   char     txt[80];
-  char     stateTxt[48];
+  char     stateTxt[96];
   uint32_t kb;
   uint16_t targetVer;
 
@@ -957,24 +1217,41 @@ static void OtaStatusTimerCb(lv_timer_t *timer)
     lastWifi   = 0xFFU;
     lastKb     = 0xFFFFFFFFUL;
     lastVer    = 0xFFFFU;
-    lastDisDl  = 0xFFU;
-    lastDisChk = 0xFFU;
     lastStateTxt[0] = '\0';
   }
 
-  /*WiFi 状态只在变化时刷*/
-  if (lastWifi != (uint8_t)g_wifiScan.status)
+  /*WiFi 状态只在变化时刷；用 s_connected 而不是配网页的状态机，否则扫描后会被误判*/
   {
-    lastWifi = (uint8_t)g_wifiScan.status;
-    lv_label_set_text(s_lblOtaWifi,
-                      (lastWifi == (uint8_t)WIFI_ST_CONNECTED) ? "WiFi: connected"
-                                                              : "WiFi: not connected");
+    uint8_t wifiUp = Wifi_IsConnected();
+
+    if (lastWifi != wifiUp)
+    {
+      lastWifi = wifiUp;
+      lv_label_set_text(s_lblOtaWifi,
+                        (wifiUp != 0U) ? "WiFi: connected" : "WiFi: not connected");
+    }
   }
 
   st     = g_otaStatus.state;
   err    = g_otaStatus.err;
   chk    = g_otaStatus.checkState;
   chkErr = g_otaStatus.checkErr;
+
+  /*下载失败：只弹一次中文窗，之后状态行不再停在错误文案上（否则看着像卡死）。
+   *成功不弹窗——状态行会显示 rebooting，复位本身就是反馈*/
+  if (s_otaFlow == OTA_UI_FLOW_DOWNLOAD)
+  {
+    if (st == OTA_ST_FAIL)
+    {
+      s_otaFlow         = OTA_UI_FLOW_NONE;
+      s_otaFailNotified = 1U;
+      GUI_ShowMsg(GUI_OtaErrTextCn(err), 0U, NULL);
+    }
+    else if (st == OTA_ST_DONE)
+    {
+      s_otaFlow = OTA_UI_FLOW_NONE;
+    }
+  }
 
   /*状态行优先级：下载进行中 > 检查进行中 > 下载结果 > 检查结果 > 空闲。
    *这样检查失败不会覆盖下载失败文案，下载失败也不会被一次检查成功冲掉。*/
@@ -983,48 +1260,52 @@ static void OtaStatusTimerCb(lv_timer_t *timer)
   {
     switch (st)
     {
-      case OTA_ST_ERASE:    (void)snprintf(stateTxt, sizeof(stateTxt), "Erasing slot B..."); break;
-      case OTA_ST_META:     (void)snprintf(stateTxt, sizeof(stateTxt), "Fetching app.meta..."); break;
-      case OTA_ST_DOWNLOAD: (void)snprintf(stateTxt, sizeof(stateTxt), "Downloading app.bin..."); break;
-      default:              (void)snprintf(stateTxt, sizeof(stateTxt), "Verifying image..."); break;
+      case OTA_ST_ERASE:    (void)snprintf(stateTxt, sizeof(stateTxt), "%s", TXT_ST_ERASE);    break;
+      case OTA_ST_META:     (void)snprintf(stateTxt, sizeof(stateTxt), "%s", TXT_ST_META);     break;
+      case OTA_ST_DOWNLOAD: (void)snprintf(stateTxt, sizeof(stateTxt), "%s", TXT_ST_DOWNLOAD); break;
+      default:              (void)snprintf(stateTxt, sizeof(stateTxt), "%s", TXT_ST_VERIFY);   break;
     }
   }
   else if (chk == OTA_CHK_CHECKING)
   {
-    (void)snprintf(stateTxt, sizeof(stateTxt), "Checking...");
+    (void)snprintf(stateTxt, sizeof(stateTxt), "%s", TXT_ST_CHECKING);
   }
   else if (st == OTA_ST_DONE)
   {
     /*rebootPending=1 才是真的会自动复位；标志写失败时停在 DONE 等用户手动复位*/
     (void)snprintf(stateTxt, sizeof(stateTxt), "%s",
-                   (g_otaStatus.rebootPending != 0U) ? "Done - rebooting..."
-                                                     : "Slot B ready - reboot manually");
+                   (g_otaStatus.rebootPending != 0U) ? TXT_ST_REBOOT : TXT_ST_MANUAL);
   }
-  else if (st == OTA_ST_FAIL)
+  else if ((st == OTA_ST_FAIL) && (s_otaFailNotified == 0U))
   {
-    (void)snprintf(stateTxt, sizeof(stateTxt), "%s", GUI_OtaErrText(err));
+    (void)snprintf(stateTxt, sizeof(stateTxt), "%s", GUI_OtaErrTextCn(err));
+  }
+  else if (s_otaFailNotified != 0U)
+  {
+    /*失败原因已经弹窗说过一次，状态行只留重试提示*/
+    (void)snprintf(stateTxt, sizeof(stateTxt), "%s", TXT_ST_RETRY);
   }
   else if (chk == OTA_CHK_DONE)
   {
     if (g_otaStatus.checkVer != 0U)
     {
-      (void)snprintf(stateTxt, sizeof(stateTxt), "New v%u.%u available",
+      (void)snprintf(stateTxt, sizeof(stateTxt), TXT_ST_NEWVER,
                      (unsigned)((g_otaStatus.checkVer >> 8U) & 0xFFU),
                      (unsigned)(g_otaStatus.checkVer & 0xFFU));
     }
     else
     {
-      (void)snprintf(stateTxt, sizeof(stateTxt), "Up to date (v%u.%u)",
+      (void)snprintf(stateTxt, sizeof(stateTxt), TXT_ST_UPTODATE,
                      (unsigned)s_otaCurMajor, (unsigned)s_otaCurMinor);
     }
   }
   else if (chk == OTA_CHK_FAIL)
   {
-    (void)snprintf(stateTxt, sizeof(stateTxt), "%s", GUI_OtaErrText(chkErr));
+    (void)snprintf(stateTxt, sizeof(stateTxt), "%s", GUI_OtaErrTextCn(chkErr));
   }
   else
   {
-    (void)snprintf(stateTxt, sizeof(stateTxt), "Idle - tap Check or Download");
+    (void)snprintf(stateTxt, sizeof(stateTxt), "%s", TXT_ST_IDLE);
   }
 
   if (strcmp(lastStateTxt, stateTxt) != 0)
@@ -1069,32 +1350,46 @@ static void OtaStatusTimerCb(lv_timer_t *timer)
     lv_bar_set_value(s_barOta, (int32_t)lastPct, LV_ANIM_OFF);
   }
 
-  /*忙时禁用按钮，避免连点把命令队列刷满：检查期间锁 Download，下载期间两个都锁*/
-  disDl  = ((GUI_OtaBusy() != 0U) || (chk == OTA_CHK_CHECKING)) ? 1U : 0U;
-  disChk = (GUI_OtaBusy() != 0U) ? 1U : 0U;
+  /*手动检查的结果在这里收口：只有本页发起的那一次才弹窗，
+   *MQTT 远程检查和开机静默检查都不能在用户面前弹。
+   *必须先看到 CHECKING 再接受结果，否则进页面时会把上一次遗留的 DONE 当成本次结果；
+   *4 秒兜底覆盖"命令被队列丢弃、直接 IDLE → FAIL"这种永远等不到 CHECKING 的情况*/
+  if (s_otaFlow == OTA_UI_FLOW_CHECK)
+  {
+    if (chk == OTA_CHK_CHECKING)
+    {
+      s_otaCheckSeen = 1U;
+    }
+    if ((chk != OTA_CHK_CHECKING) &&
+        ((s_otaCheckSeen != 0U) || (lv_tick_elaps(s_otaCheckT0) > 4000U)))
+    {
+      s_otaFlow = OTA_UI_FLOW_NONE;
 
-  if (lastDisDl != disDl)
-  {
-    lastDisDl = disDl;
-    if (disDl != 0U)
-    {
-      lv_obj_add_state(s_btnOtaStart, LV_STATE_DISABLED);
-    }
-    else
-    {
-      lv_obj_clear_state(s_btnOtaStart, LV_STATE_DISABLED);
-    }
-  }
-  if (lastDisChk != disChk)
-  {
-    lastDisChk = disChk;
-    if (disChk != 0U)
-    {
-      lv_obj_add_state(s_btnOtaCheck, LV_STATE_DISABLED);
-    }
-    else
-    {
-      lv_obj_clear_state(s_btnOtaCheck, LV_STATE_DISABLED);
+      if (chk == OTA_CHK_DONE)
+      {
+        if (g_otaStatus.checkVer != 0U)
+        {
+          (void)snprintf(txt, sizeof(txt), TXT_NEW_VER,
+                         (unsigned)((g_otaStatus.checkVer >> 8U) & 0xFFU),
+                         (unsigned)(g_otaStatus.checkVer & 0xFFU));
+          s_msgAct = MSG_ACT_DOWNLOAD;
+          GUI_ShowMsg(txt, 1U, TXT_UPDATE);
+        }
+        else
+        {
+          (void)snprintf(txt, sizeof(txt), TXT_UP_TO_DATE,
+                         (unsigned)s_otaCurMajor, (unsigned)s_otaCurMinor);
+          GUI_ShowMsg(txt, 0U, NULL);
+        }
+      }
+      else if (chk == OTA_CHK_FAIL)
+      {
+        GUI_ShowMsg(GUI_OtaErrTextCn(chkErr), 0U, NULL);
+      }
+      else
+      {
+        GUI_ShowMsg(TXT_TIMEOUT, 0U, NULL);
+      }
     }
   }
 }
@@ -1153,11 +1448,11 @@ static void GUI_CreateOtaScreen(void)
   lv_obj_set_pos(s_lblOtaVer, 0, 20);
 
   s_lblOtaState = lv_label_create(card);
-  lv_label_set_text(s_lblOtaState, "Idle - tap Check or Download");
+  lv_label_set_text(s_lblOtaState, TXT_ST_IDLE);
   lv_label_set_long_mode(s_lblOtaState, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(s_lblOtaState, 288);
   lv_obj_set_style_text_color(s_lblOtaState, COLOR_TEXT, 0);
-  lv_obj_set_style_text_font(s_lblOtaState, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_font(s_lblOtaState, BSP_Font_Gbk16(), 0);
   lv_obj_set_pos(s_lblOtaState, 0, 42);
 
   /*进度条：轨道深色、指示蓝色；不用默认样式，避免主题自动加渐变/边框*/
@@ -1185,34 +1480,23 @@ static void GUI_CreateOtaScreen(void)
   lv_obj_set_pos(lbl, 8, 166);
 
   lbl = lv_label_create(s_otaScr);
-  lv_label_set_text(lbl, "Check first, then Download (auto reboot 3s)");
+  lv_label_set_text(lbl, "Open = auto check, then confirm to install");
   lv_obj_add_style(lbl, &s_styleStatus, 0);
   lv_obj_set_pos(lbl, 8, 182);
 
-  /*三按钮横排：6+96 / 106+100 / 210+100，总宽 304，右留 6px；文案取短词防裁字*/
-  s_btnOtaCheck = lv_btn_create(s_otaScr);
-  lv_obj_remove_style_all(s_btnOtaCheck);
-  lv_obj_add_style(s_btnOtaCheck, &s_styleBtnBlue, 0);
-  lv_obj_set_style_bg_opa(s_btnOtaCheck, LV_OPA_60, LV_STATE_PRESSED);
-  lv_obj_set_size(s_btnOtaCheck, 96, 32);
-  lv_obj_set_pos(s_btnOtaCheck, 6, 202);
-  lv_obj_add_event_cb(s_btnOtaCheck, OtaCheckEventCb, LV_EVENT_CLICKED, NULL);
-  lbl = lv_label_create(s_btnOtaCheck);
-  lv_label_set_text(lbl, LV_SYMBOL_REFRESH " Check");
-  lv_obj_center(lbl);
-
-  s_btnOtaStart = lv_btn_create(s_otaScr);
-  lv_obj_remove_style_all(s_btnOtaStart);
-  lv_obj_add_style(s_btnOtaStart, &s_styleBtnGreen, 0);
-  lv_obj_set_style_bg_opa(s_btnOtaStart, LV_OPA_60, LV_STATE_PRESSED);
-  lv_obj_set_size(s_btnOtaStart, 100, 32);
-  lv_obj_set_pos(s_btnOtaStart, 106, 202);
-  lv_obj_add_event_cb(s_btnOtaStart, OtaStartEventCb, LV_EVENT_CLICKED, NULL);
-  lbl = lv_label_create(s_btnOtaStart);
-  lv_label_set_text(lbl, LV_SYMBOL_DOWNLOAD " Download");
-  lv_obj_center(lbl);
-
+  /*Serial：串口 IAP 的老入口，进 OTA 页后按它才备份 + 复位进 3s 窗口*/
   lv_obj_t *btn = lv_btn_create(s_otaScr);
+  lv_obj_remove_style_all(btn);
+  lv_obj_add_style(btn, &s_styleBtnBlue, 0);
+  lv_obj_set_style_bg_opa(btn, LV_OPA_60, LV_STATE_PRESSED);
+  lv_obj_set_size(btn, 64, 22);
+  lv_obj_set_pos(btn, 248, 4);
+  lv_obj_add_event_cb(btn, SerialUpdateEventCb, LV_EVENT_CLICKED, NULL);
+  lbl = lv_label_create(btn);
+  lv_label_set_text(lbl, "Serial");
+  lv_obj_center(lbl);
+
+  btn = lv_btn_create(s_otaScr);
   lv_obj_remove_style_all(btn);
   lv_obj_add_style(btn, &s_styleBtnWifi, 0);
   lv_obj_set_style_bg_opa(btn, LV_OPA_60, LV_STATE_PRESSED);
@@ -1225,35 +1509,24 @@ static void GUI_CreateOtaScreen(void)
 }
 
 /**
-  * 功    能：主屏底部放「串口升级」与「WiFi OTA」两个入口按钮
+  * 功    能：主屏底部唯一的升级入口：点进去自动检查更新
   * 参    数：scr 主屏对象
   * 返 回 值：无
-  * 补    充：原本是一条 304px 通栏按钮，拆成两半后标签要缩短，否则文字会被裁掉
+  * 补    充：原来「FW Update + OTA」两个按钮已合并——检查、确认、备份、下载都在同一条
+  *            流程里；串口 IAP 收进 OTA 页标题栏的 Serial
   */
-static void GUI_CreateFwEntry(lv_obj_t *scr)
+static void GUI_CreateUpdateEntry(lv_obj_t *scr)
 {
-  lv_obj_t *btn = lv_btn_create(scr);
-  lv_obj_remove_style_all(btn);
-  lv_obj_add_style(btn, &s_styleBtnWifi, 0);
-  lv_obj_set_style_bg_opa(btn, LV_OPA_60, LV_STATE_PRESSED);
-  lv_obj_set_size(btn, 150, 28);   /*屏宽 320，左右各留 8px；底部空区 206~234*/
-  lv_obj_set_pos(btn, 8, 206);
-  lv_obj_add_event_cb(btn, FwUpdateEventCb, LV_EVENT_CLICKED, NULL);
-
-  lv_obj_t *lbl = lv_label_create(btn);
-  lv_label_set_text(lbl, LV_SYMBOL_DOWNLOAD "  FW Update");
-  lv_obj_center(lbl);
-
   s_btnMainOta = lv_btn_create(scr);
   lv_obj_remove_style_all(s_btnMainOta);
   lv_obj_add_style(s_btnMainOta, &s_styleBtnWifi, 0);
   lv_obj_set_style_bg_opa(s_btnMainOta, LV_OPA_60, LV_STATE_PRESSED);
-  lv_obj_set_size(s_btnMainOta, 150, 28);
-  lv_obj_set_pos(s_btnMainOta, 164, 206);
+  lv_obj_set_size(s_btnMainOta, 304, 28);   /*屏宽 320，左右各留 8px；底部空区 206~234*/
+  lv_obj_set_pos(s_btnMainOta, 8, 206);
   lv_obj_add_event_cb(s_btnMainOta, OtaEntryEventCb, LV_EVENT_CLICKED, NULL);
 
   s_lblMainOta = lv_label_create(s_btnMainOta);
-  lv_label_set_text(s_lblMainOta, LV_SYMBOL_WIFI "  OTA");
+  lv_label_set_text(s_lblMainOta, LV_SYMBOL_DOWNLOAD "  Update");
   lv_obj_center(s_lblMainOta);
 }
 
@@ -1294,7 +1567,7 @@ static void GUI_CreateMainScreen(void)
 
   GUI_CreateButtons(scr);
   GUI_CreateWifiEntry(scr);
-  GUI_CreateFwEntry(scr);
+  GUI_CreateUpdateEntry(scr);
 }
 
 /*传感器刷新*/
@@ -1372,7 +1645,8 @@ static void SensorRefreshTimerCb(lv_timer_t *timer)
       lv_obj_set_style_border_color(s_btnMainOta,
                                     (hi != 0U) ? COLOR_ACCENT_BLUE_D : COLOR_CARD_BORDER, 0);
       lv_label_set_text(s_lblMainOta,
-                        (hi != 0U) ? "OTA  " LV_SYMBOL_UP : LV_SYMBOL_WIFI "  OTA");
+                        (hi != 0U) ? "New version  " LV_SYMBOL_UP
+                                   : LV_SYMBOL_DOWNLOAD "  Update");
     }
   }
 }

@@ -317,6 +317,18 @@ static void Wifi_SetStatus(WifiStatus_t st)
     g_wifiScan.status = (uint8_t)st;
 }
 
+/**
+  * 功    能：查询"网络是否真的连着"（给 GUI 判断能否发起 OTA 用）
+  * 参    数：无
+  * 返 回 值：1 = 已联网；0 = 未联网
+  * 补    充：g_wifiScan.status 是配网页的状态机，扫描会把它改成 SCANNING/SCAN_OK，
+  *            用它判断联网会把"网络好着"误判成"未连接"，所以统一走 s_connected
+  */
+uint8_t Wifi_IsConnected(void)
+{
+    return s_connected;
+}
+
 
 /*本地走秒*/
 /**

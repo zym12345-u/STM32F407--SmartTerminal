@@ -69,6 +69,10 @@ extern void SDCardTask_Create(void);    /*TF 卡延后初始化*/
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/* 统计任务开关：1=每 5s 打印任务栈水位+CPU 占比（排查性能时开），0=关闭。
+   默认关闭，因为它一次就是 10 多行，会和业务日志混在一起刷屏 */
+#define STATS_TASK_ENABLE   0
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -116,7 +120,9 @@ const osMessageQueueAttr_t CommandQueue_attributes = {
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
+#if STATS_TASK_ENABLE
 static void StartStatsTask(void *argument);   /*本文件的统计任务*/
+#endif
 /* USER CODE END FunctionPrototypes */
 
 void StartKeyTask(void *argument);
@@ -195,7 +201,8 @@ void MX_FREERTOS_Init(void) {
   CanTask_Create();       /*CAN1 报文收发*/
   MonitorTask_Create();   /*心跳检测 + IWDG 喂狗*/
   SDCardTask_Create();    /*TF 卡延后初始化，低优先级，不挡 GUI*/
-  /* 每 5s 打印任务栈水位和 CPU 占比 */
+  /* 每 5s 打印任务栈水位和 CPU 占比（STATS_TASK_ENABLE=1 时才建） */
+#if STATS_TASK_ENABLE
   {
     static const osThreadAttr_t statsTaskAttr = {
       .name = "StatsTask",
@@ -204,6 +211,7 @@ void MX_FREERTOS_Init(void) {
     };
     osThreadNew(StartStatsTask, NULL, &statsTaskAttr);
   }
+#endif
   /* 所有任务建完后的稳态堆余量，调度器启动还会再占约 1536B */
   UART_Printf("[SYS] free heap after all app tasks: %u bytes\r\n",
               (unsigned)xPortGetFreeHeapSize());
@@ -333,6 +341,7 @@ void vApplicationMallocFailedHook(void)
   for(;;) { ; }
 }
 
+#if STATS_TASK_ENABLE
 /**
   * 功    能：统计任务：每 5s 打一次任务列表和 CPU 占用率，纯调试用，不参与业务
   * 参    数：argument  未使用
@@ -360,5 +369,6 @@ static void StartStatsTask(void *argument)
     osDelay(5000U);
   }
 }
+#endif  /* STATS_TASK_ENABLE */
 /* USER CODE END Application */
 

@@ -135,6 +135,15 @@ def main():
     if size > OTA_IMG_MAX:
         raise SystemExit("[OTA] 镜像 %d 字节，超过槽 B 上限 %d" % (size, OTA_IMG_MAX))
 
+    # 先绑端口再写 app.meta：端口被占用时进程直接退出，不会把上一份好好的
+    # app.meta 改成本次编译的版本号（曾经因此让板子误判"已是最新"）
+    handler = partial(SimpleHTTPRequestHandler, directory=serve_dir)
+    try:
+        httpd = ThreadingHTTPServer((args.bind, args.port), handler)
+    except OSError as exc:
+        raise SystemExit("[OTA] 端口 %d 绑定失败（可能已有一个服务在跑）：%s"
+                         % (args.port, exc))
+
     meta_path = os.path.join(serve_dir, "app.meta")
     with open(meta_path, "w", encoding="ascii", newline="\n") as f:
         f.write("version=%s\n" % ver)
@@ -151,12 +160,9 @@ def main():
     print("开发板服务器地址二选一（默认值见 bsp_OTA.h 的 OTA_SRV_HOST/PORT）：")
     print("  1) 串口发送: otacfg %s %d" % (ip, args.port))
     print("  2) 写 LittleFS /ota.conf: host=%s  port=%d 后复位" % (ip, args.port))
-    print("然后在屏幕 WiFi OTA 页点 Check，再点 Download")
+    print("然后屏幕点 Update，确认后自动备份槽 A 并下载")
     print("按 Ctrl+C 停止服务")
     print("")
-
-    handler = partial(SimpleHTTPRequestHandler, directory=serve_dir)
-    httpd = ThreadingHTTPServer((args.bind, args.port), handler)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -37,6 +37,9 @@ void StartSensorTask(void *argument)
   DHT11_Status_t  stEnv;
   int tInt, tDec, hInt, hDec;   /*整数/小数拆分，避免 %f*/
   TickType_t lastWakeTime;      /*绝对周期基准*/
+  /*上次打印的整数值，用来判断"数值变了才打"*/
+  static int s_lastT = -1000, s_lastH = -1000, s_lastL = -1000;
+  static uint32_t s_sameCnt = 0U;
 
   /*初始化传感器*/
   if (BH1750_Init() == BH1750_OK)
@@ -85,19 +88,28 @@ void StartSensorTask(void *argument)
       g_sensorData.temp_valid  = 0;   /*温湿度共用同一有效位*/
     }
 
-    /*拆整数+小数打印，避免 %f 的栈开销*/
+    /*拆分整数+小数打印，避免 %f 的栈开销*/
     tInt = (int)g_sensorData.temperature;
     tDec = (int)((g_sensorData.temperature - tInt) * 10.0f);
     if (tDec < 0) tDec = -tDec;
     hInt = (int)g_sensorData.humidity;
     hDec = (int)((g_sensorData.humidity - hInt) * 10.0f);
     if (hDec < 0) hDec = -hDec;
-    UART_Printf("[SENSOR] T=%d.%dC H=%d.%d%% L=%dlux  (T:%s L:%s)\r\n",
-           tInt, tDec,
-           hInt, hDec,
-           (int)g_sensorData.light,
-           g_sensorData.temp_valid  ? "ok" : "err",
-           g_sensorData.light_valid ? "ok" : "err");
+    /* 只在数值变化或连续 15 次（30s）没变化时兜底打一条，避免 2s 一条刷屏 */
+    if ((tInt != s_lastT) || (hInt != s_lastH) ||
+        ((int)g_sensorData.light != s_lastL) || (++s_sameCnt >= 15U))
+    {
+      UART_Printf("[SENSOR] T=%d.%dC H=%d.%d%% L=%dlux  (T:%s L:%s)\r\n",
+             tInt, tDec,
+             hInt, hDec,
+             (int)g_sensorData.light,
+             g_sensorData.temp_valid  ? "ok" : "err",
+             g_sensorData.light_valid ? "ok" : "err");
+      s_lastT = tInt;
+      s_lastH = hInt;
+      s_lastL = (int)g_sensorData.light;
+      s_sameCnt = 0U;
+    }
 
     /*阻塞到下一个绝对时刻，采样间隔严格 2000ms，满足 DHT11 ≥1s*/
     vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(2000U));

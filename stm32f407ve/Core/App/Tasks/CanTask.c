@@ -17,7 +17,7 @@
 
 /* 状态轮询与打印限流 */
 #define CAN_STAT_POLL_MS        1000U
-#define CAN_STAT_PRINT_THROTTLE 2000U   /*同一状态至少间隔 2s 再打*/
+#define CAN_STAT_PRINT_THROTTLE 30000U  /*同一状态至少间隔 30s 再打，避免空闲期刷屏*/
 
 /* 恢复方向去抖所需连续稳定次数 */
 #define CAN_RECOVER_STABLE_CNT  2U

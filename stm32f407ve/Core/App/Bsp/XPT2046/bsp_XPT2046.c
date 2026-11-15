@@ -35,6 +35,12 @@ typedef    struct                   // 触摸数据结构体
 
 static xXPT2046_TypeDey xXPT2046;   // 本文件私有的触摸状态
 
+/* 采样统计：只用于排查"点不中"问题，四个计数器恒为累加，开销可忽略 */
+static uint32_t s_statCall;         // IsPressed 被调用次数
+static uint32_t s_statRange;        // 因 ADC 越界/无按压被丢弃的次数
+static uint32_t s_statWild;         // 因两次采样差超过阈值被丢弃的次数
+static uint32_t s_statOk;           // 判定为有效按下的次数
+
 
 
 
@@ -349,8 +355,14 @@ void XPT2046_Init(uint16_t lcdWidth, uint16_t lcdHeight, uint8_t dir)
     }
     else
     {
-        xXPT2046.xfac = -0.09184f; xXPT2046.yfac = 0.077956f;  // 横屏 X 轴 ADC 递增方向与像素相反，斜率必须为负
-        xXPT2046.xoff = 338;       xXPT2046.yoff = -45;        // 旋转后有效行程起点变了，靠偏移对齐
+        /* 横屏系数：2026-11-15 用实测反解重标定。
+         * 依据是三点实测（实际坐标 → 上报坐标）：
+         *   (10,10)->(6,0)  (310,230)->(307,218)  Join按钮中心(288,33)->(285,20)
+         * 旧系数上报比实际偏上约 12px、偏左约 3px，导致按钮上半部分点不中。
+         * 新系数由两个角点联立求得：X 斜率 (310-10)/(327-3609)，Y 斜率 (230-10)/(3382-539)。
+         * 若换屏或换批次，重新按同样方法取点即可 */
+        xXPT2046.xfac = -0.0914f; xXPT2046.yfac = 0.0774f;    // 横屏 X 轴 ADC 递增方向与像素相反，斜率必须为负
+        xXPT2046.xoff = 340;      xXPT2046.yoff = -32;         // 旧值 338/-45，实测整体偏上偏左后修正
     }
 
     XPT2046_Cmd(ENABLE);                                         // 打开触摸屏
@@ -512,6 +524,8 @@ uint8_t XPT2046_IsPressed(void)
 {
     static uint8_t status = 0;
 
+    s_statCall++;
+
     if (xXPT2046.EN == 0)             // 开关关闭时直接当未按下
         return 0;
 
@@ -519,13 +533,19 @@ uint8_t XPT2046_IsPressed(void)
     if (status == 1)
     {
         if (readAdcXY() == 0)         // 断线或越界，丢弃本次
+        {
+            s_statRange++;
             return 0;
+        }
         adcXYToLcdXY();               // 换算成屏幕坐标
         uint16_t x1 = xXPT2046.lcdX;
         uint16_t y1 = xXPT2046.lcdY;
 
         if (readAdcXY() == 0)
+        {
+            s_statRange++;
             return 0;
+        }
         adcXYToLcdXY();
         uint16_t x2 = xXPT2046.lcdX;
         uint16_t y2 = xXPT2046.lcdY;
@@ -543,14 +563,46 @@ uint8_t XPT2046_IsPressed(void)
             y = y2 - y1;
 
         if (x > 10 || y > 10)
+        {
+            s_statWild++;
             return 0;
+        }
 
         // 两次测量取平均值
         xXPT2046.lcdX = (x1 + x2) >> 1;
         xXPT2046.lcdY = (y1 + y2) >> 1;
+        s_statOk++;
     }
 
     return  status ;      // 0=未按下，1=按下
+}
+
+
+
+/**
+  * 功    能：取采样统计（排查点不中时用），四个值都是上电以来的累计值
+  * 参    数：call/range/wild/ok  输出计数，可传 NULL 表示不关心
+  * 返 回 值：无
+  */
+void XPT2046_GetStats(uint32_t *call, uint32_t *range, uint32_t *wild, uint32_t *ok)
+{
+    if (call)  *call  = s_statCall;
+    if (range) *range = s_statRange;
+    if (wild)  *wild  = s_statWild;
+    if (ok)    *ok    = s_statOk;
+}
+
+
+
+/**
+  * 功    能：取最近一次有效采样的原始 ADC 值（校准偏移排查用）
+  * 参    数：adcX/adcY  输出原始值，可传 NULL 表示不关心
+  * 返 回 值：无
+  */
+void XPT2046_GetRawAdc(uint16_t *adcX, uint16_t *adcY)
+{
+    if (adcX) *adcX = xXPT2046.adcX;
+    if (adcY) *adcY = xXPT2046.adcY;
 }
 
 
