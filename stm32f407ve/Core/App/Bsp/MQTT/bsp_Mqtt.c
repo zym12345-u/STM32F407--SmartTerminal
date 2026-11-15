@@ -452,7 +452,7 @@ static uint8_t Mqtt_Append(const uint8_t *data, uint16_t len)
     {
         UART_Printf("[MQTT] rx buf full: have=%u add=%u b0=%02X b1=%02X\r\n",
                     (unsigned)s_rxLen, (unsigned)len,
-                    (unsigned)data[0], (unsigned)data[1]);
+                    (unsigned)data[0], (len > 1U) ? (unsigned)data[1] : 0U);
         s_rxLen         = 0U;
         s_needReconnect = 1U;
         return 0U;
@@ -545,6 +545,13 @@ static void Mqtt_ProcessRx(void)
             if (MqttKit_ParseSubAck(s_rx, (uint32_t)total, &rc) == 0)
             {
                 UART_Printf("[MQTT] SUBACK rc=0x%02X\r\n", (unsigned)rc);
+                if (rc == 0x80U)
+                {
+                    /*Broker 拒绝订阅：设备会"显示已连接却永远收不到命令"。
+                     *置重连进退避循环，每次重试都会打出这条日志——
+                     *重连本身不会成功，但故障至少是可见的，好过静默失效*/
+                    s_needReconnect = 1U;
+                }
             }
         }
         else

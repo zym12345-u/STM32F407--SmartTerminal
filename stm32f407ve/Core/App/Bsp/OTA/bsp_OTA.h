@@ -34,10 +34,19 @@
 #define OTA_META_PATH  "/app.meta"       /* 路径写死：服务端目录里只能有这两个文件角色 */
 #define OTA_BIN_PATH   "/app.bin"
 
-/*槽 B 的记录格式：1=整区备份（槽 A），2=OTA 镜像（只有前 size 字节有效）。
- *本模块只写格式 2；格式 1 由 GuiTask 的整区备份流程写，两边不能互换：
+/*槽记录的格式：1=整区备份（槽 A），2=OTA 镜像（只有前 size 字节有效）。
+ *本模块写格式 2（OTA_DownloadToSlotB）；格式 1 由 OTA_BackupAppToSlotA 写——
+ *GUI 与远程 MQTT 下载共用这一份备份实现，两边不能混用格式：
  *格式 1 的 size 恒为 448KB（整区），格式 2 的 size 是真实镜像长度。*/
-#define OTA_REC_FMT    2UL
+#define OTA_REC_FMT     2UL
+#define OTA_REC_FMT_BK  1UL
+
+/**
+  * 功    能：备份进度回调：每完成一个 4KB 扇区调一次
+  * 参    数：percent  0~100
+  * 补    充：可为 NULL（远程下载传适配函数刷 g_otaStatus，GUI 传刷屏函数）
+  */
+typedef void (*OTA_ProgressCb_t)(uint8_t percent);
 
 /**
   * 功    能：把 app.bin 下载到 W25Q 槽 B，并回读校验、写槽记录
@@ -81,5 +90,26 @@ uint8_t OTA_CheckUpdate(uint16_t *newVer);
   * 补    充：仅 WifiTask 调用；3s 内每 500ms 补一次 WiFi 心跳，GUI 显示 Done - rebooting...
   */
 void OTA_RebootToApply(void);
+
+/**
+  * 功    能：读槽 A 整区备份记录里的版本号
+  * 参    数：ver  输出，主<<8|次
+  * 返 回 值：1 = 记录有效且是整区备份（格式 1）；0 = 槽 A 没有可用备份
+  * 补    充：只验 magic / 格式 / 记录自身 CRC，不读 448KB 镜像本体——
+  *            这里只决定"要不要重做备份"，镜像完好与否由 BootLoader 搬运前自己验
+  */
+uint8_t OTA_ReadSlotABackupVer(uint32_t *ver);
+
+/**
+  * 功    能：把内部 App 区 448KB 整段备份到 W25Q 槽 A，并回读校验
+  * 参    数：ver  当前固件版本(主<<8|次)；cb  进度回调，可为 NULL
+  * 返 回 值：1 = 备份且校验通过；0 = 任一步失败（此时槽 A 不留有效记录）
+  * 补    充：GUI 与远程 MQTT 下载共用这一份实现；记录最后写——
+  *            中途断电最多留一份"没有记录的镜像"，BootLoader 不会拿它回滚。
+  *            每 4KB 扇区补报 WIFI 心跳并触发一次 cb；
+  *            GUI 任务调用时由 cb 里再补 GUI 心跳（本函数不知道调用方是谁）。
+  *            注意：GUI 与 WifiTask 不能同时调用（W25Q 与 LittleFS 共用 SPI1）
+  */
+uint8_t OTA_BackupAppToSlotA(uint32_t ver, OTA_ProgressCb_t cb);
 
 #endif /* __BSP_OTA_H */
