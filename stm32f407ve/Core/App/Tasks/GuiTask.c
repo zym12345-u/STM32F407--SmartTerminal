@@ -556,7 +556,7 @@ static uint8_t GUI_OtaBusy(void)
 {
   uint8_t st = g_otaStatus.state;
 
-  if ((st == OTA_ST_ERASE) || (st == OTA_ST_META) ||
+  if ((st == OTA_ST_BACKUP) || (st == OTA_ST_ERASE) || (st == OTA_ST_META) ||
       (st == OTA_ST_DOWNLOAD) || (st == OTA_ST_VERIFY))
   {
     return 1U;
@@ -614,6 +614,7 @@ static uint8_t s_msgAct = MSG_ACT_DOWNLOAD;
 #define E_WIFI               "\x57\x69\x46\x69\x20\xE6\x9C\xAA\xE8\xBF\x9E\xE6\x8E\xA5\xEF\xBC\x8C\xE8\xAF\xB7\xE5\x85\x88\xE9\x85\x8D\xE7\xBD\x91"   /* WiFi 未连接，请先配网 */
 #define E_FLASH              "\x57\x32\x35\x51\x20\xE6\x9C\xAA\xE5\xB0\xB1\xE7\xBB\xAA"                     /* W25Q 未就绪 */
 #define E_ERASE              "\xE6\x93\xA6\xE9\x99\xA4\xE6\xA7\xBD\x20\x42\x20\xE5\xA4\xB1\xE8\xB4\xA5"                     /* 擦除槽 B 失败 */
+#define E_BACKUP             "\xE5\xA4\x87\xE4\xBB\xBD\xE6\xA7\xBD\x20\x41\x20\xE5\xA4\xB1\xE8\xB4\xA5\xEF\xBC\x8C\xE6\x9C\xAA\xE5\xBC\x80\xE5\xA7\x8B\xE4\xB8\x8B\xE8\xBD\xBD\xE3\x80\x82"   /* 备份槽 A 失败，未开始下载。 */
 #define E_CONNECT            "\xE8\xBF\x9E\xE4\xB8\x8D\xE4\xB8\x8A\x20\x50\x43\x20\xE6\x9C\x8D\xE5\x8A\xA1\xE5\x99\xA8"                     /* 连不上 PC 服务器 */
 #define E_HTTP               "\x48\x54\x54\x50\x20\xE9\x94\x99\xE8\xAF\xAF\xEF\xBC\x8C\xE6\xA3\x80\xE6\x9F\xA5\xE6\x9C\x8D\xE5\x8A\xA1"                     /* HTTP 错误，检查服务 */
 #define E_META               "\x61\x70\x70\x2E\x6D\x65\x74\x61\x20\xE7\xBC\xBA\xE5\xA4\xB1\xE6\x88\x96\xE6\x8D\x9F\xE5\x9D\x8F"                     /* app.meta 缺失或损坏 */
@@ -715,6 +716,7 @@ static const char *GUI_OtaErrTextCn(uint8_t err)
     case OTA_ERR_WIFI:    return E_WIFI;
     case OTA_ERR_FLASH:   return E_FLASH;
     case OTA_ERR_ERASE:   return E_ERASE;
+    case OTA_ERR_BACKUP:  return E_BACKUP;
     case OTA_ERR_CONNECT: return E_CONNECT;
     case OTA_ERR_HTTP:    return E_HTTP;
     case OTA_ERR_META:    return E_META;
@@ -1038,11 +1040,12 @@ static void OtaStatusTimerCb(lv_timer_t *timer)
 
   /*状态行优先级：下载进行中 > 检查进行中 > 下载结果 > 检查结果 > 空闲。
    *这样检查失败不会覆盖下载失败文案，下载失败也不会被一次检查成功冲掉。*/
-  if ((st == OTA_ST_ERASE) || (st == OTA_ST_META) ||
+  if ((st == OTA_ST_BACKUP) || (st == OTA_ST_ERASE) || (st == OTA_ST_META) ||
       (st == OTA_ST_DOWNLOAD) || (st == OTA_ST_VERIFY))
   {
     switch (st)
     {
+      case OTA_ST_BACKUP:   (void)snprintf(stateTxt, sizeof(stateTxt), "%s", TXT_ST_BACKUP);   break;
       case OTA_ST_ERASE:    (void)snprintf(stateTxt, sizeof(stateTxt), "%s", TXT_ST_ERASE);    break;
       case OTA_ST_META:     (void)snprintf(stateTxt, sizeof(stateTxt), "%s", TXT_ST_META);     break;
       case OTA_ST_DOWNLOAD: (void)snprintf(stateTxt, sizeof(stateTxt), "%s", TXT_ST_DOWNLOAD); break;

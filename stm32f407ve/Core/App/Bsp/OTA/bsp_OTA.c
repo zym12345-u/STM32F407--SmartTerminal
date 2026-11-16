@@ -993,6 +993,11 @@ uint8_t OTA_BackupAppToSlotA(uint32_t ver, OTA_ProgressCb_t cb)
     uint32_t readCrc;
     uint32_t t0;
 
+    /*独立备份状态：备份要 8~11 秒，沿用"擦除中"会让用户以为卡死。
+     *备份失败时本状态保留到 OTA_DownloadToSlotB 结尾统一置 OTA_ST_FAIL*/
+    g_otaStatus.state   = OTA_ST_BACKUP;
+    g_otaStatus.percent = 0U;
+
     if (OTA_AppVectorOk() == 0U)
     {
         UART_Printf("[BK] app vector invalid, abort\r\n");
@@ -1102,7 +1107,7 @@ void OTA_ReportFail(uint8_t err)
   */
 static void OTA_DlBackupProgress(uint8_t percent)
 {
-    g_otaStatus.state   = OTA_ST_ERASE;
+    /*只刷进度，状态由 OTA_BackupAppToSlotA 保持 OTA_ST_BACKUP 直到备份结束*/
     g_otaStatus.percent = (uint8_t)((percent * 15UL) / 100UL);
 }
 
@@ -1121,7 +1126,12 @@ static uint8_t OTA_EnsureSlotABackupForDl(void)
 
     UART_Printf("[OTA] slot A backup start (cur v%u.%u)\r\n",
                 (unsigned)(curVer >> 8U), (unsigned)(curVer & 0xFFU));
-    return OTA_BackupAppToSlotA((uint32_t)curVer, OTA_DlBackupProgress);
+    if (OTA_BackupAppToSlotA((uint32_t)curVer, OTA_DlBackupProgress) == 0U)
+    {
+        return 0U;
+    }
+    g_otaStatus.state = OTA_ST_ERASE;   /*备份完成，进入擦槽 B 阶段*/
+    return 1U;
 }
 
 /**
@@ -1159,7 +1169,7 @@ uint8_t OTA_DownloadToSlotB(void)
     }
     else if (OTA_EnsureSlotABackupForDl() == 0U)    /*先立回滚基线，再动槽 B*/
     {
-        err = OTA_ERR_ERASE;
+        err = OTA_ERR_BACKUP;   /*备份失败与擦槽失败分开报，UI 文案不误导*/
     }
     else if (OTA_EraseSlot() == 0U)
     {
