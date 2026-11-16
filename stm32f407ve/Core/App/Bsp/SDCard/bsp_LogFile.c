@@ -14,6 +14,7 @@
 #include "bsp_LogFile.h"
 
 #include "ff.h"
+#include "bsp_SDCard.h"   /*SDCard_RetryMount，LogFile_Init 打开失败重试时用*/
 #include "cmsis_os2.h"
 #include "usart.h"     /*UART_Printf，用于把日志回传到串口*/
 #include <string.h>
@@ -47,6 +48,7 @@ static volatile uint8_t s_dumpActive;   /*回传进行中：暂停入队，防�
 uint8_t LogFile_Init(void)
 {
     FRESULT fr;
+    uint8_t attempt;
 
     if (s_fileOpen != 0U)
     {
@@ -62,8 +64,23 @@ uint8_t LogFile_Init(void)
         }
     }
 
-    /*FA_OPEN_ALWAYS：文件不存在就新建，存在就打开，便于多次上电追加*/
-    fr = f_open(&s_file, LOG_PATH, FA_OPEN_ALWAYS | FA_WRITE);
+    /*FA_OPEN_ALWAYS：文件不存在就新建，存在就打开，便于多次上电追加。
+     *打开失败要"说出来"：启动日志只有 ready=1 而没有 file logging started 时，
+     *必须能看到 fr 是没格式化(FR_NO_FILESYSTEM)还是写保护等，别让排障靠猜。
+     *偶发失败（挂载后时序未稳）重试一次：重新 f_mount 再 f_open*/
+    for (attempt = 0U; attempt < 2U; attempt++)
+    {
+        if (attempt != 0U)
+        {
+            (void)SDCard_RetryMount();
+        }
+        fr = f_open(&s_file, LOG_PATH, FA_OPEN_ALWAYS | FA_WRITE);
+        if (fr == FR_OK)
+        {
+            break;
+        }
+        UART_Printf("[LOG] open fail fr=%u path=%s\r\n", (unsigned)fr, LOG_PATH);
+    }
     if (fr != FR_OK)
     {
         return LOGFILE_ERR;
@@ -169,6 +186,8 @@ static void LogFile_Dump(void)
     UINT    br = 0U;
     FRESULT fr;
     uint32_t total = 0U;
+    uint32_t fsize = 0U;
+    uint8_t  readFail = 0U;
     static char buf[128];   /*静态：SdCardTask 栈只有 2KB，别放大缓冲*/
 
     /*先把仍留在 FatFS 缓冲里的内容刷到卡上，否则回传的是旧快照*/
@@ -195,12 +214,24 @@ static void LogFile_Dump(void)
         return;
     }
 
-    UART_Printf("[LOG] dump start size=%lu\r\n", (unsigned long)f_size(&f));
+    fsize = (uint32_t)f_size(&f);
+    UART_Printf("[LOG] dump start size=%lu\r\n", (unsigned long)fsize);
 
     for (;;)
     {
         fr = f_read(&f, buf, sizeof(buf) - 1U, &br);
-        if ((fr != FR_OK) || (br == 0U))
+        if (fr != FR_OK)
+        {
+            /*SDIO 偶发读错先重试一次；仍失败就中止本次回传——
+             *绝不能把读错误当"读到文件尾"，否则半截日志会被当成完整日志*/
+            fr = f_read(&f, buf, sizeof(buf) - 1U, &br);
+            if (fr != FR_OK)
+            {
+                readFail = 1U;
+                break;
+            }
+        }
+        if (br == 0U)
         {
             break;
         }
@@ -210,7 +241,23 @@ static void LogFile_Dump(void)
     }
 
     (void)f_close(&f);
-    UART_Printf("\r\n[LOG] dump end %lu bytes\r\n", (unsigned long)total);
+
+    if (readFail != 0U)
+    {
+        UART_Printf("\r\n[LOG] dump read fail fr=%d off=%lu\r\n",
+                    (int)fr, (unsigned long)total);
+        /*恢复写对象：重新打开并定位到末尾，后续日志继续追加*/
+        if (f_open(&s_file, LOG_PATH, FA_OPEN_ALWAYS | FA_WRITE) == FR_OK)
+        {
+            (void)f_lseek(&s_file, f_size(&s_file));
+            s_fileOpen = 1U;
+        }
+        s_dumpActive = 0U;
+        return;
+    }
+
+    UART_Printf("\r\n[LOG] dump end sent=%lu size=%lu\r\n",
+                (unsigned long)total, (unsigned long)fsize);
 
     /*恢复写对象：重新打开并定位到末尾，后续日志继续追加*/
     if (f_open(&s_file, LOG_PATH, FA_OPEN_ALWAYS | FA_WRITE) == FR_OK)
@@ -225,14 +272,16 @@ static void LogFile_Dump(void)
 /**
   * 功    能：请求回传日志（只置标志，实际读文件在 SdCardTask 里执行）
   * 参    数：无
-  * 返 回 值：无
+  * 返 回 值：1 = 已排队；0 = 日志文件未打开，本次拒绝
   */
-void LogFile_RequestDump(void)
+uint8_t LogFile_RequestDump(void)
 {
-    if (s_fileOpen != 0U)
+    if (s_fileOpen == 0U)
     {
-        s_dumpReq = 1U;
+        return 0U;   /*未打开就明确拒绝，不再静默——调用方要给用户一句话*/
     }
+    s_dumpReq = 1U;
+    return 1U;
 }
 
 /**

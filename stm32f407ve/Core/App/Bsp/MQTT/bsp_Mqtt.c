@@ -452,7 +452,8 @@ static uint8_t Mqtt_Append(const uint8_t *data, uint16_t len)
     {
         UART_Printf("[MQTT] rx buf full: have=%u add=%u b0=%02X b1=%02X\r\n",
                     (unsigned)s_rxLen, (unsigned)len,
-                    (unsigned)data[0], (len > 1U) ? (unsigned)data[1] : 0U);
+                    (unsigned)((len > 0U) ? data[0] : 0U),
+                    (unsigned)((len > 1U) ? data[1] : 0U));
         s_rxLen         = 0U;
         s_needReconnect = 1U;
         return 0U;

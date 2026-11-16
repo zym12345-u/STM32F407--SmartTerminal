@@ -127,8 +127,15 @@ static void Command_HandleLine(const char *line)
   /*调试：把 TF 卡上的日志文件回传到串口，电脑端无需读卡器*/
   if (strcmp(line, "logdump") == 0)
   {
-    LogFile_RequestDump();
-    UART_Printf("[CMD] logdump queued\r\n");
+    if (LogFile_RequestDump() != 0U)
+    {
+      UART_Printf("[CMD] logdump queued\r\n");
+    }
+    else
+    {
+      /*日志没打开（如卡没插/没格式化）必须说出来，别让人对着不存在的输出等*/
+      UART_Printf("[CMD] logdump rejected: log not open\r\n");
+    }
     PowerMgr_Feed();
     return;
   }

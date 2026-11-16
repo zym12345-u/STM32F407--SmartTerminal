@@ -91,6 +91,23 @@ uint8_t SDCard_Init(void)
 }
 
 /**
+  * 功    能：重新挂载 FatFS 卷
+  * 参    数：无
+  * 返 回 值：FRESULT，0=FR_OK
+  * 补    充：SDIO 识别成功但挂载/后续打开失败时（如上电时序未稳、卡短暂忙），
+  *            重跑一次 f_mount 常能救回来；结果同步进 s_mountResult 供遥测观察
+  */
+uint8_t SDCard_RetryMount(void)
+{
+    s_mountResult = (uint8_t)f_mount(&s_fs, SD_Path, 1U);
+    if (s_mountResult == (uint8_t)FR_OK)
+    {
+        s_inited = 1U;
+    }
+    return s_mountResult;
+}
+
+/**
   * 功    能：卸载并反初始化
   * 参    数：无
   * 返 回 值：无

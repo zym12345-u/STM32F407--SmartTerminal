@@ -30,6 +30,15 @@ extern "C" {
 uint8_t SDCard_Init(void);
 
 /**
+  * 功    能：重新挂载 FatFS 卷 "0:/"（卡已识别但挂载/打开失败后的重试入口）
+  * 参    数：无
+  * 返 回 值：FRESULT，0=FR_OK
+  * 补    充：不重新初始化 SDIO，只重跑 f_mount(immediate=1)；成功后置就绪标志，
+  *            之后 SDCard_Init() 直接返回 OK。LogFile_Init 打开失败重试时用
+  */
+uint8_t SDCard_RetryMount(void);
+
+/**
   * 功    能：卸载文件系统并反初始化 SDIO
   * 参    数：无
   * 返 回 值：无

@@ -42,11 +42,11 @@ void LogFile_TaskRun(void);
 /**
   * 功    能：请求把日志文件内容回传到串口（异步执行）
   * 参    数：无
-  * 返 回 值：无
+  * 返 回 值：1 = 已排队，SdCardTask 会执行；0 = 日志文件未打开，本次拒绝
   * 补    充：只置标志，真正的读文件由 SdCardTask 在 LogFile_TaskRun 里做；
   *            回传期间会暂停日志入队，避免 dump 出的内容又被写回文件形成回环
   */
-void LogFile_RequestDump(void);
+uint8_t LogFile_RequestDump(void);
 
 /**
   * 功    能：取因队列满丢弃的日志条数
