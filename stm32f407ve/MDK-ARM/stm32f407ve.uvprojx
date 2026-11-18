@@ -708,6 +708,26 @@
               <FilePath>../Core/App/Gui/GuiOtaScreen.c</FilePath>
             </File>
             <File>
+              <FileName>GuiOtaSerial.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Gui/GuiOtaSerial.c</FilePath>
+            </File>
+            <File>
+              <FileName>GuiOtaEntry.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Gui/GuiOtaEntry.c</FilePath>
+            </File>
+            <File>
+              <FileName>GuiOtaText.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/App/Gui/GuiOtaText.h</FilePath>
+            </File>
+            <File>
+              <FileName>GuiOtaInternal.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/App/Gui/GuiOtaInternal.h</FilePath>
+            </File>
+            <File>
               <FileName>GuiWifiScreen.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/App/Gui/GuiWifiScreen.c</FilePath>
