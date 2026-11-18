@@ -72,6 +72,9 @@ uint8_t   XPT2046_ReCalibration(void);                                        //
 uint8_t   XPT2046_IsPressed(void);                                            // 0=松开 1=按下
 uint16_t  XPT2046_GetX(void);                                                 // 当前触摸点 X 坐标
 uint16_t  XPT2046_GetY(void);                                                 // 当前触摸点 Y 坐标
+void      XPT2046_GetStats(uint32_t *call, uint32_t *range,
+                           uint32_t *wild, uint32_t *ok);                     // 采样统计(排查用)
+void      XPT2046_GetRawAdc(uint16_t *adcX, uint16_t *adcY);                  // 最近一次原始 ADC 值(校准排查用)
 void      XPT2046_Cmd(uint8_t status);                                        // 触摸开关，初始化后默认开启
 void      XPT2046_TouchDown(void);                                            // 按下回调，原示例中使用
 void      XPT2046_TouchUp(void);                                              // 松开回调，原示例中使用

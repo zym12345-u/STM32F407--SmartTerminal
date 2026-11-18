@@ -56,6 +56,7 @@ extern void WifiTask_Create(void);     /*ESP8266 SNTP 对时*/
 extern void ModbusTask_Create(void);    /*RS485 Modbus RTU 从站*/
 extern void CanTask_Create(void);       /*CAN1 500Kbps 收发*/
 extern void MonitorTask_Create(void);   /*心跳监控 + IWDG 喂狗*/
+extern void SDCardTask_Create(void);    /*TF 卡延后初始化*/
 #include "bsp_W25Q128.h"               /*外部 Flash 自检*/
 #include "bsp_lfs_port.h"              /*LittleFS 挂载*/
 #include "bsp_font_gbk.h"              /*外挂 GBK 字库自检*/
@@ -67,6 +68,10 @@ extern void MonitorTask_Create(void);   /*心跳监控 + IWDG 喂狗*/
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+/* 统计任务开关：1=每 5s 打印任务栈水位+CPU 占比（排查性能时开），0=关闭。
+   默认关闭，因为它一次就是 10 多行，会和业务日志混在一起刷屏 */
+#define STATS_TASK_ENABLE   0
 
 /* USER CODE END PD */
 
@@ -96,7 +101,10 @@ const osThreadAttr_t LEDTask_attributes = {
 osThreadId_t CommandTaskHandle;
 const osThreadAttr_t CommandTask_attributes = {
   .name = "CommandTask",
-  .stack_size = 128 * 4,
+  /* 1536 字节：栈上要同时放 Command_HandleLine 的解析帧(host[64]+两个配置结构)
+   * 和 Wifi_Post* 里按值投递的 WifiCmd_t(240B)，再加 UART_Printf 的格式化帧。
+   * 原来 512 字节时 vTaskList 只剩 79 字余量，发 mqttcfg/otacfg/at 必溢出 */
+  .stack_size = 1536U,
   .priority = (osPriority_t) osPriorityHigh1,
 };
 /* Definitions for LEDQueue */
@@ -112,7 +120,9 @@ const osMessageQueueAttr_t CommandQueue_attributes = {
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
+#if STATS_TASK_ENABLE
 static void StartStatsTask(void *argument);   /*本文件的统计任务*/
+#endif
 /* USER CODE END FunctionPrototypes */
 
 void StartKeyTask(void *argument);
@@ -190,7 +200,9 @@ void MX_FREERTOS_Init(void) {
   ModbusTask_Create();    /*RS485 Modbus 从站*/
   CanTask_Create();       /*CAN1 报文收发*/
   MonitorTask_Create();   /*心跳检测 + IWDG 喂狗*/
-  /* 每 5s 打印任务栈水位和 CPU 占比 */
+  SDCardTask_Create();    /*TF 卡延后初始化，低优先级，不挡 GUI*/
+  /* 每 5s 打印任务栈水位和 CPU 占比（STATS_TASK_ENABLE=1 时才建） */
+#if STATS_TASK_ENABLE
   {
     static const osThreadAttr_t statsTaskAttr = {
       .name = "StatsTask",
@@ -199,6 +211,7 @@ void MX_FREERTOS_Init(void) {
     };
     osThreadNew(StartStatsTask, NULL, &statsTaskAttr);
   }
+#endif
   /* 所有任务建完后的稳态堆余量，调度器启动还会再占约 1536B */
   UART_Printf("[SYS] free heap after all app tasks: %u bytes\r\n",
               (unsigned)xPortGetFreeHeapSize());
@@ -328,6 +341,7 @@ void vApplicationMallocFailedHook(void)
   for(;;) { ; }
 }
 
+#if STATS_TASK_ENABLE
 /**
   * 功    能：统计任务：每 5s 打一次任务列表和 CPU 占用率，纯调试用，不参与业务
   * 参    数：argument  未使用
@@ -355,5 +369,6 @@ static void StartStatsTask(void *argument)
     osDelay(5000U);
   }
 }
+#endif  /* STATS_TASK_ENABLE */
 /* USER CODE END Application */
 

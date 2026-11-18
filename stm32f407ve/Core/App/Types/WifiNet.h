@@ -56,15 +56,23 @@ typedef struct
 extern WifiScanState_t g_wifiScan;
 
 
-/* 命令码 1~3；GuiTask 填并投队列，WifiTask 读 */
-#define WIFI_CMD_SCAN   1U
-#define WIFI_CMD_JOIN   2U
-#define WIFI_CMD_OTA    3U                  /* 下载固件到 W25Q 槽 B，进度看 g_otaStatus */
+/* 命令码 1~5；GuiTask/CommandTask 填并投队列，WifiTask 读 */
+#define WIFI_CMD_SCAN          1U
+#define WIFI_CMD_JOIN          2U
+#define WIFI_CMD_OTA           3U   /* 下载固件到 W25Q 槽 B，进度看 g_otaStatus */
+#define WIFI_CMD_SET_OTA_CFG   4U   /* 写 /ota.conf，只有 WifiTask 能碰 LittleFS */
+#define WIFI_CMD_CHECK_OTA     5U   /* 只 GET app.meta 检查版本，下载仍要用户点 */
+#define WIFI_CMD_AT_PROBE      6U   /* 调试：把一条原始 AT 指令转给 ESP8266 并打印应答 */
+#define WIFI_CMD_SET_MQTT_CFG  7U   /* 写 /mqtt.conf 并热切换 Broker，只有 WifiTask 能碰 LittleFS */
 typedef struct
 {
-    uint8_t type;                       /* 1=SCAN 2=JOIN 3=OTA；GuiTask 写，WifiTask 读 */
+    uint8_t type;                       /* 1=SCAN 2=JOIN 3=OTA 4=SET_OTA_CFG 5=CHECK_OTA 6=AT_PROBE 7=SET_MQTT_CFG */
     char    ssid[WIFI_SSID_LEN + 1U];   /* 目标热点名 0~32 字符，仅 JOIN 有效；GuiTask 写，WifiTask 读 */
     char    pwd[WIFI_PWD_LEN + 1U];     /* 密码 0~63 字符，仅 JOIN 有效；GuiTask 写，WifiTask 读 */
+    char    host[64];                   /* 服务器地址 1~63 字符，仅 SET_OTA_CFG / SET_MQTT_CFG 有效 */
+    uint16_t port;                      /* 服务器端口 1~65535，仅 SET_OTA_CFG / SET_MQTT_CFG 有效 */
+    uint8_t manual;                     /* 1=手动检查 0=上电静默检查，仅 CHECK_OTA 有效 */
+    char    atcmd[72];                  /* 原始 AT 指令（不带 CRLF），仅 AT_PROBE 有效 */
 } WifiCmd_t;
 
 /* 事件 1~3；WifiTask 填并投队列，GuiTask 在 LVGL 定时器里轮询 */
@@ -77,6 +85,15 @@ typedef enum
 
 
 /*非阻塞，可在 GUI 事件回调里直接调用，队列满静默丢弃*/
+/**
+  * 功    能：查询"网络是否真的连着"
+  * 参    数：无
+  * 返 回 值：1 = 已联网（CWJAP+SNTP 成功）；0 = 未联网
+  * 补    充：别用 g_wifiScan.status 判断——那是配网页的状态机，扫描/配网会把它改成
+  *            SCANNING/SCAN_OK，即使网络好着也会被误判成"未连接"
+  */
+uint8_t Wifi_IsConnected(void);
+
 /**
   * 功    能：让 WifiTask 去扫一遍热点：只投一条命令进队列就返回，不等结果
   * 参    数：无
@@ -100,6 +117,38 @@ void Wifi_PostJoin(const char *ssid, const char *pwd);
   * 补    充：下载进度/结果读 g_otaStatus；只能在本页 WiFi 已连接时发起，否则 err=OTA_ERR_WIFI
   */
 void Wifi_PostOta(void);
+
+/**
+  * 功    能：请求 WifiTask 保存 OTA 服务器地址到 LittleFS（非阻塞，投队列就返回）
+  * 参    数：host  服务器地址 1~63 字符；port  端口 1~65535
+  * 返 回 值：无
+  * 补    充：写文件由 WifiTask 完成；调用方任务绝不能自己碰 LittleFS
+  */
+void Wifi_PostSetOtaCfg(const char *host, uint16_t port);
+
+/**
+  * 功    能：请求 WifiTask 保存 MQTT Broker 地址到 LittleFS 并热切换（非阻塞）
+  * 参    数：host  Broker 地址 1~63 字符；port  端口 1~65535
+  * 返 回 值：无
+  * 补    充：写文件由 WifiTask 完成；保存成功后立即断开旧 Broker 并按新地址重连
+  */
+void Wifi_PostSetMqttCfg(const char *host, uint16_t port);
+
+/**
+  * 功    能：请求 WifiTask 检查更新（只 GET app.meta，不下载）
+  * 参    数：manual  1=用户手动点 Check 0=上电静默检查
+  * 返 回 值：无
+  * 补    充：结果写 g_otaStatus.checkState/checkErr/checkVer；队列不可用时直接置 FAIL
+  */
+void Wifi_PostCheckOta(uint8_t manual);
+
+/**
+  * 功    能：调试入口：把一条原始 AT 指令交给 WifiTask 转发给 ESP8266，并打印应答
+  * 参    数：atcmd  不含 CRLF 的 AT 指令，如 "AT+GMR"，最长 71 字符
+  * 返 回 值：无
+  * 补    充：仅用于联调排查，正常业务不要走这里
+  */
+void Wifi_PostAtProbe(const char *atcmd);
 
 /*0 tick 超时，绝不阻塞 GUI；事件队列长度由 WifiTask_Create 决定*/
 /**

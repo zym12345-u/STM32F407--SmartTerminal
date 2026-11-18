@@ -104,6 +104,8 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_GPIO_WritePin(led_green_GPIO_Port, led_green_Pin, GPIO_PIN_SET);   /*灯低电平点亮，启动前统一置灭*/
   HAL_GPIO_WritePin(led_blue_GPIO_Port,  led_blue_Pin,  GPIO_PIN_SET);
+  /*SD 卡初始化不放这里：HAL_SD_Init 在无卡/异常卡上可能长时间阻塞，
+   *放在调度器启动前会直接卡死 GUI。改由低优先级 SdCardTask 延后执行*/
   /* USER CODE END 2 */
 
   /* Init scheduler */

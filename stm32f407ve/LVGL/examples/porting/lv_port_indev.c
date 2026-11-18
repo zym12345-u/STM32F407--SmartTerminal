@@ -14,6 +14,10 @@
 #include "lvgl.h"
 #include "bsp_XPT2046.h"
 #include "PowerMgr.h"
+#include "usart.h"          /* UART_Printf：触摸采样统计打印用 */
+
+/* 触摸采样统计打印开关：排查"点不中"时置 1，稳定后置 0 */
+#define TOUCH_DEBUG_PRINT   0
 
 /**********************
  *  STATIC PROTOTYPES
@@ -65,6 +69,28 @@ static void touchpad_read(lv_indev_drv_t * indev_drv, lv_indev_data_t * data)
     static uint8_t rel_cnt = 0;
     static uint8_t pressing = 0;
 
+#if TOUCH_DEBUG_PRINT
+    /* 每 3 秒报一次累计采样统计：只有计数变化时才打印，空闲时不刷屏。
+     * call=采样次数  range=ADC越界丢弃  wild=两次采样差>10px丢弃  ok=有效按下 */
+    {
+        static uint32_t lastTick = 0;
+        static uint32_t lastCall = 0;
+        if (lv_tick_elaps(lastTick) >= 3000U)
+        {
+            uint32_t c = 0, r = 0, w = 0, o = 0;
+            lastTick = lv_tick_get();
+            XPT2046_GetStats(&c, &r, &w, &o);
+            if (c != lastCall)
+            {
+                lastCall = c;
+                UART_Printf("[TOUCH] call=%lu range=%lu wild=%lu ok=%lu\r\n",
+                            (unsigned long)c, (unsigned long)r,
+                            (unsigned long)w, (unsigned long)o);
+            }
+        }
+    }
+#endif
+
     /*Save the pressed coordinates and the state*/
     if(touchpad_is_pressed()) {
         rel_cnt = 0;
@@ -76,6 +102,15 @@ static void touchpad_read(lv_indev_drv_t * indev_drv, lv_indev_data_t * data)
             last_x = nx;
             last_y = ny;
             pressing = 1U;
+#if TOUCH_DEBUG_PRINT
+            /* 每次按下沿打一行：屏幕坐标 + 原始 ADC，后者用来反推校准偏移 */
+            {
+                uint16_t ax = 0, ay = 0;
+                XPT2046_GetRawAdc(&ax, &ay);
+                UART_Printf("[TOUCH] down x=%d y=%d adcX=%u adcY=%u\r\n",
+                            (int)nx, (int)ny, (unsigned)ax, (unsigned)ay);
+            }
+#endif
         }
         else {
             /* 按住期间坐标死区 8px:电阻屏按住时坐标会持续微抖,

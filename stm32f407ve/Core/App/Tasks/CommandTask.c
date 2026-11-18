@@ -18,8 +18,14 @@
 #include "usart.h"
 #include "FreeRTOS.h"
 #include "bsp_IWDG.h"
+#include "bsp_OtaCfg.h"
+#include "bsp_MqttCfg.h"
+#include "bsp_LogFile.h"
 #include "LEDType.h"
 #include "PowerMgr.h"
+#include "WifiNet.h"
+#include <stdio.h>
+#include <string.h>
 
 /*队列句柄由 freertos.c 创建*/
 extern osMessageQueueId_t CommandQueueHandle;
@@ -35,6 +41,105 @@ extern osMessageQueueId_t LEDQueueHandle;
 #define CMD_COLOR_GREEN     2U
 #define CMD_COLOR_BLUE      3U
 #define CMD_COLOR_INVALID   0xFFU
+
+/*文本行命令缓冲：otacfg/mqttcfg <host> [port]，与 0xAA 二进制帧共用 USART1*/
+#define CMD_LINE_BUF_SIZE   80U
+
+static char    s_line[CMD_LINE_BUF_SIZE];
+static uint8_t s_lineLen = 0U;
+
+/**
+  * 功    能：解析一行文本命令；支持 otacfg / mqttcfg 与调试用 at <原始指令>
+  * 参    数：line  以 '\0' 结尾的一行
+  * 返 回 值：无
+  * 补    充：这里只解析并投队列，写文件由 WifiTask 完成；
+  *            绝不能在本任务直接调用 OTA_Config_Set()/Mqtt_Config_Set()（LittleFS 单写者）
+  */
+static void Command_HandleLine(const char *line)
+{
+  char host[64];
+  unsigned int port = 0U;
+  int n;
+  OtaServerCfg_t cfg;
+  MqttBrokerCfg_t mqttCfg;
+
+  if ((strncmp(line, "otacfg", 6U) == 0) && (line[6] == ' '))
+  {
+    n = sscanf(line + 7, "%63s %u", host, &port);
+    if(n < 1)
+    {
+      UART_Printf("[CMD] usage: otacfg <host> [port]\r\n");
+      return;
+    }
+    if(n == 1)
+    {
+      /*没给端口就沿用当前生效值*/
+      OTA_Config_Get(&cfg);
+      port = cfg.port;
+    }
+    if((port < 1U) || (port > 65535U))
+    {
+      UART_Printf("[CMD] usage: otacfg <host> [port]\r\n");
+      return;
+    }
+
+    Wifi_PostSetOtaCfg(host, (uint16_t)port);
+    UART_Printf("[CMD] otacfg queued: %s:%u\r\n", host, port);
+    PowerMgr_Feed();
+    return;
+  }
+
+  if ((strncmp(line, "mqttcfg", 7U) == 0) && (line[7] == ' '))
+  {
+    n = sscanf(line + 8, "%63s %u", host, &port);
+    if(n < 1)
+    {
+      UART_Printf("[CMD] usage: mqttcfg <host> [port]\r\n");
+      return;
+    }
+    if(n == 1)
+    {
+      /*没给端口就沿用当前生效值*/
+      Mqtt_Config_Get(&mqttCfg);
+      port = mqttCfg.port;
+    }
+    if((port < 1U) || (port > 65535U))
+    {
+      UART_Printf("[CMD] usage: mqttcfg <host> [port]\r\n");
+      return;
+    }
+
+    Wifi_PostSetMqttCfg(host, (uint16_t)port);
+    UART_Printf("[CMD] mqttcfg queued: %s:%u\r\n", host, port);
+    PowerMgr_Feed();
+    return;
+  }
+
+  /*调试：at <原始指令>，由 WifiTask 转发给 ESP8266 并打印应答*/
+  if ((strncmp(line, "at ", 3U) == 0) && (line[3] != '\0'))
+  {
+    Wifi_PostAtProbe(line + 3);
+    UART_Printf("[CMD] at queued: %s\r\n", line + 3);
+    PowerMgr_Feed();
+    return;
+  }
+
+  /*调试：把 TF 卡上的日志文件回传到串口，电脑端无需读卡器*/
+  if (strcmp(line, "logdump") == 0)
+  {
+    if (LogFile_RequestDump() != 0U)
+    {
+      UART_Printf("[CMD] logdump queued\r\n");
+    }
+    else
+    {
+      /*日志没打开（如卡没插/没格式化）必须说出来，别让人对着不存在的输出等*/
+      UART_Printf("[CMD] logdump rejected: log not open\r\n");
+    }
+    PowerMgr_Feed();
+    return;
+  }
+}
 
 /**
   * 功    能：把串口协议里的颜色码（1~3）翻成 LED 枚举
@@ -88,11 +193,39 @@ void StartCommandTask(void *argument)
       continue;
     }
 
+    /*文本行命令分流：帧空闲时，非 0xAA 的可打印字节按行累积；
+     *半行文本被 0xAA 打断就丢弃，接下来交给帧状态机*/
+    if((commandIndex == 0U) && (receive != CMD_FRAME_HEAD))
+    {
+      if((receive == '\r') || (receive == '\n'))
+      {
+        if(s_lineLen > 0U)
+        {
+          s_line[s_lineLen] = '\0';
+          Command_HandleLine(s_line);
+          s_lineLen = 0U;
+        }
+      }
+      else if((receive >= 0x20U) && (receive <= 0x7EU))
+      {
+        if(s_lineLen < (CMD_LINE_BUF_SIZE - 1U))
+        {
+          s_line[s_lineLen++] = (char)receive;
+        }
+        else
+        {
+          s_lineLen = 0U;   /*超长行整体丢弃，等下一条换行*/
+        }
+      }
+      continue;
+    }
+
     if(commandIndex == 0U)
     {
       /*找包头*/
       if(receive == CMD_FRAME_HEAD)
       {
+        s_lineLen = 0U;     /*帧头打断半行文本，避免残字串到下一条命令*/
         command[commandIndex++] = receive;
       }
     }

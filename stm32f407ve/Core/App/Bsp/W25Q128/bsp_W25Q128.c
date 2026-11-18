@@ -54,8 +54,8 @@
 #define W25Q_CMD_JEDEC_ID       0x9FU   /* 读 JEDEC ID 9Fh，返回 EF/40/18 三字节 */
 
 /*超时：按实测值留约 10 倍余量*/
-#define W25Q_ERASE_TIMEOUT_MS   400U    /* 实测 31~35ms, 取 400ms (~11x) */
-#define W25Q_PROG_TIMEOUT_MS    10U     /* 实测 2ms, 取 10ms (5x) */
+#define W25Q_ERASE_TIMEOUT_MS   1000U   /* 实测 31~35ms，留足余量吸收偶发 BUSY 拉长 */
+#define W25Q_PROG_TIMEOUT_MS    50U     /* 实测 2ms，50ms 覆盖 WiFi 收包期间的抖动 */
 #define W25Q_SPI_BYTE_TIMEOUT   100U    /* 单字节 HAL 超时(10.5MHz 下 1 字节 <1us) */
 
 /*CS = PC13，软件 NSS*/
@@ -217,6 +217,26 @@ static void W25Q_WriteEnable(void)
 }
 
 /**
+  * 功    能：软件复位（0x66 + 0x99），用于 BUSY 卡死的恢复
+  * 参    数：无
+  * 返 回 值：无
+  * 补    充：擦除中被打断后芯片可能长期拉高 BUSY，仅重发命令无效；
+  *            复位会终止当前操作，之后重试同一条擦/写命令即可
+  */
+static void W25Q_SoftReset(void)
+{
+    W25Q_CS_LOW();
+    (void)W25Q_SpiByte(0x66U);          /* Enable Reset */
+    W25Q_CS_HIGH();
+    W25Q_Delay1ms();
+
+    W25Q_CS_LOW();
+    (void)W25Q_SpiByte(0x99U);          /* Reset Device */
+    W25Q_CS_HIGH();
+    W25Q_Delay1ms();                     /* tRST 约 30us，1ms 足够 */
+}
+
+/**
   * 功    能：读 JEDEC ID（0x9F）。链路有问题时会读到 0x00FFFF 或 0xFFFFFF，可据此判断
   * 参    数：无
   * 返 回 值：0x00EF4018 形式；链路异常时可能读到 0x00FFFF 或 0xFFFFFF
@@ -294,7 +314,8 @@ HAL_StatusTypeDef W25Q128_ReadData(uint32_t addr, uint8_t *pData, uint32_t num)
   */
 HAL_StatusTypeDef W25Q128_SectorErase4K(uint32_t addr)
 {
-    HAL_StatusTypeDef st;
+    HAL_StatusTypeDef st = HAL_TIMEOUT;
+    uint8_t           attempt;
 
     if (s_initOk == 0U)
     {
@@ -308,22 +329,45 @@ HAL_StatusTypeDef W25Q128_SectorErase4K(uint32_t addr)
         return HAL_ERROR;
     }
 
-    /*先等空闲再发 06h：BUSY 期间 06h 被忽略，擦除因 WEL=0 被丢弃，表现为静默失败*/
-    st = W25Q128_WaitReady(W25Q_ERASE_TIMEOUT_MS);   /* 先等前一次操作完成 */
-    if (st != HAL_OK)
+    /*偶发 BUSY 超时重试一次：OTA 擦槽 B 时曾被 WiFi 收包打断到 400ms 超时，
+      重发同一条 20h 是幂等的，不会擦坏别的区域。*/
+    for (attempt = 0U; attempt < 2U; attempt++)
     {
-        return st;
+        /*先等空闲再发 06h：BUSY 期间 06h 被忽略，擦除因 WEL=0 被丢弃，表现为静默失败*/
+        st = W25Q128_WaitReady(W25Q_ERASE_TIMEOUT_MS);   /* 先等前一次操作完成 */
+        if (st == HAL_OK)
+        {
+            W25Q_WriteEnable();
+
+            W25Q_CS_LOW();
+            (void)W25Q_SpiByte(W25Q_CMD_SECTOR_ERASE);
+            (void)W25Q_SpiByte((uint8_t)(addr >> 16));
+            (void)W25Q_SpiByte((uint8_t)(addr >> 8));
+            (void)W25Q_SpiByte((uint8_t)addr);
+            W25Q_CS_HIGH();
+
+            st = W25Q128_WaitReady(W25Q_ERASE_TIMEOUT_MS); /* 等擦除完成, 耗时入 s_lastBusyMs */
+        }
+
+        if (st == HAL_OK)
+        {
+            if (attempt != 0U)
+            {
+                UART_Printf("[W25Q] erase retry OK @0x%06lX\r\n",
+                            (unsigned long)addr);
+            }
+            return HAL_OK;
+        }
+
+        UART_Printf("[W25Q] erase timeout @0x%06lX try=%u busy=%lums sr=0x%02X\r\n",
+                    (unsigned long)addr, (unsigned)(attempt + 1U),
+                    (unsigned long)W25Q128_GetLastBusyMs(),
+                    (unsigned)W25Q128_ReadStatus1());
+        W25Q_SoftReset();
+        W25Q_Delay1ms();
     }
-    W25Q_WriteEnable();
 
-    W25Q_CS_LOW();
-    (void)W25Q_SpiByte(W25Q_CMD_SECTOR_ERASE);
-    (void)W25Q_SpiByte((uint8_t)(addr >> 16));
-    (void)W25Q_SpiByte((uint8_t)(addr >> 8));
-    (void)W25Q_SpiByte((uint8_t)addr);
-    W25Q_CS_HIGH();
-
-    return W25Q128_WaitReady(W25Q_ERASE_TIMEOUT_MS); /* 等擦除完成, 耗时入 s_lastBusyMs */
+    return st;
 }
 
 /**
@@ -337,8 +381,9 @@ HAL_StatusTypeDef W25Q128_SectorErase4K(uint32_t addr)
   */
 HAL_StatusTypeDef W25Q128_PageProgram(uint32_t addr, const uint8_t *pData, uint16_t len)
 {
-    HAL_StatusTypeDef st;
+    HAL_StatusTypeDef st = HAL_TIMEOUT;
     uint16_t          i;
+    uint8_t           attempt;
 
     if (s_initOk == 0U)
     {
@@ -357,26 +402,49 @@ HAL_StatusTypeDef W25Q128_PageProgram(uint32_t addr, const uint8_t *pData, uint1
         return HAL_ERROR;
     }
 
-    /*同擦除：先等空闲再发 06h，忙时 06h 被忽略则静默失败*/
-    st = W25Q128_WaitReady(W25Q_PROG_TIMEOUT_MS);
-    if (st != HAL_OK)
+    /*偶发 BUSY 超时重试一次：同一页重复写相同数据是安全的（NOR 只做 1→0）。
+      现场表现为 WiFi 收包期间偶发一次编程超时，直接放弃会让整包重下几百 KB。*/
+    for (attempt = 0U; attempt < 2U; attempt++)
     {
-        return st;
-    }
-    W25Q_WriteEnable();
+        /*同擦除：先等空闲再发 06h，忙时 06h 被忽略则静默失败*/
+        st = W25Q128_WaitReady(W25Q_PROG_TIMEOUT_MS);
+        if (st == HAL_OK)
+        {
+            W25Q_WriteEnable();
 
-    W25Q_CS_LOW();
-    (void)W25Q_SpiByte(W25Q_CMD_PAGE_PROGRAM);
-    (void)W25Q_SpiByte((uint8_t)(addr >> 16));
-    (void)W25Q_SpiByte((uint8_t)(addr >> 8));
-    (void)W25Q_SpiByte((uint8_t)addr);
-    for (i = 0U; i < len; i++)
-    {
-        (void)W25Q_SpiByte(pData[i]);
-    }
-    W25Q_CS_HIGH();
+            W25Q_CS_LOW();
+            (void)W25Q_SpiByte(W25Q_CMD_PAGE_PROGRAM);
+            (void)W25Q_SpiByte((uint8_t)(addr >> 16));
+            (void)W25Q_SpiByte((uint8_t)(addr >> 8));
+            (void)W25Q_SpiByte((uint8_t)addr);
+            for (i = 0U; i < len; i++)
+            {
+                (void)W25Q_SpiByte(pData[i]);
+            }
+            W25Q_CS_HIGH();
 
-    return W25Q128_WaitReady(W25Q_PROG_TIMEOUT_MS);
+            st = W25Q128_WaitReady(W25Q_PROG_TIMEOUT_MS);
+        }
+
+        if (st == HAL_OK)
+        {
+            if (attempt != 0U)
+            {
+                UART_Printf("[W25Q] program retry OK @0x%06lX\r\n",
+                            (unsigned long)addr);
+            }
+            return HAL_OK;
+        }
+
+        UART_Printf("[W25Q] program timeout @0x%06lX try=%u busy=%lums sr=0x%02X\r\n",
+                    (unsigned long)addr, (unsigned)(attempt + 1U),
+                    (unsigned long)W25Q128_GetLastBusyMs(),
+                    (unsigned)W25Q128_ReadStatus1());
+        W25Q_SoftReset();
+        W25Q_Delay1ms();
+    }
+
+    return st;
 }
 
 /**
@@ -461,6 +529,8 @@ uint8_t W25Q128_Init(void)
                     (unsigned long)jedec, (unsigned long)W25Q128_JEDEC_ID_EXPECT);
         UART_Printf("[W25Q] device ID(0x90) = 0x%04X (expect 0x%04X)\r\n",
                     (unsigned)dev, (unsigned)W25Q128_DEVICE_ID_EXPECT);
+        UART_Printf("[W25Q] SR1 = 0x%02X (BP bits protect sectors when set)\r\n",
+                    (unsigned)W25Q128_ReadStatus1());
 
         s_initOk = (jedec == W25Q128_JEDEC_ID_EXPECT &&
                     dev   == W25Q128_DEVICE_ID_EXPECT) ? 1U : 0U;

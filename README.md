@@ -1,6 +1,6 @@
 # STM32F407 环境监测智能终端
 
-基于 **STM32F407VET6 + FreeRTOS + LVGL** 的多任务环境监测终端：温湿度/光照采集、触摸屏 UI、WiFi 配网对时、RS485 Modbus RTU 从站、CAN 总线节点、串口 IAP / WiFi OTA、独立看门狗任务健康监控。
+基于 **STM32F407VET6 + FreeRTOS + LVGL** 的多任务环境监测终端：温湿度/光照采集、触摸屏 UI、WiFi 配网对时、RS485 Modbus RTU 从站、CAN 总线节点、串口 IAP / WiFi OTA、SDIO/FatFS 文件存储、独立看门狗任务健康监控。
 
 > 个人学习/求职项目。所有架构取舍均在代码注释中写明理由，欢迎 issue 交流。
 
@@ -17,6 +17,7 @@
 | RS485 | 板载收发器，自动方向 | USART3 (PB10/PB11)，免跳线 |
 | CAN | 板载收发器，CAN1 | PB8/PB9 (AF9)，500 kbps，板端 120Ω 终端 |
 | 调试口 | 板载 USB-TTL | USART1，115200 |
+| TF 卡 | SDIO 4-bit | PC8~PC11=D0~D3、PC12=CK、PD2=CMD，AF12；FAT16/32 |
 
 ## 软件特性
 
@@ -75,6 +76,38 @@
 - **槽 A/B 记录扇区重叠**：原槽 B 基址 `0x00870000` 会让槽 B 的 4KB 记录扇区压住槽 A 448KB 备份的最后 4KB，写 OTA 记录即破坏槽 A 整区 CRC，回滚基线永久失效。已把槽 B 上移到 `0x00871000`；旧槽 A 备份和旧槽 B 镜像必须重新生成。
 - **Rollback 后元数据 size 语义**：回滚用的是槽 A 整区备份，`meta.size` 会记成 448KB 整区而不是实际 App 字节数；不影响启动，列入 V2.1 清理项。
 
+**V2.2（已验证，2026-11-10）**
+- **MQTT 上云**：Mosquitto 3.1.1，遥测 1Hz 上行（温湿度/光照/时间戳/固件版本），`status` retained + LWT 离线遗嘱
+- **下行命令**：`ping` / `led` / `ota`，QoS1 + 环形队列；MQTT 会话层只搬运，业务解析全在 WifiTask
+- **远程升级通知**：服务器向 `stm32/dev01/ota` 推 `{"ver":"1.6"}`，设备只更新本地“发现新版本”并回执，不发起 HTTP
+- **远程检查/下载**：`check` 走一次 HTTP 读 `app.meta`，`download` 直接升级；操作前先 `Mqtt_Stop` 让出 ESP8266 单 TCP，结果在重连后补发
+- **升级结果确认**：遥测带 `"fw"` 字段，远程不用额外查询就能确认设备已跑在新版本
+- **Broker 运行时可配**：串口 `mqttcfg <host> [port]` 写 `/mqtt.conf`，无需重编
+
+### V2.2 实战踩坑（已修复）
+- **OTA 主题自发自收回环**：设备把回执也发到 `stm32/dev01/ota`，而它自己也订阅该主题，Broker 把回执投回后设备不认识就再回一条 `unknown`，形成无限回环。修复：带 `"ack"` 字段的消息一律视为本机回执直接丢弃，未知消息只记日志不回包。
+
+**V2.3（已验证，2026-11-13，固件 1.8）**
+- **SDIO 4-bit + FatFS**：2GB TF 卡挂载为 `0:/`，实测容量 1.84GiB，文件写/读/逐字节比对全部通过
+- **低优先级延后初始化**：`SdCardTask` 在调度器启动 3s 后执行，`HAL_SD_Init` 再慢也不挡 GUI/WiFi
+- **4-bit 按官方流程切换**：先 1-bit 完成卡识别，再 `HAL_SD_ConfigWideBusOperation()` 发 ACMD6，最后真读一个扇区确认数据线
+- **写后等待**：轮询 `HAL_SD_GetCardState()` 直到卡退出 PROGRAMMING，再发起下一次访问
+- **遥测带存储状态**：`"sd"`（是否就绪）、`"sdkb"`（容量 KB），联调期免串口观察
+- **日志回传**：串口发送 `logdump`，`0:/LOG.TXT` 内容分块回传到串口，电脑没有读卡器也能查看
+
+### V2.3 实战踩坑（已修复）
+- **4-bit 只改主机不改卡**：把 `Init.BusWide = 4B` 直接传给 `HAL_SD_Init`，只写了主机 CLKCR.WIDBUS，卡仍工作在单线；主机按 4 线收，D1~D3 没有起始位，SDIO 报 **STBITERR**。正确做法是先 1-bit 识别，再调 `HAL_SD_ConfigWideBusOperation()` 发 ACMD6。
+- **SD 初始化放 `main()` 会黑屏**：调度器启动前调用 `HAL_SD_Init`，无卡或异常卡时会长时间轮询，直接把 GUI 卡死。
+- **写扇区后只查一次卡状态**：卡内部编程尚未结束就发起下一次访问，后续命令报 `CMD_RSP_TIMEOUT`，表现为 `f_mount` 成功但 `f_open` 返回 `FR_DISK_ERR`。
+
+**V2.4 / 固件 1.9（封版验证，2026-11-18）**
+- **日志异步落盘**：低优先级队列写 `0:/LOG.TXT`，64KB 滚动；传感器数值变化才记录，稳定时每 30s 兜底一条
+- **OTA 备份补强**：远程下载前自动补槽 A 备份，独立 `BACKUP` 状态与错误码；串口 IAP 备份失败后仍可重试
+- **Flash 容错**：W25Q 擦写超时软复位并重试，补充 SR1/地址/耗时日志；OTA 状态行使用 ASCII，避免外挂字库忙时黑块/白块
+- **MQTT 小修**：SUBACK 被拒进入重连，缓冲满日志增加空帧越界保护
+- **日志故障反馈**：打开失败打印 FatFS 错误并重挂载一次；`logdump` 未打开明确拒绝，读错误重试一次、仍失败明确中止，不作假成功
+- **真机回归**：串口 IAP 与远程 OTA 均通过；远程链路完成槽 A 备份、双重 CRC、BootLoader 搬运和启动确认；`logdump` 完整回传 `34007/34007` 字节
+
 ## 任务一览
 
 | 任务 | 优先级 | 职责 |
@@ -89,14 +122,15 @@
 | MonitorTask | 40 | 心跳监控 + 喂狗（500ms） |
 | CommandTask | 41 | 串口命令 |
 | StatsTask | 8 | 栈水位/CPU 占比统计 |
+| SdCardTask | 8 | TF 卡延后初始化 + 文件读写自检 |
 
 ## 构建
 
 - Keil MDK5（AC5 编译器）
   - App 工程：`stm32f407ve/MDK-ARM/stm32f407ve.uvprojx`
   - BootLoader 工程：`stm32f407ve/MDK-ARM/BootLoader.uvprojx`
-- 当前固件指标（V2.0，2026-11-08 重测）：
-  - App：`Code=232532 (227.1KB) / RO=79624 (77.8KB) / RW=1156 (1.1KB) / ZI=113020 (110.4KB)`
+- 当前固件指标（V2.4 / 固件 1.9，2026-11-18 重测）：
+  - App：`Code=241400 (235.7KB) / RO=80056 (78.2KB) / RW=1332 (1.3KB) / ZI=121256 (118.4KB)`
   - BootLoader：`Code=8140 (7.9KB) / RO=424 (0.4KB) / RW=20B / ZI=5476 (5.3KB)`，远低于 48KB 分区
   - FreeRTOS 堆 32KB
 - OTA 工具：`Tools/iap_upgrade.py`（串口 IAP）、`Tools/ota_serve.py`（生成 `app.bin`/`app.meta` + 本地 HTTP 服务）
@@ -107,9 +141,10 @@ USART1（板载 USB-TTL，115200）输出全部运行日志：boot 复位源、�
 
 ## Roadmap（远景）
 
-- V2.1：OTA 产品化（服务器地址可配置、启动/手动检查更新、一键升级并自动复位、失败重试）
-- V2.2：MQTT 上云（传感器上报、下行命令、远程升级通知）
-- SDIO/TF 卡、文件日志
+- V2.1：OTA 产品化（服务器地址可配置、启动/手动检查更新、一键升级并自动复位、失败重试）— 已完成
+- V2.2：MQTT 上云（传感器上报、下行命令、远程升级通知）— 已完成
+- V2.3：SDIO 4-bit + FatFS 挂载与读写 — 已完成
+- V2.4：日志异步落盘 + 64KB 滚动 + logdump 回传 — 已完成
 
 ## 仓库结构
 
@@ -117,8 +152,9 @@ USART1（板载 USB-TTL，115200）输出全部运行日志：boot 复位源、�
 stm32f407ve/
   BootLoader/         BootLoader 工程（config/port/core 三层，无 HAL）
   Core/App/Tasks/     应用任务层
-  Core/App/Bsp/       板级驱动（RS485/ESP8266/IWDG/Flash/CAN/LCD/触摸/传感器/OTA/W25Q128）
-  Core/Src/           CubeMX 生成 + freertos.c 任务装配
+  Core/App/Bsp/       板级驱动（RS485/ESP8266/IWDG/Flash/CAN/LCD/触摸/传感器/OTA/W25Q128/SDCard）
+  Core/Src/           CubeMX 生成 + freertos.c 任务装配 + SDIO/FatFS 桥接
   Middlewares/Third_Party/littlefs/  LittleFS 文件系统
+  Middlewares/Third_Party/FatFS/     FatFS（TF 卡）
   Tools/              iap_upgrade.py（串口 IAP）/ ota_serve.py（OTA 包 + HTTP 服务）
 ```

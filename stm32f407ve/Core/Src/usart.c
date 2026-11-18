@@ -38,6 +38,7 @@
 #include "FreeRTOS.h"
 #include "cmsis_os.h"
 #include "bsp_RS485.h"   /*s_rxByte 与 RS485_RxByteISR*/
+#include "bsp_LogFile.h" /*日志异步落盘：投递到队列，由 SdCardTask 写卡*/
 
 extern osMessageQueueId_t CommandQueueHandle;   /*ISR 向队列投递命令字节*/
 
@@ -528,6 +529,10 @@ void UART_Printf(const char *fmt, ...)
       }
     }
     uart1DmaBusy = 0U;
+
+    /*同一份日志异步落盘：只做内存拷贝入队，SD 未就绪/队列满时直接丢弃。
+     *这里仍在打印锁内，但 Push 不阻塞，不会拉长持锁时间*/
+    LogFile_Push(uart1PrintfBuf, (uint16_t)len);
   }
 
   (void)osMutexRelease(uart1PrintfMutex);
