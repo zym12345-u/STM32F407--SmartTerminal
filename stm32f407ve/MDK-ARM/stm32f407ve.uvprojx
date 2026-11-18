@@ -683,6 +683,26 @@
               <FilePath>..\Core\App\Tasks\WifiTask.c</FilePath>
             </File>
             <File>
+              <FileName>WifiAt.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Tasks\WifiAt.c</FilePath>
+            </File>
+            <File>
+              <FileName>WifiCmd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Tasks\WifiCmd.c</FilePath>
+            </File>
+            <File>
+              <FileName>WifiMqtt.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Tasks\WifiMqtt.c</FilePath>
+            </File>
+            <File>
+              <FileName>WifiTaskInternal.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\App\Tasks\WifiTaskInternal.h</FilePath>
+            </File>
+            <File>
               <FileName>ModbusTask.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Tasks\ModbusTask.c</FilePath>
