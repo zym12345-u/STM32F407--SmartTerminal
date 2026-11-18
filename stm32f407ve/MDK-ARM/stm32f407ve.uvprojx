@@ -653,6 +653,26 @@
               <FilePath>..\Core\App\Tasks\GuiTask.c</FilePath>
             </File>
             <File>
+              <FileName>GuiCommon.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\App\Tasks\GuiCommon.h</FilePath>
+            </File>
+            <File>
+              <FileName>GuiOtaScreen.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Tasks\GuiOtaScreen.c</FilePath>
+            </File>
+            <File>
+              <FileName>GuiWifiScreen.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Tasks\GuiWifiScreen.c</FilePath>
+            </File>
+            <File>
+              <FileName>GuiMainScreen.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Tasks\GuiMainScreen.c</FilePath>
+            </File>
+            <File>
               <FileName>SensorTask.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Tasks\SensorTask.c</FilePath>
