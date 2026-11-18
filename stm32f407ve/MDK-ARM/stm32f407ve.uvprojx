@@ -708,6 +708,11 @@
               <FilePath>../Core/App/Gui/GuiOtaScreen.c</FilePath>
             </File>
             <File>
+              <FileName>GuiOtaStatus.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Gui/GuiOtaStatus.c</FilePath>
+            </File>
+            <File>
               <FileName>GuiOtaSerial.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/App/Gui/GuiOtaSerial.c</FilePath>
