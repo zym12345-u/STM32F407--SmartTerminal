@@ -100,6 +100,14 @@
 - **SD 初始化放 `main()` 会黑屏**：调度器启动前调用 `HAL_SD_Init`，无卡或异常卡时会长时间轮询，直接把 GUI 卡死。
 - **写扇区后只查一次卡状态**：卡内部编程尚未结束就发起下一次访问，后续命令报 `CMD_RSP_TIMEOUT`，表现为 `f_mount` 成功但 `f_open` 返回 `FR_DISK_ERR`。
 
+**V2.4 / 固件 1.9（封版验证，2026-11-18）**
+- **日志异步落盘**：低优先级队列写 `0:/LOG.TXT`，64KB 滚动；传感器数值变化才记录，稳定时每 30s 兜底一条
+- **OTA 备份补强**：远程下载前自动补槽 A 备份，独立 `BACKUP` 状态与错误码；串口 IAP 备份失败后仍可重试
+- **Flash 容错**：W25Q 擦写超时软复位并重试，补充 SR1/地址/耗时日志；OTA 状态行使用 ASCII，避免外挂字库忙时黑块/白块
+- **MQTT 小修**：SUBACK 被拒进入重连，缓冲满日志增加空帧越界保护
+- **日志故障反馈**：打开失败打印 FatFS 错误并重挂载一次；`logdump` 未打开明确拒绝，读错误重试一次、仍失败明确中止，不作假成功
+- **真机回归**：串口 IAP 与远程 OTA 均通过；远程链路完成槽 A 备份、双重 CRC、BootLoader 搬运和启动确认；`logdump` 完整回传 `34007/34007` 字节
+
 ## 任务一览
 
 | 任务 | 优先级 | 职责 |
@@ -121,8 +129,8 @@
 - Keil MDK5（AC5 编译器）
   - App 工程：`stm32f407ve/MDK-ARM/stm32f407ve.uvprojx`
   - BootLoader 工程：`stm32f407ve/MDK-ARM/BootLoader.uvprojx`
-- 当前固件指标（V2.3 / 固件 1.8，2026-11-13 重测）：
-  - App：`Code=255676 (249.7KB) / RO=80248 (78.4KB) / RW=1420 (1.4KB) / ZI=117556 (114.8KB)`
+- 当前固件指标（V2.4 / 固件 1.9，2026-11-18 重测）：
+  - App：`Code=241400 (235.7KB) / RO=80056 (78.2KB) / RW=1332 (1.3KB) / ZI=121256 (118.4KB)`
   - BootLoader：`Code=8140 (7.9KB) / RO=424 (0.4KB) / RW=20B / ZI=5476 (5.3KB)`，远低于 48KB 分区
   - FreeRTOS 堆 32KB
 - OTA 工具：`Tools/iap_upgrade.py`（串口 IAP）、`Tools/ota_serve.py`（生成 `app.bin`/`app.meta` + 本地 HTTP 服务）
