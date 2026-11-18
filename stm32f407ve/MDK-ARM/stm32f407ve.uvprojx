@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32F407xx,MY_DISP_HOR_RES=320,MY_DISP_VER_RES=240</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/I2CBus;../Core/App/Bsp/24C02;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/WifiStore;../Core/App/Bsp/RS485;../Core/App/Bsp/IWDG;../Core/App/Bsp/W25Q128;../Core/App/Bsp/OTA;../Middlewares/Third_Party/littlefs;../Core/App/Bsp/LittleFS;../Core/App/Bsp/Font;../Core/App/Bsp/CAN;../Core/App/Bsp/MQTT;../Middlewares/Third_Party/FatFS/src;../Core/App/Bsp/SDCard</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc;../Drivers/STM32F4xx_HAL_Driver/Inc/Legacy;../Drivers/CMSIS/Device/ST/STM32F4xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Core/App/Types;../Core/App/Tasks;../LVGL;../LVGL/src;../LVGL/examples/porting;../Core/App/Bsp/LCD_ILI9341;../Core/App/Bsp/XPT2046;../Core/App/Bsp/I2CBus;../Core/App/Bsp/24C02;../Core/App/Bsp/BH1750;../Core/App/Bsp/DHT11;../Core/App/Bsp/ESP8266;../Core/App/Bsp/WifiStore;../Core/App/Bsp/RS485;../Core/App/Bsp/IWDG;../Core/App/Bsp/W25Q128;../Core/App/Bsp/OTA;../Middlewares/Third_Party/littlefs;../Core/App/Bsp/LittleFS;../Core/App/Bsp/Font;../Core/App/Bsp/CAN;../Core/App/Bsp/MQTT;../Middlewares/Third_Party/FatFS/src;../Core/App/Bsp/SDCard;../Core/App/Gui;../Core/App/Wifi</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -653,26 +653,6 @@
               <FilePath>..\Core\App\Tasks\GuiTask.c</FilePath>
             </File>
             <File>
-              <FileName>GuiCommon.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Core\App\Tasks\GuiCommon.h</FilePath>
-            </File>
-            <File>
-              <FileName>GuiOtaScreen.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Core\App\Tasks\GuiOtaScreen.c</FilePath>
-            </File>
-            <File>
-              <FileName>GuiWifiScreen.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Core\App\Tasks\GuiWifiScreen.c</FilePath>
-            </File>
-            <File>
-              <FileName>GuiMainScreen.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Core\App\Tasks\GuiMainScreen.c</FilePath>
-            </File>
-            <File>
               <FileName>SensorTask.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Tasks\SensorTask.c</FilePath>
@@ -681,26 +661,6 @@
               <FileName>WifiTask.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Tasks\WifiTask.c</FilePath>
-            </File>
-            <File>
-              <FileName>WifiAt.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Core\App\Tasks\WifiAt.c</FilePath>
-            </File>
-            <File>
-              <FileName>WifiCmd.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Core\App\Tasks\WifiCmd.c</FilePath>
-            </File>
-            <File>
-              <FileName>WifiMqtt.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Core\App\Tasks\WifiMqtt.c</FilePath>
-            </File>
-            <File>
-              <FileName>WifiTaskInternal.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Core\App\Tasks\WifiTaskInternal.h</FilePath>
             </File>
             <File>
               <FileName>ModbusTask.c</FileName>
@@ -731,6 +691,56 @@
               <FileName>CanData.h</FileName>
               <FileType>5</FileType>
               <FilePath>../Core/App/Types/CanData.h</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Application/Gui</GroupName>
+          <Files>
+            <File>
+              <FileName>GuiCommon.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/App/Gui/GuiCommon.h</FilePath>
+            </File>
+            <File>
+              <FileName>GuiOtaScreen.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Gui/GuiOtaScreen.c</FilePath>
+            </File>
+            <File>
+              <FileName>GuiWifiScreen.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Gui/GuiWifiScreen.c</FilePath>
+            </File>
+            <File>
+              <FileName>GuiMainScreen.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Gui/GuiMainScreen.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Application/Wifi</GroupName>
+          <Files>
+            <File>
+              <FileName>WifiAt.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Wifi/WifiAt.c</FilePath>
+            </File>
+            <File>
+              <FileName>WifiCmd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Wifi/WifiCmd.c</FilePath>
+            </File>
+            <File>
+              <FileName>WifiMqtt.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/App/Wifi/WifiMqtt.c</FilePath>
+            </File>
+            <File>
+              <FileName>WifiTaskInternal.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>../Core/App/Wifi/WifiTaskInternal.h</FilePath>
             </File>
           </Files>
         </Group>
