@@ -9,7 +9,7 @@
 #include "bsp_LCD_ILI9341.h"
 
 /* Bank1/NE1 + FSMC_A16 接 RS：A16=0 访问 0x6001FFFE 写命令，A16=1 访问 0x60020000 写数据 */
-typedef struct
+typedef volatile struct
 {
     uint16_t LCD_REG;
     uint16_t LCD_RAM;
