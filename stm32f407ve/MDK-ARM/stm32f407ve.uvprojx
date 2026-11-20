@@ -3318,6 +3318,21 @@
               <FilePath>..\Core\App\Bsp\LCD_ILI9341\bsp_LCD_ILI9341.c</FilePath>
             </File>
             <File>
+              <FileName>bsp_LcdDraw.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\LCD_ILI9341\bsp_LcdDraw.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_LcdDma.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\LCD_ILI9341\bsp_LcdDma.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_LcdInternal.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\App\Bsp\LCD_ILI9341\bsp_LcdInternal.h</FilePath>
+            </File>
+            <File>
               <FileName>bsp_XPT2046.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Core\App\Bsp\XPT2046\bsp_XPT2046.c</FilePath>
