@@ -3393,6 +3393,26 @@
               <FilePath>..\Core\App\Bsp\OTA\bsp_OTA.c</FilePath>
             </File>
             <File>
+              <FileName>bsp_OtaHttp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\OTA\bsp_OtaHttp.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_OtaStore.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\OTA\bsp_OtaStore.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_OtaBackup.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\App\Bsp\OTA\bsp_OtaBackup.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_OtaInternal.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Core\App\Bsp\OTA\bsp_OtaInternal.h</FilePath>
+            </File>
+            <File>
               <FileName>bsp_OTA.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Core\App\Bsp\OTA\bsp_OTA.h</FilePath>
